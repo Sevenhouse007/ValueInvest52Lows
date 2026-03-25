@@ -1,0 +1,153 @@
+"""SQLite database operations for persisting scan results."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from datetime import date, datetime
+from pathlib import Path
+from typing import Optional
+
+from server.config import DB_PATH
+from server.models import ScanHistoryEntry, ScanResult, ScoredStock, SectorAverages
+
+
+def _ensure_db_dir():
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+
+
+@contextmanager
+def get_db():
+    _ensure_db_dir()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def init_db():
+    """Create tables if they don't exist."""
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date TEXT NOT NULL,
+                scanned_at TEXT NOT NULL,
+                total_stocks INTEGER DEFAULT 0,
+                sector_averages_json TEXT DEFAULT '{}',
+                UNIQUE(scan_date)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scan_stocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                value_score INTEGER DEFAULT 0,
+                sector TEXT DEFAULT '',
+                UNIQUE(scan_date, symbol)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scan_stocks_date
+            ON scan_stocks(scan_date)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scan_stocks_score
+            ON scan_stocks(value_score DESC)
+        """)
+
+
+def save_scan(result: ScanResult):
+    """Persist a scan result, replacing any existing data for that date."""
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM scan_stocks WHERE scan_date = ?",
+            (result.scan_date,),
+        )
+        conn.execute(
+            "DELETE FROM scans WHERE scan_date = ?",
+            (result.scan_date,),
+        )
+        sector_avg_json = json.dumps(
+            {k: v.model_dump() for k, v in result.sector_averages.items()}
+        )
+        conn.execute(
+            "INSERT INTO scans (scan_date, scanned_at, total_stocks, sector_averages_json) VALUES (?, ?, ?, ?)",
+            (result.scan_date, result.scanned_at, result.total_stocks, sector_avg_json),
+        )
+        for stock in result.stocks:
+            conn.execute(
+                "INSERT INTO scan_stocks (scan_date, symbol, data_json, value_score, sector) VALUES (?, ?, ?, ?, ?)",
+                (
+                    result.scan_date,
+                    stock.symbol,
+                    stock.model_dump_json(),
+                    stock.value_score,
+                    stock.sector,
+                ),
+            )
+
+
+def get_latest_scan() -> Optional[ScanResult]:
+    """Get the most recent scan."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM scans ORDER BY scan_date DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        return _load_scan(conn, row)
+
+
+def get_scan_by_date(scan_date: str) -> Optional[ScanResult]:
+    """Get scan results for a specific date."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM scans WHERE scan_date = ?", (scan_date,)
+        ).fetchone()
+        if not row:
+            return None
+        return _load_scan(conn, row)
+
+
+def get_scan_history() -> list[ScanHistoryEntry]:
+    """Get list of all available scan dates."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT scan_date, scanned_at, total_stocks FROM scans ORDER BY scan_date DESC"
+        ).fetchall()
+        return [
+            ScanHistoryEntry(
+                scan_date=r["scan_date"],
+                scanned_at=r["scanned_at"],
+                total_stocks=r["total_stocks"],
+            )
+            for r in rows
+        ]
+
+
+def _load_scan(conn: sqlite3.Connection, scan_row: sqlite3.Row) -> ScanResult:
+    stock_rows = conn.execute(
+        "SELECT data_json FROM scan_stocks WHERE scan_date = ? ORDER BY value_score DESC",
+        (scan_row["scan_date"],),
+    ).fetchall()
+
+    stocks = [ScoredStock.model_validate_json(r["data_json"]) for r in stock_rows]
+
+    raw_avgs = json.loads(scan_row["sector_averages_json"] or "{}")
+    sector_averages = {k: SectorAverages(**v) for k, v in raw_avgs.items()}
+
+    return ScanResult(
+        scan_date=scan_row["scan_date"],
+        scanned_at=scan_row["scanned_at"],
+        total_stocks=scan_row["total_stocks"],
+        stocks=stocks,
+        sector_averages=sector_averages,
+    )
