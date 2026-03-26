@@ -54,6 +54,24 @@ def detect_sector_type(sector: str, industry: str) -> str:
 # Generic ratio-based scoring
 # =====================================================================
 
+# Absolute-value thresholds for the bonus/penalty nudge (20% weight).
+# These are "universal truths" — a P/E under 10 is cheap in any sector.
+_ABSOLUTE_THRESHOLDS = {
+    #                     (strong_cheap, cheap, expensive)
+    "Fwd P/E":            (8,   12,  40),
+    "Fwd P/E (normalized)": (7, 10,  40),
+    "P/B":                (1.0, 1.5, 8),
+    "P/B (NAV proxy)":    (0.9, 1.2, 5),
+    "EV/EBITDA":          (6,   9,   30),
+}
+
+_ABSOLUTE_THRESHOLDS_HIGHER = {
+    #                     (strong, good, weak)
+    "ROE":                (0.20, 0.12, 0.0),
+    "Div Yield":          (0.06, 0.04, 0.0),
+}
+
+
 def _ratio_score(
     value: Optional[float],
     avg: Optional[float],
@@ -63,15 +81,12 @@ def _ratio_score(
     *,
     allow_negative_penalty: bool = True,
 ) -> tuple[int, list[str]]:
-    """Score a metric based on how far it deviates from the peer average.
+    """Hybrid scorer: 80% ratio-based + 20% absolute-value nudge.
 
-    For ``lower_is_better`` metrics (P/E, P/B, EV/EBITDA):
-        ratio = value / avg.  Lower ratio = cheaper = more points.
-
-    For ``higher_is_better`` metrics (ROE, div yield, FCF yield):
-        ratio = value / avg.  Higher ratio = better = more points.
-
-    Returns (points, reasons_list).
+    The ratio component scores how cheap/expensive vs peers.
+    The absolute component adds a bonus when the raw number is
+    exceptionally good, or removes points when the raw number is
+    bad despite looking cheap relative to an expensive sector.
     """
     if value is None or avg is None or avg == 0:
         return 0, []
@@ -80,38 +95,82 @@ def _ratio_score(
     if value < 0 and avg > 0 and allow_negative_penalty:
         return -int(max_pts * 0.4), [f"Negative {label}"]
 
+    ratio_pts = 0
+    abs_pts = 0
+    reasons: list[str] = []
+
     if lower_is_better:
         if value <= 0:
-            return 0, []  # negative P/E etc. handled by dedicated penalty
+            return 0, []
+
+        # ── Ratio component (80% weight) ──
         ratio = value / avg
+        ratio_max = int(max_pts * 0.80)
         if ratio <= 0.30:
-            return max_pts, [f"{label} extremely cheap vs peers ({ratio:.1f}x avg)"]
-        if ratio <= 0.50:
-            return int(max_pts * 0.85), [f"{label} very cheap vs peers ({ratio:.1f}x)"]
-        if ratio <= 0.65:
-            return int(max_pts * 0.65), [f"{label} cheap vs peers ({ratio:.1f}x)"]
-        if ratio <= 0.80:
-            return int(max_pts * 0.45), [f"{label} below peers ({ratio:.1f}x)"]
-        if ratio <= 0.95:
-            return int(max_pts * 0.20), []
-        # At or above sector average — no bonus, but no penalty either.
-        # Being "expensive" at a 52W low usually means quality premium, not a flaw.
-        return 0, []
+            ratio_pts = ratio_max
+            reasons.append(f"{label} extremely cheap vs peers ({ratio:.1f}x avg)")
+        elif ratio <= 0.50:
+            ratio_pts = int(ratio_max * 0.85)
+            reasons.append(f"{label} very cheap vs peers ({ratio:.1f}x)")
+        elif ratio <= 0.65:
+            ratio_pts = int(ratio_max * 0.65)
+            reasons.append(f"{label} cheap vs peers ({ratio:.1f}x)")
+        elif ratio <= 0.80:
+            ratio_pts = int(ratio_max * 0.45)
+            reasons.append(f"{label} below peers ({ratio:.1f}x)")
+        elif ratio <= 0.95:
+            ratio_pts = int(ratio_max * 0.20)
+
+        # ── Absolute component (20% weight) ──
+        abs_max = max_pts - ratio_max  # remaining 20%
+        thresholds = _ABSOLUTE_THRESHOLDS.get(label)
+        if thresholds:
+            strong, cheap, expensive = thresholds
+            if value <= strong:
+                abs_pts = abs_max
+                if not reasons:
+                    reasons.append(f"{label} very low ({value:.1f})")
+            elif value <= cheap:
+                abs_pts = int(abs_max * 0.50)
+            elif value >= expensive:
+                # Sanity check: even if ratio says cheap, the raw number is extreme
+                abs_pts = -int(abs_max * 0.50)
+                reasons.append(f"{label} still high in absolute terms ({value:.0f})")
+
     else:
         # Higher is better (ROE, div yield)
         ratio = value / avg
+
+        # ── Ratio component (80%) ──
+        ratio_max = int(max_pts * 0.80)
         if ratio >= 2.5:
-            return max_pts, [f"Strong {label} ({ratio:.1f}x sector avg)"]
-        if ratio >= 1.8:
-            return int(max_pts * 0.80), [f"Strong {label}"]
-        if ratio >= 1.3:
-            return int(max_pts * 0.60), [f"Good {label}"]
-        if ratio >= 1.0:
-            return int(max_pts * 0.30), [f"Solid {label}"]
-        if ratio >= 0.7:
-            return int(max_pts * 0.10), []
-        # Well below sector average
-        return 0, []
+            ratio_pts = ratio_max
+            reasons.append(f"Strong {label} ({ratio:.1f}x sector avg)")
+        elif ratio >= 1.8:
+            ratio_pts = int(ratio_max * 0.80)
+            reasons.append(f"Strong {label}")
+        elif ratio >= 1.3:
+            ratio_pts = int(ratio_max * 0.60)
+            reasons.append(f"Good {label}")
+        elif ratio >= 1.0:
+            ratio_pts = int(ratio_max * 0.30)
+            reasons.append(f"Solid {label}")
+        elif ratio >= 0.7:
+            ratio_pts = int(ratio_max * 0.10)
+
+        # ── Absolute component (20%) ──
+        abs_max = max_pts - ratio_max
+        thresholds = _ABSOLUTE_THRESHOLDS_HIGHER.get(label)
+        if thresholds:
+            strong, good, weak = thresholds
+            if value >= strong:
+                abs_pts = abs_max
+            elif value >= good:
+                abs_pts = int(abs_max * 0.50)
+            elif value < weak:
+                abs_pts = -int(abs_max * 0.50)
+
+    return ratio_pts + abs_pts, reasons
 
 
 # =====================================================================
