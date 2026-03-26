@@ -49,6 +49,28 @@ def parse_screener_quote(q: dict) -> StockQuote:
 
 
 
+def parse_quote_from_summary(symbol: str, data: dict) -> StockQuote:
+    """Build a StockQuote from quoteSummary data (for ad-hoc lookup)."""
+    summary = data.get("summaryDetail", {})
+    price_data = data.get("price", {})
+    # shortName can be in price module or quoteType
+    short_name = ""
+    if isinstance(price_data.get("shortName"), str):
+        short_name = price_data["shortName"]
+    elif isinstance(price_data.get("longName"), str):
+        short_name = price_data["longName"]
+
+    return StockQuote(
+        symbol=symbol,
+        short_name=short_name,
+        price=_safe_raw(summary, "regularMarketPrice") or _safe_raw(price_data, "regularMarketPrice") or 0,
+        market_cap=_safe_raw(summary, "marketCap") or _safe_raw(price_data, "marketCap") or 0,
+        change_percent=_safe_raw(summary, "regularMarketChangePercent") or 0,
+        fifty_two_week_low=_safe_raw(summary, "fiftyTwoWeekLow") or 0,
+        fifty_two_week_high=_safe_raw(summary, "fiftyTwoWeekHigh") or 0,
+    )
+
+
 def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
     """Step 4: Parse quoteSummary response into StockFundamentals."""
     stats = data.get("defaultKeyStatistics", {})
@@ -573,6 +595,7 @@ async def run_pipeline(client: Optional[YahooClient] = None) -> ScanResult:
             total_stocks=len(stocks),
             stocks=stocks,
             sector_averages=sector_averages,
+            market_sector_averages=market_averages,
         )
 
         logger.info(

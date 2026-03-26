@@ -16,9 +16,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HOST, PORT
-from server.database import get_latest_scan, get_scan_by_date, get_scan_history, init_db, save_scan
+from server.database import get_latest_scan, get_latest_scan_averages, get_scan_by_date, get_scan_history, init_db, save_scan
 from server.models import ScanResult, ScanSummary
-from server.pipeline import run_pipeline
+from server.pipeline import merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
+from server.scorer import compute_quality_score, compute_score
 from server.yahoo_client import YahooClient
 
 logging.basicConfig(
@@ -150,6 +151,61 @@ async def get_spark(symbol: str):
     if not data:
         raise HTTPException(404, f"No spark data for {symbol}")
     return data
+
+
+@app.get("/api/lookup/{symbol}")
+async def lookup_stock(symbol: str):
+    """Fetch, score, and return a single stock by symbol."""
+    global _yahoo_client
+    if _yahoo_client is None:
+        _yahoo_client = YahooClient()
+
+    symbol = symbol.upper().strip()
+
+    # 1. Fetch quoteSummary
+    raw = await _yahoo_client.fetch_quote_summary(symbol)
+    if not raw:
+        raise HTTPException(404, f"No data found for {symbol}")
+
+    # 2. Parse quote + fundamentals
+    quote = parse_quote_from_summary(symbol, raw)
+    fundamentals = parse_fundamentals(symbol, raw)
+    stock = merge_quote_and_fundamentals(quote, fundamentals)
+
+    # 3. Get cached averages from latest scan
+    sector_averages, market_averages = get_latest_scan_averages()
+
+    # 4. Attach sector/market averages
+    avg = sector_averages.get(stock.sector)
+    if avg:
+        stock.sector_avg_fpe = avg.avg_forward_pe
+        stock.sector_avg_pb = avg.avg_price_to_book
+        stock.sector_avg_ev_ebitda = avg.avg_ev_to_ebitda
+        stock.sector_avg_roe = avg.avg_roe
+    mkt = market_averages.get(stock.sector)
+    if mkt:
+        stock.market_avg_fpe = mkt.avg_forward_pe
+        stock.market_avg_pb = mkt.avg_price_to_book
+        stock.market_avg_ev_ebitda = mkt.avg_ev_to_ebitda
+        stock.market_avg_roe = mkt.avg_roe
+        stock.market_avg_div_yield = mkt.avg_dividend_yield
+        stock.market_avg_debt_equity = mkt.avg_debt_to_equity
+        stock.market_avg_ps = mkt.avg_price_to_sales
+
+    # 5. Score (use market avg for peer comparison)
+    peer_avg = mkt if mkt else avg
+    breakdown = compute_score(stock, peer_avg)
+    stock.value_score = breakdown.total
+    stock.score_tier = breakdown.tier
+    stock.score_reasons = breakdown.reasons
+    stock.sector_type = breakdown.sector_type
+
+    q = compute_quality_score(stock, peer_avg)
+    stock.quality_score = q.total
+    stock.quality_tier = q.tier
+    stock.quality_reasons = q.reasons
+
+    return {"stock": stock.model_dump()}
 
 
 def _build_response(result: ScanResult) -> dict:

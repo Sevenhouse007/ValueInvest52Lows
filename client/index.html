@@ -156,6 +156,7 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 <div class="tab-bar">
   <div class="tab active" data-tab="value" onclick="switchTab('value')">Deep Value <span class="badge badge-green" id="tabValueCount">0</span></div>
   <div class="tab" data-tab="quality" onclick="switchTab('quality')">Quality on Sale <span class="badge badge-blue" id="tabQualityCount">0</span></div>
+  <div class="tab" data-tab="lookup" onclick="switchTab('lookup')">Stock Lookup</div>
 </div>
 
 <div class="controls">
@@ -222,6 +223,16 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
     <div class="spinner"></div>
     <p style="margin-top:12px;color:var(--text2);">Fetching data...</p>
   </div>
+</div>
+
+<div id="lookupSection" style="display:none;padding:0 24px 24px;">
+  <div style="display:flex;gap:10px;align-items:center;padding:20px 0;">
+    <input type="text" id="lookupInput" placeholder="Enter stock symbol (e.g. AAPL, MSFT, TSLA)"
+           style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 16px;color:var(--text);font-size:15px;width:350px;outline:none;">
+    <button class="btn" id="lookupBtn" style="padding:10px 24px;font-size:15px;">Look Up</button>
+    <span id="lookupStatus" style="color:var(--text2);font-size:13px;"></span>
+  </div>
+  <div id="lookupResult"></div>
 </div>
 
 <script>
@@ -337,6 +348,8 @@ function bindControls() {
   document.getElementById('watchlistToggle').addEventListener('change', renderTable);
   document.getElementById('refreshBtn').addEventListener('click', triggerRefresh);
   document.getElementById('exportBtn').addEventListener('click', exportCSV);
+  document.getElementById('lookupBtn').addEventListener('click', doLookup);
+  document.getElementById('lookupInput').addEventListener('keydown', e => { if (e.key === 'Enter') doLookup(); });
   document.getElementById('datePicker').addEventListener('change', e => {
     loadScan(e.target.value || undefined);
   });
@@ -603,11 +616,24 @@ function toggleWL(e, sym) {
 function switchTab(tab) {
   activeTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+
+  const isLookup = tab === 'lookup';
+  // Show/hide sections
+  document.querySelector('.controls').style.display = isLookup ? 'none' : '';
+  document.querySelector('.score-legend').style.display = isLookup ? 'none' : '';
+  document.querySelector('.table-wrap').style.display = isLookup ? 'none' : '';
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('lookupSection').style.display = isLookup ? 'block' : 'none';
+
+  if (isLookup) {
+    document.getElementById('lookupInput').focus();
+    return;
+  }
+
   const isQ = tab === 'quality';
   sortKey = isQ ? 'quality_score' : 'value_score';
   sortDir = -1;
   expandedSymbol = null;
-  // Update column headers
   document.getElementById('thModel').innerHTML = isQ ? 'F-Score <span class="arrow"></span>' : 'Model <span class="arrow"></span>';
   document.getElementById('thModel').dataset.key = isQ ? 'piotroski_f_score' : 'sector_type';
   document.getElementById('thScore').innerHTML = (isQ ? 'Quality <span class="arrow"></span>' : 'Value <span class="arrow"></span>');
@@ -775,6 +801,115 @@ function cmpClass(val, avg, lowerIsBetter) {
     if (ratio < 0.88) return 'worse';
   }
   return '';
+}
+
+// ────────── Stock Lookup ──────────
+async function doLookup() {
+  const symbol = document.getElementById('lookupInput').value.trim().toUpperCase();
+  if (!symbol) return;
+  document.getElementById('lookupStatus').textContent = 'Loading...';
+  document.getElementById('lookupResult').innerHTML = '';
+  try {
+    const r = await fetch(`/api/lookup/${symbol}`);
+    if (!r.ok) {
+      document.getElementById('lookupStatus').textContent = r.status === 404
+        ? `No data found for ${symbol}` : 'Error fetching data';
+      return;
+    }
+    const data = await r.json();
+    document.getElementById('lookupStatus').textContent = '';
+    renderLookupResult(data.stock);
+    // Load sparkline
+    loadSparkline(symbol);
+  } catch (e) {
+    document.getElementById('lookupStatus').textContent = 'Network error';
+  }
+}
+
+function renderLookupResult(s) {
+  const rd = document.getElementById('lookupResult');
+  const fs = s.piotroski_f_score;
+  const drop = s.fifty_two_week_high > 0 ? ((1 - s.price / s.fifty_two_week_high) * 100).toFixed(0) : '—';
+  const fcfY = s.free_cash_flow && s.market_cap > 0 ? (s.free_cash_flow / s.market_cap * 100).toFixed(1) : '—';
+
+  let html = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;margin-bottom:16px;">`;
+  // Header
+  html += `<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">`;
+  html += `<div>`;
+  html += `<h2 style="font-size:20px;margin-bottom:4px;">${s.symbol} — ${s.short_name || ''}</h2>`;
+  html += `<div style="color:var(--text2);font-size:13px;">${s.sector || '—'} / ${s.industry || '—'} ${s.country ? '('+s.country+')' : ''}</div>`;
+  html += `</div>`;
+  html += `<div style="text-align:right;">`;
+  html += `<div style="font-size:24px;font-weight:700;">$${fmt(s.price,2)}</div>`;
+  html += `<div style="color:var(--text2);font-size:12px;">Mkt Cap: ${fmtCap(s.market_cap)} | Down ${drop}% from 52W high</div>`;
+  html += `</div></div>`;
+
+  // Score cards
+  html += `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">`;
+  html += `<div style="background:var(--bg);border-radius:6px;padding:12px;text-align:center;"><div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Value Score</div><div style="font-size:22px;font-weight:700;margin-top:4px;">${scorePill(s.value_score, s.score_tier)}</div><div style="color:var(--text2);font-size:11px;margin-top:2px;">${s.score_tier}</div></div>`;
+  html += `<div style="background:var(--bg);border-radius:6px;padding:12px;text-align:center;"><div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Quality Score</div><div style="font-size:22px;font-weight:700;margin-top:4px;">${scorePillSmall(s.quality_score, s.quality_tier)}</div><div style="color:var(--text2);font-size:11px;margin-top:2px;">${s.quality_tier}</div></div>`;
+  html += `<div style="background:var(--bg);border-radius:6px;padding:12px;text-align:center;"><div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Piotroski F-Score</div><div style="font-size:22px;font-weight:700;margin-top:4px;">${fmtFScore(fs)}</div></div>`;
+  html += `<div style="background:var(--bg);border-radius:6px;padding:12px;text-align:center;"><div style="color:var(--text2);font-size:11px;text-transform:uppercase;">FCF Yield</div><div style="font-size:22px;font-weight:700;margin-top:4px;color:${parseFloat(fcfY)>5?'var(--green)':parseFloat(fcfY)<0?'var(--red)':'var(--text)'}">${fcfY}%</div></div>`;
+  html += `</div>`;
+
+  // Key metrics grid
+  const metrics = [
+    ['Fwd P/E', fmtN(s.forward_pe,1), fmtN(s.market_avg_fpe,1)],
+    ['P/B', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2)],
+    ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1)],
+    ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe)],
+    ['P/S', fmtN(s.price_to_sales,2), fmtN(s.market_avg_ps,2)],
+    ['Debt/Equity', fmtN(s.debt_to_equity,0), fmtN(s.market_avg_debt_equity,0)],
+    ['Div Yield', s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—', s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—'],
+    ['Short % Float', fmtShort(s.short_percent_of_float), '—'],
+    ['Insider Activity', fmtInsider(s.insider_buy_count, s.insider_sell_count), '—'],
+    ['Rev Growth', fmtN(s.revenue_growth!=null?s.revenue_growth*100:null,1,'%'), '—'],
+    ['Earnings Growth', fmtN(s.earnings_growth!=null?s.earnings_growth*100:null,1,'%'), '—'],
+    ['Current Ratio', fmtN(s.current_ratio,2), '—'],
+    ['52W Range', '$'+fmt(s.fifty_two_week_low,2)+' — $'+fmt(s.fifty_two_week_high,2), '—'],
+    ['Analyst Rec', fmtAnalyst(s.recommendation_mean), '—'],
+    ['Target Upside', fmtN(s.upside_percent,1,'%'), '—'],
+  ];
+
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">`;
+  // Left: metrics
+  html += `<div>`;
+  html += `<h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;">Fundamentals vs Market Avg</h4>`;
+  html += `<div style="display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:2px 10px;font-size:12px;">`;
+  html += `<div style="color:var(--text2);font-weight:600;padding-bottom:4px;border-bottom:1px solid var(--border)">Metric</div>`;
+  html += `<div style="color:var(--text2);font-weight:600;padding-bottom:4px;border-bottom:1px solid var(--border)">Value</div>`;
+  html += `<div style="color:var(--text2);font-weight:600;padding-bottom:4px;border-bottom:1px solid var(--border)">Mkt Avg</div>`;
+  metrics.forEach(([lbl, val, avg]) => {
+    html += `<div style="padding:3px 0;border-bottom:1px solid var(--border);color:var(--text2)">${lbl}</div>`;
+    html += `<div style="padding:3px 0;border-bottom:1px solid var(--border)">${val}</div>`;
+    html += `<div style="padding:3px 0;border-bottom:1px solid var(--border);color:var(--blue)">${avg}</div>`;
+  });
+  html += `</div></div>`;
+
+  // Right: reasons + sparkline
+  html += `<div>`;
+  html += `<h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;">Value Score Reasons</h4>`;
+  html += `<ul class="reasons-list">`;
+  (s.score_reasons||[]).forEach(r => { html += '<li>'+r+'</li>'; });
+  html += `</ul>`;
+  html += `<h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin:12px 0 8px;">Quality Score Reasons</h4>`;
+  html += `<ul class="reasons-list">`;
+  (s.quality_reasons||[]).forEach(r => { html += '<li>'+r+'</li>'; });
+  html += `</ul>`;
+  if (s.piotroski_details && s.piotroski_details.length > 0) {
+    html += `<h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin:12px 0 6px;">Piotroski Tests (${s.piotroski_f_score}/9)</h4>`;
+    html += `<ul class="reasons-list">`;
+    s.piotroski_details.forEach(d => { html += '<li>'+d+'</li>'; });
+    html += `</ul>`;
+  }
+  html += `<div style="margin-top:16px;"><h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;">12-Month Price</h4>`;
+  html += `<canvas id="spark-${s.symbol}" width="400" height="120" style="width:100%;height:120px;"></canvas></div>`;
+  html += `</div></div>`;
+
+  html += `<div style="margin-top:16px;text-align:right;"><a href="https://finance.yahoo.com/quote/${s.symbol}" target="_blank" style="font-size:12px;">View on Yahoo Finance ↗</a></div>`;
+  html += `</div>`;
+
+  rd.innerHTML = html;
 }
 
 // ────────── UI helpers ──────────

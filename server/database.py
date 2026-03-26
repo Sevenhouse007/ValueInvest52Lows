@@ -62,6 +62,11 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_scan_stocks_score
             ON scan_stocks(value_score DESC)
         """)
+        # Migration: add market_sector_averages_json if not present
+        try:
+            conn.execute("SELECT market_sector_averages_json FROM scans LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE scans ADD COLUMN market_sector_averages_json TEXT DEFAULT '{}'")
 
 
 def save_scan(result: ScanResult):
@@ -78,9 +83,12 @@ def save_scan(result: ScanResult):
         sector_avg_json = json.dumps(
             {k: v.model_dump() for k, v in result.sector_averages.items()}
         )
+        market_avg_json = json.dumps(
+            {k: v.model_dump() for k, v in result.market_sector_averages.items()}
+        )
         conn.execute(
-            "INSERT INTO scans (scan_date, scanned_at, total_stocks, sector_averages_json) VALUES (?, ?, ?, ?)",
-            (result.scan_date, result.scanned_at, result.total_stocks, sector_avg_json),
+            "INSERT INTO scans (scan_date, scanned_at, total_stocks, sector_averages_json, market_sector_averages_json) VALUES (?, ?, ?, ?, ?)",
+            (result.scan_date, result.scanned_at, result.total_stocks, sector_avg_json, market_avg_json),
         )
         for stock in result.stocks:
             conn.execute(
@@ -117,6 +125,19 @@ def get_scan_by_date(scan_date: str) -> Optional[ScanResult]:
         return _load_scan(conn, row)
 
 
+def get_latest_scan_averages() -> tuple[dict, dict]:
+    """Get sector and market averages from latest scan without loading stocks."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT sector_averages_json, market_sector_averages_json FROM scans ORDER BY scan_date DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return {}, {}
+        sec = {k: SectorAverages(**v) for k, v in json.loads(row["sector_averages_json"] or "{}").items()}
+        mkt = {k: SectorAverages(**v) for k, v in json.loads(row["market_sector_averages_json"] or "{}").items()}
+        return sec, mkt
+
+
 def get_scan_history() -> list[ScanHistoryEntry]:
     """Get list of all available scan dates."""
     with get_db() as conn:
@@ -144,10 +165,14 @@ def _load_scan(conn: sqlite3.Connection, scan_row: sqlite3.Row) -> ScanResult:
     raw_avgs = json.loads(scan_row["sector_averages_json"] or "{}")
     sector_averages = {k: SectorAverages(**v) for k, v in raw_avgs.items()}
 
+    raw_market = json.loads(scan_row["market_sector_averages_json"] or "{}")
+    market_sector_averages = {k: SectorAverages(**v) for k, v in raw_market.items()}
+
     return ScanResult(
         scan_date=scan_row["scan_date"],
         scanned_at=scan_row["scanned_at"],
         total_stocks=scan_row["total_stocks"],
         stocks=stocks,
         sector_averages=sector_averages,
+        market_sector_averages=market_sector_averages,
     )

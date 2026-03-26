@@ -150,6 +150,7 @@ class ScanResult(BaseModel):
     total_stocks: int = 0
     stocks: list[ScoredStock] = Field(default_factory=list)
     sector_averages: dict[str, SectorAverages] = Field(default_factory=dict)
+    market_sector_averages: dict[str, SectorAverages] = Field(default_factory=dict)
 
 
 class ScanSummary(BaseModel):

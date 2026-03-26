@@ -101,7 +101,7 @@ class YahooClient:
             self._ensure_session()
             url = YAHOO_QUOTE_SUMMARY_URL.format(symbol=symbol)
             params = {
-                "modules": "defaultKeyStatistics,financialData,summaryDetail,assetProfile,insiderTransactions,incomeStatementHistory",
+                "modules": "defaultKeyStatistics,financialData,summaryDetail,assetProfile,insiderTransactions,incomeStatementHistory,price",
                 "crumb": self._crumb,
             }
             try:
