@@ -190,9 +190,9 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
         <th data-key="symbol">Ticker <span class="arrow"></span></th>
         <th data-key="short_name">Company <span class="arrow"></span></th>
         <th data-key="sector">Sector <span class="arrow"></span></th>
-        <th data-key="sector_type">Model <span class="arrow"></span></th>
-        <th data-key="value_score">Score <span class="arrow"></span></th>
-        <th data-key="_score_delta" class="num">Δ <span class="arrow"></span></th>
+        <th data-key="sector_type" id="thModel">Model <span class="arrow"></span></th>
+        <th data-key="value_score" id="thScore">Score <span class="arrow"></span></th>
+        <th data-key="_score_delta" class="num" id="thDelta">Δ <span class="arrow"></span></th>
         <th data-key="price" class="num">Price <span class="arrow"></span></th>
         <th data-key="change_percent" class="num">1Y % <span class="arrow"></span></th>
         <th data-key="market_cap" class="num">Mkt Cap <span class="arrow"></span></th>
@@ -603,9 +603,16 @@ function toggleWL(e, sym) {
 function switchTab(tab) {
   activeTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
-  sortKey = tab === 'quality' ? 'quality_score' : 'value_score';
+  const isQ = tab === 'quality';
+  sortKey = isQ ? 'quality_score' : 'value_score';
   sortDir = -1;
   expandedSymbol = null;
+  // Update column headers
+  document.getElementById('thModel').innerHTML = isQ ? 'F-Score <span class="arrow"></span>' : 'Model <span class="arrow"></span>';
+  document.getElementById('thModel').dataset.key = isQ ? 'piotroski_f_score' : 'sector_type';
+  document.getElementById('thScore').innerHTML = (isQ ? 'Quality <span class="arrow"></span>' : 'Value <span class="arrow"></span>');
+  document.getElementById('thScore').dataset.key = isQ ? 'quality_score' : 'value_score';
+  document.getElementById('thDelta').style.display = isQ ? 'none' : '';
   renderTable();
 }
 
