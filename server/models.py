@@ -30,14 +30,24 @@ class StockFundamentals(BaseModel):
     debt_to_equity: Optional[float] = None
     free_cash_flow: Optional[float] = None
     return_on_equity: Optional[float] = None
+    return_on_assets: Optional[float] = None
     revenue_growth: Optional[float] = None
     earnings_growth: Optional[float] = None
     current_ratio: Optional[float] = None
     recommendation_mean: Optional[float] = None
     target_mean_price: Optional[float] = None
     price_to_sales: Optional[float] = None
+    dividend_yield: Optional[float] = None
+    operating_cashflow: Optional[float] = None
+    short_percent_of_float: Optional[float] = None
+    insider_buy_count: int = 0
+    insider_sell_count: int = 0
+    insider_net_shares: Optional[int] = None
+    piotroski_f_score: Optional[int] = None
+    piotroski_details: list[str] = Field(default_factory=list)
     sector: str = ""
     industry: str = ""
+    country: str = ""
 
 
 class SectorAverages(BaseModel):
@@ -47,6 +57,9 @@ class SectorAverages(BaseModel):
     avg_price_to_book: Optional[float] = None
     avg_ev_to_ebitda: Optional[float] = None
     avg_roe: Optional[float] = None
+    avg_dividend_yield: Optional[float] = None
+    avg_debt_to_equity: Optional[float] = None
+    avg_price_to_sales: Optional[float] = None
     stock_count: int = 0
 
 
@@ -55,6 +68,7 @@ class ScoreBreakdown(BaseModel):
     total: int = 0
     tier: str = "Limited signal"
     reasons: list[str] = Field(default_factory=list)
+    sector_type: str = "default"
 
 
 class ScoredStock(BaseModel):
@@ -72,24 +86,49 @@ class ScoredStock(BaseModel):
     price_to_book: Optional[float] = None
     ev_to_ebitda: Optional[float] = None
     return_on_equity: Optional[float] = None
+    return_on_assets: Optional[float] = None
     free_cash_flow: Optional[float] = None
+    operating_cashflow: Optional[float] = None
     recommendation_mean: Optional[float] = None
     target_mean_price: Optional[float] = None
     price_to_sales: Optional[float] = None
+    dividend_yield: Optional[float] = None
+    short_percent_of_float: Optional[float] = None
+    insider_buy_count: int = 0
+    insider_sell_count: int = 0
+    insider_net_shares: Optional[int] = None
+    piotroski_f_score: Optional[int] = None
+    piotroski_details: list[str] = Field(default_factory=list)
+    country: str = ""
     debt_to_equity: Optional[float] = None
     ev_to_revenue: Optional[float] = None
     revenue_growth: Optional[float] = None
     earnings_growth: Optional[float] = None
     current_ratio: Optional[float] = None
-    # Sector averages
+    # Sector averages (from 52W-low scan stocks)
     sector_avg_fpe: Optional[float] = None
     sector_avg_pb: Optional[float] = None
     sector_avg_ev_ebitda: Optional[float] = None
     sector_avg_roe: Optional[float] = None
+    # Market sector averages (from blue-chip benchmarks)
+    market_avg_fpe: Optional[float] = None
+    market_avg_pb: Optional[float] = None
+    market_avg_ev_ebitda: Optional[float] = None
+    market_avg_roe: Optional[float] = None
+    market_avg_div_yield: Optional[float] = None
+    market_avg_debt_equity: Optional[float] = None
+    market_avg_ps: Optional[float] = None
+    # Industry averages (narrow peer group, used for scoring)
+    industry_avg_fpe: Optional[float] = None
+    industry_avg_pb: Optional[float] = None
+    industry_avg_ev_ebitda: Optional[float] = None
+    industry_avg_roe: Optional[float] = None
+    industry_peer_count: int = 0
     # Score
     value_score: int = 0
     score_tier: str = "Limited signal"
     score_reasons: list[str] = Field(default_factory=list)
+    sector_type: str = "default"
     # Upside
     upside_percent: Optional[float] = None
 

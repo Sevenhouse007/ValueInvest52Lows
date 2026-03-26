@@ -95,6 +95,21 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .sparkline-container { height:120px; }
 .sparkline-container canvas { width:100%; height:100%; }
 
+/* Model tag */
+.model-tag { font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(59,130,246,.12); color:var(--blue); white-space:nowrap; }
+
+/* NEW badge */
+.new-badge { display:inline-block; margin-left:6px; padding:1px 5px; border-radius:3px; background:rgba(59,130,246,.15); color:var(--blue); font-size:9px; font-weight:700; vertical-align:middle; }
+
+/* Delta */
+.delta-up { color:var(--green); font-size:11px; }
+.delta-down { color:var(--red); font-size:11px; }
+.delta-flat { color:var(--text2); font-size:11px; }
+
+/* Score legend */
+.score-legend { padding:0 24px 8px; font-size:11px; color:var(--text2); display:flex; align-items:center; gap:6px; }
+.score-legend .info-icon { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; background:var(--surface2); color:var(--text2); font-size:10px; font-weight:700; cursor:help; }
+
 /* Watchlist star */
 .star { cursor:pointer; font-size:16px; color:var(--text2); }
 .star.active { color:var(--amber); }
@@ -133,7 +148,7 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
   <select id="scoreFilter">
     <option value="0">All Scores</option>
     <option value="70">Score ≥ 70</option>
-    <option value="50">Score ≥ 50</option>
+    <option value="45">Score ≥ 45</option>
   </select>
   <input type="number" id="minPrice" placeholder="Min Price" style="width:100px;" value="">
   <input type="number" id="minMarketCap" placeholder="Min Mkt Cap ($B)" style="width:130px;" value="">
@@ -146,6 +161,10 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
   </div>
 </div>
 
+<div class="score-legend">
+  <span class="info-icon" title="Scoring differs by sector — each sector uses a different valuation model with appropriate metrics and weights.">i</span>
+  Scores use sector-specific models: Financial (P/B+ROE), REIT (Yield+NAV), Energy (EV/EBITDA+P/CF), Cyclical (Normalized P/E+P/B), etc.
+</div>
 <div class="table-wrap">
   <table id="stockTable">
     <thead>
@@ -154,21 +173,22 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
         <th data-key="symbol">Ticker <span class="arrow"></span></th>
         <th data-key="short_name">Company <span class="arrow"></span></th>
         <th data-key="sector">Sector <span class="arrow"></span></th>
+        <th data-key="sector_type">Model <span class="arrow"></span></th>
         <th data-key="value_score">Score <span class="arrow"></span></th>
+        <th data-key="_score_delta" class="num">Δ <span class="arrow"></span></th>
         <th data-key="price" class="num">Price <span class="arrow"></span></th>
         <th data-key="change_percent" class="num">1Y % <span class="arrow"></span></th>
         <th data-key="market_cap" class="num">Mkt Cap <span class="arrow"></span></th>
         <th data-key="forward_pe" class="num">Fwd P/E <span class="arrow"></span></th>
-        <th data-key="sector_avg_fpe" class="num">Sec Avg <span class="arrow"></span></th>
         <th data-key="price_to_book" class="num">P/B <span class="arrow"></span></th>
-        <th data-key="sector_avg_pb" class="num">Sec Avg <span class="arrow"></span></th>
         <th data-key="ev_to_ebitda" class="num">EV/EBITDA <span class="arrow"></span></th>
-        <th data-key="sector_avg_ev_ebitda" class="num">Sec Avg <span class="arrow"></span></th>
         <th data-key="return_on_equity" class="num">ROE % <span class="arrow"></span></th>
-        <th data-key="sector_avg_roe" class="num">Sec Avg <span class="arrow"></span></th>
         <th data-key="free_cash_flow" class="num">FCF $B <span class="arrow"></span></th>
         <th data-key="recommendation_mean" class="num">Analyst <span class="arrow"></span></th>
         <th data-key="upside_percent" class="num">Upside % <span class="arrow"></span></th>
+        <th data-key="piotroski_f_score" class="num">F-Score <span class="arrow"></span></th>
+        <th data-key="short_percent_of_float" class="num">Short % <span class="arrow"></span></th>
+        <th data-key="insider_buy_count" class="num">Insider <span class="arrow"></span></th>
       </tr>
     </thead>
     <tbody id="stockBody"></tbody>
@@ -195,6 +215,7 @@ let sortKey = 'value_score';
 let sortDir = -1; // -1 = desc
 let expandedSymbol = null;
 let watchlist = JSON.parse(localStorage.getItem('watchlist') || '[]');
+let prevScores = {}; // { symbol: score } from previous scan, _loaded flag
 
 // ────────── Init ──────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -216,6 +237,8 @@ async function loadScan(dateStr) {
     updateSummary(data.summary);
     updateLastUpdated(data.scanned_at);
     populateSectorFilter();
+    // Load previous scan for diff
+    await loadPrevScan(data.scan_date);
     renderTable();
     document.getElementById('emptyState').style.display = 'none';
   } catch (e) {
@@ -223,6 +246,24 @@ async function loadScan(dateStr) {
     showEmpty();
   } finally {
     showLoading(false);
+  }
+}
+
+async function loadPrevScan(currentDate) {
+  prevScores = {};
+  try {
+    const r = await fetch('/api/scan/history');
+    const dates = await r.json();
+    // Find the scan date before the current one
+    const prevEntry = dates.find(d => d.scan_date < currentDate);
+    if (!prevEntry) { prevScores._loaded = true; return; }
+    const pr = await fetch(`/api/scan/${prevEntry.scan_date}`);
+    if (!pr.ok) { prevScores._loaded = true; return; }
+    const prevData = await pr.json();
+    prevData.stocks.forEach(s => { prevScores[s.symbol] = s.value_score; });
+    prevScores._loaded = true;
+  } catch (e) {
+    prevScores._loaded = false;
   }
 }
 
@@ -334,29 +375,39 @@ function renderTable() {
   let html = '';
   stocks.forEach(s => {
     const isWL = watchlist.includes(s.symbol);
+    const mktAvg = s.market_avg_fpe||s.sector_avg_fpe;
+    const mktPb = s.market_avg_pb||s.sector_avg_pb;
+    const mktEv = s.market_avg_ev_ebitda||s.sector_avg_ev_ebitda;
+    const mktRoe = s.market_avg_roe||s.sector_avg_roe;
+    const prev = prevScores[s.symbol];
+    const isNew = prevScores._loaded && prev === undefined;
+    const delta = prev !== undefined ? s.value_score - prev : null;
+    // For sorting: attach computed delta to the stock object
+    s._score_delta = delta;
     html += `<tr data-sym="${s.symbol}" class="${expandedSymbol === s.symbol ? 'expanded' : ''}">
       <td><span class="star ${isWL?'active':''}" onclick="toggleWL(event,'${s.symbol}')">★</span></td>
-      <td><strong>${s.symbol}</strong></td>
+      <td><strong>${s.symbol}</strong>${isNew?'<span class="new-badge">NEW</span>':''}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${s.short_name||''}</td>
       <td>${s.sector||'—'}</td>
+      <td><span class="model-tag">${fmtModel(s.sector_type)}</span></td>
       <td>${scorePill(s.value_score, s.score_tier)}</td>
+      <td class="num">${fmtDelta(delta)}</td>
       <td class="num">$${fmt(s.price,2)}</td>
       <td class="num ${s.change_percent>=0?'c-green':'c-red'}">${fmt(s.change_percent,1)}%</td>
       <td class="num">${fmtCap(s.market_cap)}</td>
-      <td class="num ${cmpClass(s.forward_pe, s.sector_avg_fpe, true)}">${fmtN(s.forward_pe,1)}</td>
-      <td class="num" style="color:var(--text2)">${fmtN(s.sector_avg_fpe,1)}</td>
-      <td class="num ${cmpClass(s.price_to_book, s.sector_avg_pb, true)}">${fmtN(s.price_to_book,1)}</td>
-      <td class="num" style="color:var(--text2)">${fmtN(s.sector_avg_pb,1)}</td>
-      <td class="num ${cmpClass(s.ev_to_ebitda, s.sector_avg_ev_ebitda, true)}">${fmtN(s.ev_to_ebitda,1)}</td>
-      <td class="num" style="color:var(--text2)">${fmtN(s.sector_avg_ev_ebitda,1)}</td>
-      <td class="num ${cmpClass(s.return_on_equity, s.sector_avg_roe, false)}">${fmtROE(s.return_on_equity)}</td>
-      <td class="num" style="color:var(--text2)">${fmtROE(s.sector_avg_roe)}</td>
+      <td class="num ${cmpClass(s.forward_pe, mktAvg, true)}" title="Scan avg: ${fmtN(s.sector_avg_fpe,1)} | Mkt avg: ${fmtN(s.market_avg_fpe,1)} | Ind avg: ${fmtN(s.industry_avg_fpe,1)}">${fmtN(s.forward_pe,1)}</td>
+      <td class="num ${cmpClass(s.price_to_book, mktPb, true)}" title="Scan avg: ${fmtN(s.sector_avg_pb,1)} | Mkt avg: ${fmtN(s.market_avg_pb,1)} | Ind avg: ${fmtN(s.industry_avg_pb,1)}">${fmtN(s.price_to_book,1)}</td>
+      <td class="num ${cmpClass(s.ev_to_ebitda, mktEv, true)}" title="Scan avg: ${fmtN(s.sector_avg_ev_ebitda,1)} | Mkt avg: ${fmtN(s.market_avg_ev_ebitda,1)} | Ind avg: ${fmtN(s.industry_avg_ev_ebitda,1)}">${fmtN(s.ev_to_ebitda,1)}</td>
+      <td class="num ${cmpClass(s.return_on_equity, mktRoe, false)}" title="Scan avg: ${fmtROE(s.sector_avg_roe)} | Mkt avg: ${fmtROE(s.market_avg_roe)} | Ind avg: ${fmtROE(s.industry_avg_roe)}">${fmtROE(s.return_on_equity)}</td>
       <td class="num ${s.free_cash_flow>0?'c-green':s.free_cash_flow<0?'c-red':''}">${fmtFCF(s.free_cash_flow)}</td>
       <td class="num">${fmtAnalyst(s.recommendation_mean)}</td>
       <td class="num ${s.upside_percent>30?'c-bold-green':s.upside_percent>0?'c-green':''}">${fmtN(s.upside_percent,1,'%')}</td>
+      <td class="num">${fmtFScore(s.piotroski_f_score)}</td>
+      <td class="num">${fmtShort(s.short_percent_of_float)}</td>
+      <td class="num">${fmtInsider(s.insider_buy_count, s.insider_sell_count)}</td>
     </tr>`;
     if (expandedSymbol === s.symbol) {
-      html += `<tr class="detail-row"><td colspan="19">${detailPanel(s)}</td></tr>`;
+      html += `<tr class="detail-row"><td colspan="20">${detailPanel(s)}</td></tr>`;
     }
   });
   tbody.innerHTML = html;
@@ -374,33 +425,79 @@ function renderTable() {
 }
 
 function detailPanel(s) {
-  const metrics = [
-    ['Forward P/E', fmtN(s.forward_pe,1), fmtN(s.sector_avg_fpe,1)],
-    ['Price/Book', fmtN(s.price_to_book,2), fmtN(s.sector_avg_pb,2)],
-    ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.sector_avg_ev_ebitda,1)],
-    ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.sector_avg_roe)],
-    ['P/S', fmtN(s.price_to_sales,2), '—'],
-    ['Debt/Equity', fmtN(s.debt_to_equity,0), '—'],
-    ['EV/Revenue', fmtN(s.ev_to_revenue,2), '—'],
-    ['Current Ratio', fmtN(s.current_ratio,2), '—'],
+  const usesIndustry = s.industry_peer_count >= 3;
+  const showInd = usesIndustry;
+  const cols = showInd ? 4 : 3;
+  const gridCols = showInd ? '1.2fr 1fr 1fr 1fr' : '1.2fr 1fr 1fr';
+
+  const metrics = showInd ? [
+    ['Forward P/E', fmtN(s.forward_pe,1), fmtN(s.market_avg_fpe,1), fmtN(s.industry_avg_fpe,1)],
+    ['Price/Book', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2), fmtN(s.industry_avg_pb,2)],
+    ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1), fmtN(s.industry_avg_ev_ebitda,1)],
+    ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe), fmtROE(s.industry_avg_roe)],
+    ['P/S', fmtN(s.price_to_sales,2), fmtN(s.market_avg_ps,2), '—'],
+    ['Debt/Equity', fmtN(s.debt_to_equity,0), fmtN(s.market_avg_debt_equity,0), '—'],
+    ['Div Yield', s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—', s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—', '—'],
+    ['Rev Growth', fmtN(s.revenue_growth!=null?s.revenue_growth*100:null,1,'%'), '—', '—'],
+    ['Earnings Growth', fmtN(s.earnings_growth!=null?s.earnings_growth*100:null,1,'%'), '—', '—'],
+    ['FCF', fmtFCF(s.free_cash_flow), '—', '—'],
+    ['52W Range', `$${fmt(s.fifty_two_week_low,2)} — $${fmt(s.fifty_two_week_high,2)}`, '—', '—'],
+    ['Piotroski F-Score', fmtFScore(s.piotroski_f_score), '—', '—'],
+    ['Short % Float', fmtShort(s.short_percent_of_float), '—', '—'],
+    ['Insider Activity', fmtInsider(s.insider_buy_count, s.insider_sell_count), '—', '—'],
+  ] : [
+    ['Forward P/E', fmtN(s.forward_pe,1), fmtN(s.market_avg_fpe,1)],
+    ['Price/Book', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2)],
+    ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1)],
+    ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe)],
+    ['P/S', fmtN(s.price_to_sales,2), fmtN(s.market_avg_ps,2)],
+    ['Debt/Equity', fmtN(s.debt_to_equity,0), fmtN(s.market_avg_debt_equity,0)],
+    ['Div Yield', s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—', s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—'],
     ['Rev Growth', fmtN(s.revenue_growth!=null?s.revenue_growth*100:null,1,'%'), '—'],
     ['Earnings Growth', fmtN(s.earnings_growth!=null?s.earnings_growth*100:null,1,'%'), '—'],
     ['FCF', fmtFCF(s.free_cash_flow), '—'],
     ['52W Range', `$${fmt(s.fifty_two_week_low,2)} — $${fmt(s.fifty_two_week_high,2)}`, '—'],
+    ['Piotroski F-Score', fmtFScore(s.piotroski_f_score), '—'],
+    ['Short % Float', fmtShort(s.short_percent_of_float), '—'],
+    ['Insider Activity', fmtInsider(s.insider_buy_count, s.insider_sell_count), '—'],
   ];
-  let metricsHtml = '<div class="metrics-grid">';
-  metrics.forEach(([lbl, val, avg]) => {
-    metricsHtml += `<div class="metric-item"><span class="lbl">${lbl}</span><span>${val} ${avg!=='—'?'<span style="color:var(--text2)">(Sec: '+avg+')</span>':''}</span></div>`;
+  const hdrStyle = 'color:var(--text2);font-weight:600;padding-bottom:4px;border-bottom:1px solid var(--border)';
+  const cellStyle = 'padding:3px 0;border-bottom:1px solid var(--border)';
+  let metricsHtml = `<div style="display:grid;grid-template-columns:${gridCols};gap:2px 10px;font-size:12px;">`;
+  metricsHtml += `<div style="${hdrStyle}">Metric</div><div style="${hdrStyle}">Value</div>`;
+  metricsHtml += `<div style="${hdrStyle}">Mkt Avg</div>`;
+  if (showInd) metricsHtml += `<div style="${hdrStyle}">Ind (${s.industry_peer_count})</div>`;
+  metrics.forEach(row => {
+    metricsHtml += `<div style="${cellStyle};color:var(--text2)">${row[0]}</div>`;
+    metricsHtml += `<div style="${cellStyle}">${row[1]}</div>`;
+    metricsHtml += `<div style="${cellStyle};color:var(--blue)">${row[2]}</div>`;
+    if (showInd) metricsHtml += `<div style="${cellStyle};color:var(--amber)">${row[3]}</div>`;
   });
   metricsHtml += '</div>';
 
   let reasonsHtml = '<ul class="reasons-list">';
   (s.score_reasons||[]).forEach(r => { reasonsHtml += `<li>${r}</li>`; });
   reasonsHtml += '</ul>';
+  if (s.piotroski_details && s.piotroski_details.length > 0) {
+    reasonsHtml += `<h4 style="margin-top:12px;margin-bottom:6px;color:var(--text2);font-size:11px;text-transform:uppercase;">Piotroski Tests (${s.piotroski_f_score}/9)</h4>`;
+    reasonsHtml += '<ul class="reasons-list">';
+    s.piotroski_details.forEach(d => { reasonsHtml += `<li>${d}</li>`; });
+    reasonsHtml += '</ul>';
+  }
+
+  const modelDesc = MODEL_DESCRIPTIONS[s.sector_type] || MODEL_DESCRIPTIONS['default'];
+  const peerDesc = usesIndustry
+    ? `Peer comparison: ${s.industry} (${s.industry_peer_count} peers)`
+    : s.market_avg_fpe
+    ? `Peer comparison: ${s.sector} market benchmarks (industry has <3 peers)`
+    : `Peer comparison: ${s.sector} scan avg (no market benchmark)`;
 
   return `<div class="detail-panel">
     <h3>${s.symbol} — ${s.short_name} <a href="https://finance.yahoo.com/quote/${s.symbol}" target="_blank">Yahoo Finance ↗</a></h3>
     <div>
+      <div style="margin-bottom:10px;padding:6px 10px;background:rgba(59,130,246,.08);border-radius:6px;font-size:11px;color:var(--blue);">
+        ${modelDesc}<br><span style="opacity:.75">${peerDesc}</span>
+      </div>
       <h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">Metrics</h4>
       ${metricsHtml}
     </div>
@@ -502,20 +599,73 @@ function populateSectorFilter() {
 // ────────── CSV Export ──────────
 function exportCSV() {
   const stocks = getFiltered();
-  const headers = ['Symbol','Company','Sector','Score','Tier','Price','1Y%','MktCap','FwdPE','SecAvgPE','P/B','SecAvgPB','EV/EBITDA','SecAvgEV','ROE%','SecAvgROE','FCF','Analyst','Upside%'];
-  const rows = stocks.map(s => [
-    s.symbol, `"${(s.short_name||'').replace(/"/g,'""')}"`, s.sector, s.value_score, s.score_tier,
-    s.price, r2(s.change_percent), s.market_cap, r2(s.forward_pe), r2(s.sector_avg_fpe),
-    r2(s.price_to_book), r2(s.sector_avg_pb), r2(s.ev_to_ebitda), r2(s.sector_avg_ev_ebitda),
-    s.return_on_equity!=null?r2(s.return_on_equity*100):'', r2(s.sector_avg_roe!=null?s.sector_avg_roe*100:null),
-    s.free_cash_flow, r2(s.recommendation_mean), r2(s.upside_percent)
-  ]);
+  const headers = ['Symbol','Company','Sector','Industry','Model','Score','Delta','Tier','Price','1Y%','MktCap','FwdPE','MktAvgPE','P/B','MktAvgPB','EV/EBITDA','MktAvgEV','ROE%','MktAvgROE','FCF','DivYield%','Analyst','Upside%'];
+  const rows = stocks.map(s => {
+    const prev = prevScores[s.symbol];
+    const delta = prev !== undefined ? s.value_score - prev : '';
+    return [
+      s.symbol, `"${(s.short_name||'').replace(/"/g,'""')}"`, s.sector, s.industry, s.sector_type||'default',
+      s.value_score, delta, s.score_tier,
+      s.price, r2(s.change_percent), s.market_cap, r2(s.forward_pe), r2(s.market_avg_fpe),
+      r2(s.price_to_book), r2(s.market_avg_pb), r2(s.ev_to_ebitda), r2(s.market_avg_ev_ebitda),
+      s.return_on_equity!=null?r2(s.return_on_equity*100):'', r2(s.market_avg_roe!=null?s.market_avg_roe*100:null),
+      s.free_cash_flow, s.dividend_yield!=null?r2(s.dividend_yield*100):'', r2(s.recommendation_mean), r2(s.upside_percent)
+    ];
+  });
   let csv = headers.join(',') + '\n' + rows.map(r => r.join(',')).join('\n');
   const blob = new Blob([csv], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `52w_low_scan_${new Date().toISOString().slice(0,10)}.csv`;
   a.click();
+}
+
+// ────────── Sector model labels ──────────
+const MODEL_LABELS = {
+  financial: 'Financial', reit: 'REIT', energy: 'Energy', healthcare: 'Healthcare',
+  staples: 'Staples', cyclical: 'Cyclical', industrial: 'Industrial', comms: 'Comms',
+  materials: 'Materials', utilities: 'Utilities', default: 'Default'
+};
+const MODEL_DESCRIPTIONS = {
+  financial: 'Financial model (P/B + ROE + ROA, no EV/EBITDA)',
+  reit: 'REIT model (Div yield + NAV proxy + EV/EBITDA, no P/E penalty)',
+  energy: 'Energy model (EV/EBITDA + P/CF + FCF, no P/B)',
+  healthcare: 'Healthcare model (EV/EBITDA + Fwd P/E + FCF + debt check)',
+  staples: 'Staples model (EV/EBITDA + Fwd P/E + Div yield, no P/B)',
+  cyclical: 'Cyclical model (Normalized P/E + P/B + EV/EBITDA)',
+  industrial: 'Industrial model (EV/EBITDA + Fwd P/E + FCF + debt check)',
+  comms: 'Comms model (EV/EBITDA + FCF + Fwd P/E, no P/B)',
+  materials: 'Materials model (EV/EBITDA + FCF + P/B)',
+  utilities: 'Utilities model (Fwd P/E + Div yield + P/B, no FCF)',
+  default: 'Default model (Fwd P/E + P/B + EV/EBITDA + ROE)'
+};
+function fmtModel(t) { return MODEL_LABELS[t] || t || '—'; }
+
+function fmtFScore(fs) {
+  if (fs == null) return '<span style="color:var(--text2)">—</span>';
+  const cls = fs >= 7 ? 'c-green' : fs >= 4 ? '' : 'c-red';
+  return `<span class="${cls}">${fs}/9</span>`;
+}
+
+function fmtShort(si) {
+  if (si == null) return '—';
+  const pct = si < 1 ? si * 100 : si;
+  const cls = pct > 25 ? 'c-red' : pct > 15 ? 'val-amber' : '';
+  return `<span class="${cls}">${pct.toFixed(1)}%</span>`;
+}
+
+function fmtInsider(buys, sells) {
+  if (!buys && !sells) return '<span style="color:var(--text2)">—</span>';
+  const total = buys + sells;
+  const cls = total > 0 && buys / total > 0.6 ? 'c-green' : total > 0 && sells / total > 0.6 ? 'c-red' : '';
+  return `<span class="${cls}">${buys}B/${sells}S</span>`;
+}
+
+function fmtDelta(d) {
+  if (d === null || d === undefined) return '<span class="delta-flat">—</span>';
+  if (d > 0) return `<span class="delta-up">+${d}</span>`;
+  if (d < 0) return `<span class="delta-down">${d}</span>`;
+  return '<span class="delta-flat">0</span>';
 }
 
 // ────────── Formatting helpers ──────────
@@ -551,7 +701,7 @@ function fmtAnalyst(v) {
 }
 
 function scorePill(score, tier) {
-  const cls = score >= 70 ? 'pill-green' : score >= 40 ? 'pill-amber' : 'pill-gray';
+  const cls = score >= 70 ? 'pill-green' : score >= 45 ? 'pill-amber' : 'pill-gray';
   return `<span class="pill ${cls}">${score}</span>`;
 }
 

@@ -37,6 +37,23 @@ EXCLUDED_SYMBOLS = {
 }
 EXCLUDED_INDUSTRY_KEYWORDS = ["Software", "IT Services"]
 
+# Blue-chip benchmark tickers per sector for market-level averages.
+# These are fetched each scan to compute "true" sector averages,
+# avoiding the bias of averaging only 52-week-low stocks.
+SECTOR_BENCHMARK_TICKERS = {
+    "Financial Services": ["JPM", "BAC", "GS", "MS", "BRK-B"],
+    "Healthcare": ["JNJ", "UNH", "PFE", "MRK", "LLY"],
+    "Technology": ["AAPL", "MSFT", "GOOGL", "NVDA", "CRM"],
+    "Consumer Defensive": ["PG", "KO", "PEP", "WMT", "COST"],
+    "Consumer Cyclical": ["AMZN", "TSLA", "HD", "NKE", "MCD"],
+    "Industrials": ["CAT", "HON", "UPS", "GE", "RTX"],
+    "Energy": ["XOM", "CVX", "COP", "SLB", "EOG"],
+    "Communication Services": ["GOOGL", "META", "DIS", "T", "VZ"],
+    "Basic Materials": ["LIN", "APD", "ECL", "NEM", "FCX"],
+    "Utilities": ["NEE", "DUK", "SO", "AEP", "D"],
+    "Real Estate": ["PLD", "AMT", "EQIX", "SPG", "O"],
+}
+
 # Scoring thresholds
 OUTLIER_FPE_MAX = 100
 OUTLIER_PB_MAX = 20
