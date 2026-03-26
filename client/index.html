@@ -110,6 +110,10 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .score-legend { padding:0 24px 8px; font-size:11px; color:var(--text2); display:flex; align-items:center; gap:6px; }
 .score-legend .info-icon { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; background:var(--surface2); color:var(--text2); font-size:10px; font-weight:700; cursor:help; }
 
+/* Dual signal badge (appears on both Deep Value + Quality on Sale) */
+.dual-badge { display:inline-block; margin-left:6px; padding:1px 5px; border-radius:3px; background:linear-gradient(135deg, var(--green-bg), rgba(59,130,246,.15)); color:#a78bfa; font-size:9px; font-weight:700; vertical-align:middle; border:1px solid rgba(167,139,250,.25); }
+tbody tr.dual-signal { border-left:3px solid #a78bfa; }
+
 /* Watchlist star */
 .star { cursor:pointer; font-size:16px; color:var(--text2); }
 .star.active { color:var(--amber); }
@@ -157,6 +161,7 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
   <div class="tab active" data-tab="value" onclick="switchTab('value')">Deep Value <span class="badge badge-green" id="tabValueCount">0</span></div>
   <div class="tab" data-tab="quality" onclick="switchTab('quality')">Quality on Sale <span class="badge badge-blue" id="tabQualityCount">0</span></div>
   <div class="tab" data-tab="lookup" onclick="switchTab('lookup')">Stock Lookup</div>
+  <span id="tabDualCount" class="badge" style="display:none;margin-left:auto;background:rgba(167,139,250,.15);color:#a78bfa;font-size:11px;padding:3px 8px;align-self:center;">0 V+Q</span>
 </div>
 
 <div class="controls">
@@ -419,9 +424,11 @@ function renderTable() {
     const tier = isQ ? s.quality_tier : s.score_tier;
     const eg = s.earnings_growth;
     const rg = s.revenue_growth;
-    html += `<tr data-sym="${s.symbol}" class="${expandedSymbol === s.symbol ? 'expanded' : ''}">
+    const isDual = s.value_score >= 70 && s.quality_score >= 65;
+    const rowClass = [expandedSymbol === s.symbol ? 'expanded' : '', isDual ? 'dual-signal' : ''].join(' ').trim();
+    html += `<tr data-sym="${s.symbol}" class="${rowClass}">
       <td><span class="star ${isWL?'active':''}" onclick="toggleWL(event,'${s.symbol}')">★</span></td>
-      <td><strong>${s.symbol}</strong>${isNew?'<span class="new-badge">NEW</span>':''}</td>
+      <td><strong>${s.symbol}</strong>${isDual?'<span class="dual-badge">V+Q</span>':''}${isNew?'<span class="new-badge">NEW</span>':''}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${s.short_name||''}</td>
       <td>${s.sector||'—'}</td>
       <td>${isQ ? fmtFScore(s.piotroski_f_score) : '<span class=\"model-tag\">'+fmtModel(s.sector_type)+'</span>'}</td>
@@ -650,6 +657,11 @@ function updateSummary(s, qualityCount) {
   document.getElementById('sumSectorSub').textContent = s.top_sector ? `${s.top_sector_count} strong-value stocks` : '';
   document.getElementById('tabValueCount').textContent = s.strong_value_count;
   document.getElementById('tabQualityCount').textContent = qualityCount || 0;
+  // Count dual-signal stocks
+  const dualCount = allStocks.filter(st => st.value_score >= 70 && st.quality_score >= 65).length;
+  const dualEl = document.getElementById('tabDualCount');
+  dualEl.textContent = dualCount + ' V+Q';
+  dualEl.style.display = dualCount > 0 ? '' : 'none';
 }
 
 function updateLastUpdated(ts) {
