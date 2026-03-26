@@ -14,7 +14,7 @@ from server.config import (
     SECTOR_BENCHMARK_TICKERS,
 )
 from server.models import ScanResult, ScoredStock, SectorAverages, StockFundamentals, StockQuote
-from server.scorer import compute_score
+from server.scorer import compute_quality_score, compute_score
 from server.yahoo_client import YahooClient
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,12 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
     # Piotroski F-Score
     f_score, f_details = _compute_piotroski(data, fin)
 
+    # Gross margin change YoY
+    gm_change = _compute_gross_margin_change(data)
+
+    # Buyback yield (share count change)
+    bb_yield = _compute_buyback_yield(stats)
+
     return StockFundamentals(
         symbol=symbol,
         forward_pe=_safe_raw(stats, "forwardPE"),
@@ -86,6 +92,8 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         insider_net_shares=net_shares,
         piotroski_f_score=f_score,
         piotroski_details=f_details,
+        gross_margin_change=gm_change,
+        buyback_yield=bb_yield,
         sector=profile.get("sector", ""),
         industry=profile.get("industry", ""),
         country=profile.get("country", ""),
@@ -119,6 +127,41 @@ def _parse_insider_transactions(data: dict) -> tuple[int, int, Optional[int]]:
             net_shares -= int(shares)
 
     return buy_count, sell_count, net_shares if (buy_count + sell_count) > 0 else None
+
+
+def _compute_gross_margin_change(data: dict) -> Optional[float]:
+    """Compute YoY change in gross margin from income statement history."""
+    inc_hist = data.get("incomeStatementHistory", {}).get("incomeStatementHistory", [])
+    if len(inc_hist) < 2:
+        return None
+    cur, prev = inc_hist[0], inc_hist[1]
+    cur_gp = _safe_raw(cur, "grossProfit")
+    cur_rev = _safe_raw(cur, "totalRevenue")
+    prev_gp = _safe_raw(prev, "grossProfit")
+    prev_rev = _safe_raw(prev, "totalRevenue")
+    if not all([cur_gp, cur_rev, prev_gp, prev_rev]) or cur_rev == 0 or prev_rev == 0:
+        return None
+    cur_margin = cur_gp / cur_rev
+    prev_margin = prev_gp / prev_rev
+    return round(cur_margin - prev_margin, 4)  # e.g., 0.02 = +2pp improvement
+
+
+def _compute_buyback_yield(stats: dict) -> Optional[float]:
+    """Approximate buyback yield from shares outstanding vs float.
+
+    If shares outstanding is decreasing, the company is buying back shares.
+    Uses impliedSharesOutstanding and sharesOutstanding from defaultKeyStatistics.
+    Returns positive for buybacks, negative for dilution.
+    """
+    cur_shares = _safe_raw(stats, "sharesOutstanding")
+    float_shares = _safe_raw(stats, "floatShares")
+    implied = _safe_raw(stats, "impliedSharesOutstanding")
+    # Use implied vs current as a proxy for buyback direction
+    if implied and cur_shares and cur_shares > 0:
+        change = (cur_shares - implied) / cur_shares
+        if abs(change) > 0.001:  # ignore tiny rounding differences
+            return round(-change, 4)  # positive = net buyback
+    return None
 
 
 def _compute_piotroski(data: dict, fin: dict) -> tuple[Optional[int], list[str]]:
@@ -409,11 +452,21 @@ def merge_quote_and_fundamentals(
         s.insider_net_shares = fundamentals.insider_net_shares
         s.piotroski_f_score = fundamentals.piotroski_f_score
         s.piotroski_details = fundamentals.piotroski_details
+        s.gross_margin_change = fundamentals.gross_margin_change
+        s.buyback_yield = fundamentals.buyback_yield
         s.debt_to_equity = fundamentals.debt_to_equity
         s.ev_to_revenue = fundamentals.ev_to_revenue
         s.revenue_growth = fundamentals.revenue_growth
         s.earnings_growth = fundamentals.earnings_growth
         s.current_ratio = fundamentals.current_ratio
+
+    # Compute price momentum from 52W range
+    if s.fifty_two_week_high and s.fifty_two_week_high > 0 and s.price:
+        s.price_momentum_12m = round((s.price / s.fifty_two_week_high - 1) * 100, 1)
+    # 3-month momentum approximated from change_percent
+    if s.change_percent is not None:
+        s.price_momentum_3m = round(s.change_percent, 1)
+
     return s
 
 
@@ -489,7 +542,7 @@ async def run_pipeline(client: Optional[YahooClient] = None) -> ScanResult:
 
         # Step 6: Score each stock
         # Priority: industry avg (≥3 peers) → market sector avg → scan sector avg
-        logger.info("Step 6: Scoring stocks...")
+        logger.info("Step 6: Scoring stocks (value + quality)...")
         for s in stocks:
             peers = industry_groups.get(s.industry, [])
             if len(peers) >= 4:
@@ -498,11 +551,17 @@ async def run_pipeline(client: Optional[YahooClient] = None) -> ScanResult:
                 peer_avg = market_averages[s.sector]
             else:
                 peer_avg = sector_averages.get(s.sector)
+            # Value score (cheapness-focused)
             breakdown = compute_score(s, peer_avg)
             s.value_score = breakdown.total
             s.score_tier = breakdown.tier
             s.score_reasons = breakdown.reasons
             s.sector_type = breakdown.sector_type
+            # Quality score (business quality at fair price)
+            q = compute_quality_score(s, peer_avg)
+            s.quality_score = q.total
+            s.quality_tier = q.tier
+            s.quality_reasons = q.reasons
 
         # Sort by score descending
         stocks.sort(key=lambda x: x.value_score, reverse=True)

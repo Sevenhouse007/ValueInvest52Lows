@@ -45,6 +45,8 @@ class StockFundamentals(BaseModel):
     insider_net_shares: Optional[int] = None
     piotroski_f_score: Optional[int] = None
     piotroski_details: list[str] = Field(default_factory=list)
+    gross_margin_change: Optional[float] = None
+    buyback_yield: Optional[float] = None
     sector: str = ""
     industry: str = ""
     country: str = ""
@@ -99,6 +101,10 @@ class ScoredStock(BaseModel):
     insider_net_shares: Optional[int] = None
     piotroski_f_score: Optional[int] = None
     piotroski_details: list[str] = Field(default_factory=list)
+    gross_margin_change: Optional[float] = None  # YoY change in gross margin
+    buyback_yield: Optional[float] = None  # negative = dilution
+    price_momentum_3m: Optional[float] = None  # 3-month price change %
+    price_momentum_12m: Optional[float] = None  # 12-month price change %
     country: str = ""
     debt_to_equity: Optional[float] = None
     ev_to_revenue: Optional[float] = None
@@ -124,11 +130,15 @@ class ScoredStock(BaseModel):
     industry_avg_ev_ebitda: Optional[float] = None
     industry_avg_roe: Optional[float] = None
     industry_peer_count: int = 0
-    # Score
+    # Value score (cheapness-focused)
     value_score: int = 0
     score_tier: str = "Limited signal"
     score_reasons: list[str] = Field(default_factory=list)
     sector_type: str = "default"
+    # Quality score (business quality at a fair price)
+    quality_score: int = 0
+    quality_tier: str = "Limited"
+    quality_reasons: list[str] = Field(default_factory=list)
     # Upside
     upside_percent: Optional[float] = None
 

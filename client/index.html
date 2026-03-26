@@ -119,6 +119,18 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .spinner { width:40px; height:40px; border:3px solid var(--border); border-top-color:var(--blue); border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 
+/* Tabs */
+.tab-bar { display:flex; gap:0; padding:16px 24px 0; border-bottom:2px solid var(--border); }
+.tab { padding:10px 24px; cursor:pointer; color:var(--text2); font-size:14px; font-weight:500; border-bottom:2px solid transparent; margin-bottom:-2px; transition:all .15s; }
+.tab:hover { color:var(--text); }
+.tab.active { color:var(--blue); border-bottom-color:var(--blue); }
+.tab .badge { display:inline-block; margin-left:6px; padding:1px 6px; border-radius:8px; font-size:11px; font-weight:600; }
+.tab .badge-green { background:var(--green-bg); color:var(--green); }
+.tab .badge-blue { background:rgba(59,130,246,.12); color:var(--blue); }
+
+/* Quality pill */
+.pill-blue { background:rgba(59,130,246,.12); color:var(--blue); }
+
 /* Empty state */
 .empty-state { text-align:center; padding:80px 24px; color:var(--text2); }
 .empty-state h2 { font-size:18px; margin-bottom:8px; color:var(--text); }
@@ -137,8 +149,13 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 <div class="summary-row" id="summaryCards">
   <div class="summary-card"><div class="label">Stocks Scanned</div><div class="value" id="sumTotal">—</div></div>
   <div class="summary-card"><div class="label">Strong Value (≥70)</div><div class="value val-green" id="sumStrong">—</div></div>
-  <div class="summary-card"><div class="label">Avg Score</div><div class="value" id="sumAvg">—</div></div>
+  <div class="summary-card"><div class="label">Quality Buys</div><div class="value" id="sumQuality" style="color:var(--blue)">—</div></div>
   <div class="summary-card"><div class="label">Top Sector</div><div class="value" id="sumSector">—</div><div class="sub" id="sumSectorSub"></div></div>
+</div>
+
+<div class="tab-bar">
+  <div class="tab active" data-tab="value" onclick="switchTab('value')">Deep Value <span class="badge badge-green" id="tabValueCount">0</span></div>
+  <div class="tab" data-tab="quality" onclick="switchTab('quality')">Quality on Sale <span class="badge badge-blue" id="tabQualityCount">0</span></div>
 </div>
 
 <div class="controls">
@@ -216,6 +233,7 @@ let sortDir = -1; // -1 = desc
 let expandedSymbol = null;
 let watchlist = JSON.parse(localStorage.getItem('watchlist') || '[]');
 let prevScores = {}; // { symbol: score } from previous scan, _loaded flag
+let activeTab = 'value'; // 'value' or 'quality'
 
 // ────────── Init ──────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -234,7 +252,7 @@ async function loadScan(dateStr) {
     const data = await r.json();
     allStocks = data.stocks;
     sectorAverages = data.sector_averages;
-    updateSummary(data.summary);
+    updateSummary(data.summary, data.quality_buy_count);
     updateLastUpdated(data.scanned_at);
     populateSectorFilter();
     // Load previous scan for diff
@@ -372,6 +390,7 @@ function renderTable() {
     arrow.textContent = th.dataset.key === sortKey ? (sortDir === -1 ? '▼' : '▲') : '';
   });
 
+  const isQ = activeTab === 'quality';
   let html = '';
   stocks.forEach(s => {
     const isWL = watchlist.includes(s.symbol);
@@ -382,23 +401,26 @@ function renderTable() {
     const prev = prevScores[s.symbol];
     const isNew = prevScores._loaded && prev === undefined;
     const delta = prev !== undefined ? s.value_score - prev : null;
-    // For sorting: attach computed delta to the stock object
     s._score_delta = delta;
+    const score = isQ ? s.quality_score : s.value_score;
+    const tier = isQ ? s.quality_tier : s.score_tier;
+    const eg = s.earnings_growth;
+    const rg = s.revenue_growth;
     html += `<tr data-sym="${s.symbol}" class="${expandedSymbol === s.symbol ? 'expanded' : ''}">
       <td><span class="star ${isWL?'active':''}" onclick="toggleWL(event,'${s.symbol}')">★</span></td>
       <td><strong>${s.symbol}</strong>${isNew?'<span class="new-badge">NEW</span>':''}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${s.short_name||''}</td>
       <td>${s.sector||'—'}</td>
-      <td><span class="model-tag">${fmtModel(s.sector_type)}</span></td>
-      <td>${scorePill(s.value_score, s.score_tier)}</td>
-      <td class="num">${fmtDelta(delta)}</td>
+      <td>${isQ ? fmtFScore(s.piotroski_f_score) : '<span class=\"model-tag\">'+fmtModel(s.sector_type)+'</span>'}</td>
+      <td>${scorePill(score, tier)}</td>
+      <td class="num">${isQ ? '' : fmtDelta(delta)}</td>
       <td class="num">$${fmt(s.price,2)}</td>
       <td class="num ${s.change_percent>=0?'c-green':'c-red'}">${fmt(s.change_percent,1)}%</td>
       <td class="num">${fmtCap(s.market_cap)}</td>
-      <td class="num ${cmpClass(s.forward_pe, mktAvg, true)}" title="Scan avg: ${fmtN(s.sector_avg_fpe,1)} | Mkt avg: ${fmtN(s.market_avg_fpe,1)} | Ind avg: ${fmtN(s.industry_avg_fpe,1)}">${fmtN(s.forward_pe,1)}</td>
-      <td class="num ${cmpClass(s.price_to_book, mktPb, true)}" title="Scan avg: ${fmtN(s.sector_avg_pb,1)} | Mkt avg: ${fmtN(s.market_avg_pb,1)} | Ind avg: ${fmtN(s.industry_avg_pb,1)}">${fmtN(s.price_to_book,1)}</td>
-      <td class="num ${cmpClass(s.ev_to_ebitda, mktEv, true)}" title="Scan avg: ${fmtN(s.sector_avg_ev_ebitda,1)} | Mkt avg: ${fmtN(s.market_avg_ev_ebitda,1)} | Ind avg: ${fmtN(s.industry_avg_ev_ebitda,1)}">${fmtN(s.ev_to_ebitda,1)}</td>
-      <td class="num ${cmpClass(s.return_on_equity, mktRoe, false)}" title="Scan avg: ${fmtROE(s.sector_avg_roe)} | Mkt avg: ${fmtROE(s.market_avg_roe)} | Ind avg: ${fmtROE(s.industry_avg_roe)}">${fmtROE(s.return_on_equity)}</td>
+      <td class="num ${cmpClass(s.forward_pe, mktAvg, true)}" title="Mkt avg: ${fmtN(s.market_avg_fpe,1)} | Ind avg: ${fmtN(s.industry_avg_fpe,1)}">${fmtN(s.forward_pe,1)}</td>
+      <td class="num ${cmpClass(s.price_to_book, mktPb, true)}" title="Mkt avg: ${fmtN(s.market_avg_pb,1)} | Ind avg: ${fmtN(s.industry_avg_pb,1)}">${fmtN(s.price_to_book,1)}</td>
+      <td class="num ${cmpClass(s.ev_to_ebitda, mktEv, true)}" title="Mkt avg: ${fmtN(s.market_avg_ev_ebitda,1)} | Ind avg: ${fmtN(s.industry_avg_ev_ebitda,1)}">${fmtN(s.ev_to_ebitda,1)}</td>
+      <td class="num ${cmpClass(s.return_on_equity, mktRoe, false)}" title="Mkt avg: ${fmtROE(s.market_avg_roe)} | Ind avg: ${fmtROE(s.industry_avg_roe)}">${fmtROE(s.return_on_equity)}</td>
       <td class="num ${s.free_cash_flow>0?'c-green':s.free_cash_flow<0?'c-red':''}">${fmtFCF(s.free_cash_flow)}</td>
       <td class="num">${fmtAnalyst(s.recommendation_mean)}</td>
       <td class="num ${s.upside_percent>30?'c-bold-green':s.upside_percent>0?'c-green':''}">${fmtN(s.upside_percent,1,'%')}</td>
@@ -475,9 +497,18 @@ function detailPanel(s) {
   });
   metricsHtml += '</div>';
 
-  let reasonsHtml = '<ul class="reasons-list">';
-  (s.score_reasons||[]).forEach(r => { reasonsHtml += `<li>${r}</li>`; });
+  const activeReasons = isQ ? (s.quality_reasons||[]) : (s.score_reasons||[]);
+  const activeLabel = isQ ? 'Quality Reasons' : 'Value Reasons';
+  let reasonsHtml = `<h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">${activeLabel}</h4>`;
+  reasonsHtml += '<ul class="reasons-list">';
+  activeReasons.forEach(r => { reasonsHtml += `<li>${r}</li>`; });
   reasonsHtml += '</ul>';
+  // Show the other score for context
+  if (isQ) {
+    reasonsHtml += `<div style="margin-top:8px;font-size:11px;color:var(--text2)">Value Score: ${scorePillSmall(s.value_score, s.score_tier)}</div>`;
+  } else {
+    reasonsHtml += `<div style="margin-top:8px;font-size:11px;color:var(--text2)">Quality Score: ${scorePillSmall(s.quality_score, s.quality_tier)}</div>`;
+  }
   if (s.piotroski_details && s.piotroski_details.length > 0) {
     reasonsHtml += `<h4 style="margin-top:12px;margin-bottom:6px;color:var(--text2);font-size:11px;text-transform:uppercase;">Piotroski Tests (${s.piotroski_f_score}/9)</h4>`;
     reasonsHtml += '<ul class="reasons-list">';
@@ -568,14 +599,23 @@ function toggleWL(e, sym) {
 }
 
 // ────────── Summary ──────────
-function updateSummary(s) {
+function switchTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  sortKey = tab === 'quality' ? 'quality_score' : 'value_score';
+  sortDir = -1;
+  expandedSymbol = null;
+  renderTable();
+}
+
+function updateSummary(s, qualityCount) {
   document.getElementById('sumTotal').textContent = s.total_scanned;
   document.getElementById('sumStrong').textContent = s.strong_value_count;
-  const avgEl = document.getElementById('sumAvg');
-  avgEl.textContent = s.average_score.toFixed(1);
-  avgEl.className = 'value ' + (s.average_score >= 50 ? 'val-green' : s.average_score >= 30 ? 'val-amber' : '');
+  document.getElementById('sumQuality').textContent = qualityCount || 0;
   document.getElementById('sumSector').textContent = s.top_sector || '—';
   document.getElementById('sumSectorSub').textContent = s.top_sector ? `${s.top_sector_count} strong-value stocks` : '';
+  document.getElementById('tabValueCount').textContent = s.strong_value_count;
+  document.getElementById('tabQualityCount').textContent = qualityCount || 0;
 }
 
 function updateLastUpdated(ts) {
@@ -661,6 +701,11 @@ function fmtInsider(buys, sells) {
   return `<span class="${cls}">${buys}B/${sells}S</span>`;
 }
 
+function scorePillSmall(score, tier) {
+  const cls = score >= 65 ? 'pill-blue' : score >= 45 ? 'pill-amber' : 'pill-gray';
+  return `<span class="pill ${cls}" style="font-size:10px;padding:1px 6px;">${score}</span>`;
+}
+
 function fmtDelta(d) {
   if (d === null || d === undefined) return '<span class="delta-flat">—</span>';
   if (d > 0) return `<span class="delta-up">+${d}</span>`;
@@ -701,6 +746,10 @@ function fmtAnalyst(v) {
 }
 
 function scorePill(score, tier) {
+  if (activeTab === 'quality') {
+    const cls = score >= 65 ? 'pill-blue' : score >= 45 ? 'pill-amber' : 'pill-gray';
+    return `<span class="pill ${cls}">${score}</span>`;
+  }
   const cls = score >= 70 ? 'pill-green' : score >= 45 ? 'pill-amber' : 'pill-gray';
   return `<span class="pill ${cls}">${score}</span>`;
 }

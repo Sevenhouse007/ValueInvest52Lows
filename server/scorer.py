@@ -745,3 +745,169 @@ def compute_score(stock: ScoredStock, sector_avg: Optional[SectorAverages]) -> S
         reasons=reasons,
         sector_type=sector_type,
     )
+
+
+# =====================================================================
+# Quality score — "great business at a fair price"
+#
+# This is the opposite lens from value scoring. It asks:
+# "Is this a fundamentally excellent business that's temporarily on sale?"
+# Weights quality metrics (F-Score, ROE, margins, growth) heavily and
+# cheapness metrics lightly. Designed to surface stocks like HD, ADP,
+# CTAS, RACE that score poorly on value but are quality compounders.
+# =====================================================================
+
+def compute_quality_score(
+    stock: ScoredStock, peer_avg: Optional[SectorAverages]
+) -> ScoreBreakdown:
+    """Compute a quality-at-fair-price score (0-100)."""
+    pts = 0
+    reasons: list[str] = []
+
+    # ── Piotroski F-Score (25 pts max — heaviest weight) ──
+    fs = stock.piotroski_f_score
+    if fs is not None:
+        if fs >= 8:
+            pts += 25; reasons.append(f"Excellent fundamentals (F-Score {fs}/9)")
+        elif fs >= 7:
+            pts += 20; reasons.append(f"Strong fundamentals (F-Score {fs}/9)")
+        elif fs >= 6:
+            pts += 12; reasons.append(f"Good fundamentals (F-Score {fs}/9)")
+        elif fs >= 4:
+            pts += 4
+        else:
+            pts -= 10; reasons.append(f"Weak fundamentals (F-Score {fs}/9)")
+
+    # ── ROE vs sector (20 pts max) ──
+    roe = stock.return_on_equity
+    mkt_roe = stock.market_avg_roe or (peer_avg.avg_roe if peer_avg else None)
+    if roe is not None and roe > 0:
+        if mkt_roe and mkt_roe > 0:
+            ratio = roe / mkt_roe
+            if ratio >= 2.0:
+                pts += 20; reasons.append(f"ROE {roe*100:.0f}% — {ratio:.1f}x sector")
+            elif ratio >= 1.3:
+                pts += 14; reasons.append(f"ROE {roe*100:.0f}% — above sector")
+            elif ratio >= 0.8:
+                pts += 8
+            else:
+                pts += 3
+        elif roe > 0.20:
+            pts += 15; reasons.append(f"Strong ROE {roe*100:.0f}%")
+        elif roe > 0.12:
+            pts += 8
+    elif roe is not None and roe < 0:
+        pts -= 8; reasons.append("Negative ROE")
+
+    # ── Earnings growth (15 pts max) ──
+    eg = stock.earnings_growth
+    if eg is not None:
+        if eg > 0.25:
+            pts += 15; reasons.append(f"Earnings growing {eg*100:.0f}%")
+        elif eg > 0.10:
+            pts += 10; reasons.append(f"Earnings growing {eg*100:.0f}%")
+        elif eg > 0:
+            pts += 5
+        elif eg > -0.15:
+            pts -= 3
+        elif eg > -0.40:
+            pts -= 8; reasons.append(f"Earnings declining {eg*100:.0f}%")
+        else:
+            pts -= 15; reasons.append(f"Earnings collapsing {eg*100:.0f}%")
+
+    # ── Revenue growth (10 pts max) ──
+    rg = stock.revenue_growth
+    if rg is not None:
+        if rg > 0.15:
+            pts += 10; reasons.append(f"Revenue growing {rg*100:.0f}%")
+        elif rg > 0.05:
+            pts += 6
+        elif rg > 0:
+            pts += 2
+        elif rg < -0.10:
+            pts -= 5; reasons.append(f"Revenue declining {rg*100:.0f}%")
+
+    # ── Gross margin trend (8 pts max) ──
+    gm = stock.gross_margin_change
+    if gm is not None:
+        if gm > 0.03:
+            pts += 8; reasons.append(f"Margins expanding +{gm*100:.1f}pp")
+        elif gm > 0.01:
+            pts += 4; reasons.append("Margins improving")
+        elif gm < -0.03:
+            pts -= 5; reasons.append(f"Margins contracting {gm*100:.1f}pp")
+
+    # ── FCF yield (8 pts max) ──
+    fcf = stock.free_cash_flow
+    mc = stock.market_cap
+    if fcf and mc and mc > 0:
+        fy = fcf / mc
+        if fy > 0.08:
+            pts += 8; reasons.append(f"Strong FCF yield {fy*100:.0f}%")
+        elif fy > 0.03:
+            pts += 4
+        elif fy < -0.05:
+            pts -= 5; reasons.append("Burning cash")
+
+    # ── Buyback yield (5 pts max) ──
+    bb = stock.buyback_yield
+    if bb is not None:
+        if bb > 0.02:
+            pts += 5; reasons.append("Active buybacks")
+        elif bb < -0.03:
+            pts -= 3; reasons.append("Share dilution")
+
+    # ── Insider confidence (10 pts max) ──
+    buys = stock.insider_buy_count
+    sells = stock.insider_sell_count
+    total = buys + sells
+    if total > 0:
+        sentiment = buys / total
+        if sentiment > 0.7 and buys >= 2:
+            pts += 10; reasons.append(f"Insiders buying ({buys}B/{sells}S)")
+        elif sentiment > 0.5:
+            pts += 4
+        elif sells >= 10:
+            pts -= 12; reasons.append(f"Heavy insider selling ({sells}S)")
+        elif sells >= 5:
+            pts -= 6; reasons.append(f"Insider selling ({sells}S)")
+
+    # ── Low short interest (5 pts max) ──
+    si = stock.short_percent_of_float
+    if si is not None:
+        pct = si * 100 if si < 1 else si
+        if pct < 3:
+            pts += 5; reasons.append("Low short interest")
+        elif pct > 25:
+            pts -= 5; reasons.append(f"High short interest {pct:.0f}%")
+
+    # ── Price drop as opportunity (10 pts max) ──
+    # Sharp drop from 52W high = bigger opportunity for quality business
+    if stock.fifty_two_week_high and stock.price and stock.fifty_two_week_high > 0:
+        drop = 1 - (stock.price / stock.fifty_two_week_high)
+        if drop > 0.40:
+            pts += 10; reasons.append(f"Down {drop*100:.0f}% from 52W high")
+        elif drop > 0.25:
+            pts += 6; reasons.append(f"Down {drop*100:.0f}% from 52W high")
+        elif drop > 0.15:
+            pts += 3
+
+    # ── Mild valuation bonus (not the main focus, but a nice-to-have) ──
+    fpe = stock.forward_pe
+    mkt_fpe = stock.market_avg_fpe or (peer_avg.avg_forward_pe if peer_avg else None)
+    if fpe and fpe > 0 and mkt_fpe and mkt_fpe > 0:
+        ratio = fpe / mkt_fpe
+        if ratio < 0.50:
+            pts += 5; reasons.append("Also cheap on P/E")
+        elif ratio < 0.75:
+            pts += 2
+
+    score = max(0, min(100, pts))
+    if score >= 65:
+        tier = "Quality Buy"
+    elif score >= 45:
+        tier = "Quality Watch"
+    else:
+        tier = "Not Quality"
+
+    return ScoreBreakdown(total=score, tier=tier, reasons=reasons, sector_type="")

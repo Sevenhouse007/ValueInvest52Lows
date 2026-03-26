@@ -163,6 +163,8 @@ def _build_response(result: ScanResult) -> dict:
     sector_counts = Counter(s.sector for s in strong if s.sector)
     top_sector, top_count = sector_counts.most_common(1)[0] if sector_counts else ("", 0)
 
+    quality_buys = [s for s in stocks if s.quality_score >= 65]
+
     summary = ScanSummary(
         total_scanned=len(stocks),
         strong_value_count=len(strong),
@@ -174,6 +176,7 @@ def _build_response(result: ScanResult) -> dict:
         "scan_date": result.scan_date,
         "scanned_at": result.scanned_at,
         "summary": summary.model_dump(),
+        "quality_buy_count": len(quality_buys),
         "stocks": [s.model_dump() for s in stocks],
         "sector_averages": {k: v.model_dump() for k, v in result.sector_averages.items()},
     }
