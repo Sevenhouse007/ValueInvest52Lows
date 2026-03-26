@@ -413,7 +413,7 @@ function renderTable() {
       <td>${s.sector||'—'}</td>
       <td>${isQ ? fmtFScore(s.piotroski_f_score) : '<span class=\"model-tag\">'+fmtModel(s.sector_type)+'</span>'}</td>
       <td>${scorePill(score, tier)}</td>
-      <td class="num">${isQ ? '' : fmtDelta(delta)}</td>
+      <td class="num" ${isQ?'style="display:none"':''}>${fmtDelta(delta)}</td>
       <td class="num">$${fmt(s.price,2)}</td>
       <td class="num ${s.change_percent>=0?'c-green':'c-red'}">${fmt(s.change_percent,1)}%</td>
       <td class="num">${fmtCap(s.market_cap)}</td>
