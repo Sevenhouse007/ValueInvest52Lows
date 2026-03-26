@@ -497,14 +497,15 @@ function detailPanel(s) {
   });
   metricsHtml += '</div>';
 
-  const activeReasons = isQ ? (s.quality_reasons||[]) : (s.score_reasons||[]);
-  const activeLabel = isQ ? 'Quality Reasons' : 'Value Reasons';
+  const _isQ = activeTab === 'quality';
+  const activeReasons = _isQ ? (s.quality_reasons||[]) : (s.score_reasons||[]);
+  const activeLabel = _isQ ? 'Quality Reasons' : 'Value Reasons';
   let reasonsHtml = `<h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">${activeLabel}</h4>`;
   reasonsHtml += '<ul class="reasons-list">';
   activeReasons.forEach(r => { reasonsHtml += `<li>${r}</li>`; });
   reasonsHtml += '</ul>';
   // Show the other score for context
-  if (isQ) {
+  if (_isQ) {
     reasonsHtml += `<div style="margin-top:8px;font-size:11px;color:var(--text2)">Value Score: ${scorePillSmall(s.value_score, s.score_tier)}</div>`;
   } else {
     reasonsHtml += `<div style="margin-top:8px;font-size:11px;color:var(--text2)">Quality Score: ${scorePillSmall(s.quality_score, s.quality_tier)}</div>`;
