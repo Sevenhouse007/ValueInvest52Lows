@@ -87,20 +87,16 @@ def _ratio_score(
         if ratio <= 0.30:
             return max_pts, [f"{label} extremely cheap vs peers ({ratio:.1f}x avg)"]
         if ratio <= 0.50:
-            return int(max_pts * 0.80), [f"{label} very cheap vs peers ({ratio:.1f}x)"]
+            return int(max_pts * 0.85), [f"{label} very cheap vs peers ({ratio:.1f}x)"]
         if ratio <= 0.65:
-            return int(max_pts * 0.60), [f"{label} cheap vs peers ({ratio:.1f}x)"]
+            return int(max_pts * 0.65), [f"{label} cheap vs peers ({ratio:.1f}x)"]
         if ratio <= 0.80:
-            return int(max_pts * 0.40), [f"{label} below peers ({ratio:.1f}x)"]
+            return int(max_pts * 0.45), [f"{label} below peers ({ratio:.1f}x)"]
         if ratio <= 0.95:
-            return int(max_pts * 0.15), []
-        if ratio <= 1.15:
-            return 0, []  # in line with sector
-        if ratio <= 1.50:
-            return 0, []
-        # Significantly above sector average — still expensive even at 52W low
-        penalty = -min(int(max_pts * 0.30), 8)
-        return penalty, [f"{label} above sector avg ({ratio:.1f}x)"]
+            return int(max_pts * 0.20), []
+        # At or above sector average — no bonus, but no penalty either.
+        # Being "expensive" at a 52W low usually means quality premium, not a flaw.
+        return 0, []
     else:
         # Higher is better (ROE, div yield)
         ratio = value / avg
@@ -109,13 +105,13 @@ def _ratio_score(
         if ratio >= 1.8:
             return int(max_pts * 0.80), [f"Strong {label}"]
         if ratio >= 1.3:
-            return int(max_pts * 0.55), [f"Good {label}"]
-        if ratio >= 0.9:
-            return int(max_pts * 0.20), []
-        if ratio >= 0.5:
-            return 0, []
+            return int(max_pts * 0.60), [f"Good {label}"]
+        if ratio >= 1.0:
+            return int(max_pts * 0.30), [f"Solid {label}"]
+        if ratio >= 0.7:
+            return int(max_pts * 0.10), []
         # Well below sector average
-        return -int(max_pts * 0.25), [f"Weak {label} vs peers"]
+        return 0, []
 
 
 # =====================================================================
@@ -528,11 +524,7 @@ def _penalty_sector_relative(stock: ScoredStock, sector_type: str) -> tuple[int,
         elif burn > 0.05:
             pts -= 3; reasons.append(f"Negative FCF ({burn*100:.0f}% of mkt cap)")
 
-    # Negative ROE when sector is profitable
-    roe = stock.return_on_equity
-    mkt_roe = stock.market_avg_roe
-    if roe is not None and roe < 0 and mkt_roe and mkt_roe > 0.05:
-        pts -= 5; reasons.append(f"Negative ROE vs sector avg {mkt_roe*100:.0f}%")
+    # ROE: handled by ratio scorer — no double-counting here
 
     return pts, reasons
 
