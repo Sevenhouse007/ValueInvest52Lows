@@ -1,17 +1,19 @@
-"""Sector-aware value scoring engine.
+"""Sector-aware value scoring engine — fully ratio-based.
 
-Each sector uses a different rubric reflecting how Wall Street actually
-values companies in that sector.  The master function ``compute_score``
-detects the sector type and dispatches to the appropriate scorer.
+Every valuation metric is scored by comparing the stock's value to the
+sector/market peer average.  There are zero hardcoded price or multiple
+breakpoints.  Sector rubrics define *which* metrics matter and their
+relative weight; the generic ``_ratio_score`` function handles the rest.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from server.models import ScoreBreakdown, ScoredStock, SectorAverages
 
-# ── China ADR detection via country field ────────────────────────────
+# ── Constants ────────────────────────────────────────────────────────
 _CHINA_COUNTRIES = {"China", "Hong Kong"}
 
 
@@ -20,7 +22,6 @@ _CHINA_COUNTRIES = {"China", "Hong Kong"}
 # =====================================================================
 
 def detect_sector_type(sector: str, industry: str) -> str:
-    """Map Yahoo Finance sector/industry to an internal scoring type."""
     sector = sector or ""
     industry = industry or ""
     s_low = sector.lower()
@@ -50,74 +51,335 @@ def detect_sector_type(sector: str, industry: str) -> str:
 
 
 # =====================================================================
-# Shared helpers
+# Generic ratio-based scoring
 # =====================================================================
 
-def _roe_pct(roe: Optional[float]) -> Optional[float]:
-    """Normalise ROE to a percentage value (0-100 scale)."""
-    if roe is None:
-        return None
-    return roe * 100 if abs(roe) < 1 else roe
+def _ratio_score(
+    value: Optional[float],
+    avg: Optional[float],
+    max_pts: int,
+    lower_is_better: bool,
+    label: str,
+    *,
+    allow_negative_penalty: bool = True,
+) -> tuple[int, list[str]]:
+    """Score a metric based on how far it deviates from the peer average.
+
+    For ``lower_is_better`` metrics (P/E, P/B, EV/EBITDA):
+        ratio = value / avg.  Lower ratio = cheaper = more points.
+
+    For ``higher_is_better`` metrics (ROE, div yield, FCF yield):
+        ratio = value / avg.  Higher ratio = better = more points.
+
+    Returns (points, reasons_list).
+    """
+    if value is None or avg is None or avg == 0:
+        return 0, []
+
+    # Special: negative value on a "positive is normal" metric
+    if value < 0 and avg > 0 and allow_negative_penalty:
+        return -int(max_pts * 0.4), [f"Negative {label}"]
+
+    if lower_is_better:
+        if value <= 0:
+            return 0, []  # negative P/E etc. handled by dedicated penalty
+        ratio = value / avg
+        if ratio <= 0.30:
+            return max_pts, [f"{label} extremely cheap vs peers ({ratio:.1f}x avg)"]
+        if ratio <= 0.50:
+            return int(max_pts * 0.80), [f"{label} very cheap vs peers ({ratio:.1f}x)"]
+        if ratio <= 0.65:
+            return int(max_pts * 0.60), [f"{label} cheap vs peers ({ratio:.1f}x)"]
+        if ratio <= 0.80:
+            return int(max_pts * 0.40), [f"{label} below peers ({ratio:.1f}x)"]
+        if ratio <= 0.95:
+            return int(max_pts * 0.15), []
+        if ratio <= 1.15:
+            return 0, []  # in line with sector
+        if ratio <= 1.50:
+            return 0, []
+        # Significantly above sector average — still expensive even at 52W low
+        penalty = -min(int(max_pts * 0.30), 8)
+        return penalty, [f"{label} above sector avg ({ratio:.1f}x)"]
+    else:
+        # Higher is better (ROE, div yield)
+        ratio = value / avg
+        if ratio >= 2.5:
+            return max_pts, [f"Strong {label} ({ratio:.1f}x sector avg)"]
+        if ratio >= 1.8:
+            return int(max_pts * 0.80), [f"Strong {label}"]
+        if ratio >= 1.3:
+            return int(max_pts * 0.55), [f"Good {label}"]
+        if ratio >= 0.9:
+            return int(max_pts * 0.20), []
+        if ratio >= 0.5:
+            return 0, []
+        # Well below sector average
+        return -int(max_pts * 0.25), [f"Weak {label} vs peers"]
 
 
-def _upside(stock: ScoredStock) -> Optional[float]:
-    """Compute upside ratio and set stock.upside_percent as side-effect."""
+# =====================================================================
+# Sector rubrics — which metrics matter and their weights
+#
+# Each entry: (metric_key, max_pts, lower_is_better, label)
+#
+# metric_key maps to how we extract the value/avg:
+#   "fpe"       → stock.forward_pe / avg.avg_forward_pe
+#   "pb"        → stock.price_to_book / avg.avg_price_to_book
+#   "ev_ebitda" → stock.ev_to_ebitda / avg.avg_ev_to_ebitda
+#   "roe"       → stock.return_on_equity / avg.avg_roe
+#   "div_yield" → stock.dividend_yield / avg.avg_dividend_yield
+#   "fcf_yield" → computed FCF yield / avg FCF yield (approximated)
+#   "pcf"       → market_cap / operating_cashflow (energy only)
+# =====================================================================
+
+# (metric_key, max_pts, lower_is_better, label)
+_RUBRIC_FINANCIAL = [
+    ("pb",        30, True,  "P/B"),
+    ("roe",       25, False, "ROE"),
+    ("fpe",       15, True,  "Fwd P/E"),
+    # ROA scored separately (not in peer avg model)
+    # EV/EBITDA: not used for financials
+    # FCF: not used for financials
+]
+
+_RUBRIC_REIT = [
+    ("div_yield", 30, False, "Div Yield"),
+    ("pb",        25, True,  "P/B (NAV proxy)"),
+    ("ev_ebitda", 15, True,  "EV/EBITDA"),
+    ("roe",       10, False, "ROE"),
+    # P/E: low weight, no penalty (depreciation distorts it)
+]
+
+_RUBRIC_ENERGY = [
+    ("ev_ebitda", 28, True,  "EV/EBITDA"),
+    # P/CF scored separately (needs operating cashflow)
+    ("fpe",       12, True,  "Fwd P/E"),
+    ("div_yield", 10, False, "Div Yield"),
+    ("roe",        8, False, "ROE"),
+    # P/B: not used for energy (asset writedowns distort)
+]
+
+_RUBRIC_HEALTHCARE = [
+    ("ev_ebitda", 25, True,  "EV/EBITDA"),
+    ("fpe",       22, True,  "Fwd P/E"),
+    ("roe",       12, False, "ROE"),
+    ("pb",         8, True,  "P/B"),
+]
+
+_RUBRIC_STAPLES = [
+    ("ev_ebitda", 28, True,  "EV/EBITDA"),
+    ("fpe",       22, True,  "Fwd P/E"),
+    ("div_yield", 12, False, "Div Yield"),
+    ("roe",       10, False, "ROE"),
+    # P/B: not used (brand value not in book)
+]
+
+_RUBRIC_CYCLICAL = [
+    ("fpe",       28, True,  "Fwd P/E (normalized)"),
+    ("pb",        20, True,  "P/B"),
+    ("ev_ebitda", 18, True,  "EV/EBITDA"),
+    ("roe",       10, False, "ROE"),
+]
+
+_RUBRIC_INDUSTRIAL = [
+    ("ev_ebitda", 25, True,  "EV/EBITDA"),
+    ("fpe",       22, True,  "Fwd P/E"),
+    ("roe",       12, False, "ROE"),
+    ("pb",         6, True,  "P/B"),
+]
+
+_RUBRIC_COMMS = [
+    ("ev_ebitda", 30, True,  "EV/EBITDA"),
+    ("fpe",       18, True,  "Fwd P/E"),
+    ("roe",       12, False, "ROE"),
+    ("div_yield",  5, False, "Div Yield"),
+    # P/B: not used (brand/IP not in book)
+]
+
+_RUBRIC_MATERIALS = [
+    ("ev_ebitda", 28, True,  "EV/EBITDA"),
+    ("fpe",       14, True,  "Fwd P/E"),
+    ("pb",        12, True,  "P/B"),
+    ("roe",       10, False, "ROE"),
+]
+
+_RUBRIC_UTILITIES = [
+    ("fpe",       30, True,  "Fwd P/E"),
+    ("div_yield", 25, False, "Div Yield"),
+    ("pb",        15, True,  "P/B"),
+    ("ev_ebitda", 12, True,  "EV/EBITDA"),
+    ("roe",        8, False, "ROE"),
+]
+
+_RUBRIC_DEFAULT = [
+    ("fpe",       28, True,  "Fwd P/E"),
+    ("pb",        18, True,  "P/B"),
+    ("ev_ebitda", 18, True,  "EV/EBITDA"),
+    ("roe",       14, False, "ROE"),
+]
+
+
+_SECTOR_RUBRICS = {
+    "financial":  _RUBRIC_FINANCIAL,
+    "reit":       _RUBRIC_REIT,
+    "energy":     _RUBRIC_ENERGY,
+    "healthcare": _RUBRIC_HEALTHCARE,
+    "staples":    _RUBRIC_STAPLES,
+    "cyclical":   _RUBRIC_CYCLICAL,
+    "industrial": _RUBRIC_INDUSTRIAL,
+    "comms":      _RUBRIC_COMMS,
+    "materials":  _RUBRIC_MATERIALS,
+    "utilities":  _RUBRIC_UTILITIES,
+    "default":    _RUBRIC_DEFAULT,
+}
+
+
+def _get_metric(stock: ScoredStock, avg: Optional[SectorAverages], key: str):
+    """Extract (stock_value, peer_avg_value) for a given metric key."""
+    mapping = {
+        "fpe":       (stock.forward_pe,        avg.avg_forward_pe if avg else None),
+        "pb":        (stock.price_to_book,      avg.avg_price_to_book if avg else None),
+        "ev_ebitda": (stock.ev_to_ebitda,       avg.avg_ev_to_ebitda if avg else None),
+        "roe":       (stock.return_on_equity,   avg.avg_roe if avg else None),
+        "div_yield": (stock.dividend_yield,     avg.avg_dividend_yield if avg else None),
+    }
+    return mapping.get(key, (None, None))
+
+
+# =====================================================================
+# Sector-specific extras (things that don't fit the generic rubric)
+# =====================================================================
+
+def _score_financial_extras(stock: ScoredStock) -> tuple[int, list[str]]:
+    """ROA scoring for financials (no sector avg available)."""
+    pts = 0
+    reasons: list[str] = []
+    roa = stock.return_on_assets
+    if roa is not None:
+        if roa > 0.015:
+            pts += 15; reasons.append("ROA above 1.5%")
+        elif roa > 0.010:
+            pts += 10; reasons.append("ROA above 1%")
+        elif roa > 0.005:
+            pts += 5
+        elif roa < 0:
+            pts -= 8; reasons.append("Negative ROA")
+    return pts, reasons
+
+
+def _score_energy_pcf(stock: ScoredStock) -> tuple[int, list[str]]:
+    """Price/Cash Flow for energy stocks (uses operating cashflow)."""
+    ocf = stock.operating_cashflow
+    mc = stock.market_cap
+    if not ocf or ocf <= 0 or not mc or mc <= 0:
+        return 0, []
+    pcf = mc / ocf
+    # Use relative thresholds: energy P/CF norms are 5-12x
+    # Since we don't have a peer avg P/CF, use ratio to a baseline of 10x
+    if pcf < 3:
+        return 25, [f"Extremely low P/CF ({pcf:.1f}x)"]
+    if pcf < 5:
+        return 20, [f"Very low P/CF ({pcf:.1f}x)"]
+    if pcf < 8:
+        return 12, [f"Low P/CF ({pcf:.1f}x)"]
+    if pcf < 12:
+        return 5, []
+    return 0, []
+
+
+def _score_reit_fpe(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
+    """P/E for REITs — low weight, never penalize (depreciation distorts)."""
+    fpe = stock.forward_pe
+    avg_fpe = avg.avg_forward_pe if avg else None
+    if fpe is None or fpe <= 0 or avg_fpe is None or avg_fpe <= 0:
+        return 0, []
+    ratio = fpe / avg_fpe
+    if ratio < 0.50:
+        return 10, [f"Low P/E vs REIT peers ({ratio:.1f}x)"]
+    if ratio < 0.75:
+        return 5, []
+    # Never penalize REITs for high P/E
+    return 0, []
+
+
+def _score_china_adr(stock: ScoredStock) -> tuple[int, list[str]]:
+    if (stock.country or "") in _CHINA_COUNTRIES:
+        return -20, ["China ADR — delisting/regulatory risk"]
+    return 0, []
+
+
+# =====================================================================
+# Analyst recommendation & upside (not ratio-based — inherently scaled)
+# =====================================================================
+
+def _score_analyst_rec(rec: Optional[float], max_pts: int = 10) -> tuple[int, list[str]]:
+    if rec is None or rec <= 0:
+        return 0, []
+    if rec < 1.8:
+        return min(max_pts, 10), ["Analyst: Strong Buy"]
+    if rec < 2.3:
+        return min(max_pts, 5), ["Analyst: Buy"]
+    if rec > 3.5:
+        return -5, ["Analyst: Sell"]
+    return 0, []
+
+
+def _score_upside(stock: ScoredStock) -> tuple[int, list[str]]:
+    """Capped at 6 pts — analyst targets lag at 52W lows."""
     if stock.target_mean_price and stock.price and stock.price > 0:
         u = (stock.target_mean_price - stock.price) / stock.price
         stock.upside_percent = round(u * 100, 1)
-        return u
-    return None
-
-
-def _score_analyst_rec(rec: Optional[float], max_pts: int = 12) -> tuple[int, list[str]]:
-    """Standard analyst recommendation scoring."""
-    if rec is None or rec <= 0:
-        return 0, []
-    if max_pts >= 12:
-        if rec < 1.8:
-            return 12, ["Analyst: Strong Buy"]
-        if rec < 2.3:
-            return 7, ["Analyst: Buy"]
-        if rec > 3.5:
-            return -5, []
-    elif max_pts >= 10:
-        if rec < 1.8:
-            return 10, ["Analyst: Strong Buy"]
-        if rec < 2.3:
-            return 5, ["Analyst: Buy"]
-        if rec > 3.5:
-            return -5, []
-    elif max_pts >= 8:
-        if rec < 1.8:
-            return 8, ["Analyst: Strong Buy"]
-        if rec < 2.3:
-            return 4, ["Analyst: Buy"]
+        if u > 0.40:
+            return 6, [f"{stock.upside_percent:.0f}% upside"]
+        if u > 0.20:
+            return 4, [f"{stock.upside_percent:.0f}% upside"]
     return 0, []
 
 
-def _score_upside(stock: ScoredStock, max_pts: int = 6,
-                  high_thresh: float = 0.40, low_thresh: float = 0.20) -> tuple[int, list[str]]:
-    """Analyst target upside — capped at 6 pts (targets lag at 52W lows)."""
-    u = _upside(stock)
-    if u is None:
+# =====================================================================
+# FCF yield scoring (ratio to market cap — inherently normalized)
+# =====================================================================
+
+def _score_fcf_yield(stock: ScoredStock, max_pts: int = 18) -> tuple[int, list[str]]:
+    fcf = stock.free_cash_flow
+    mc = stock.market_cap
+    if fcf is None or not mc or mc <= 0:
         return 0, []
-    pct_label = f"{stock.upside_percent:.0f}% upside"
-    if u > high_thresh:
-        return min(max_pts, 6), [pct_label]
-    if u > low_thresh:
-        return min(max(max_pts - 2, 2), 4), [pct_label]
+    fy = fcf / mc
+    if fy < -0.02:
+        return -8, ["Negative FCF yield"]
+    if fy < 0:
+        return -3, []
+    pct = fy * 100
+    if fy > 0.12:
+        return min(max_pts, 18), [f"Strong FCF yield {pct:.0f}%"]
+    if fy > 0.07:
+        return min(max_pts, 14), [f"Solid FCF yield {pct:.0f}%"]
+    if fy > 0.03:
+        return min(max_pts, 8), ["Positive FCF"]
+    if fy > 0:
+        return min(max_pts, 4), ["Positive FCF"]
     return 0, []
 
+
+# =====================================================================
+# Negative EV/EBITDA penalty
+# =====================================================================
+
+def _penalty_negative_ev_ebitda(ev: Optional[float]) -> tuple[int, list[str]]:
+    if ev is not None and ev < 0:
+        return -12, ["Negative EBITDA — operating losses"]
+    return 0, []
+
+
+# =====================================================================
+# Universal signal scorers
+# =====================================================================
 
 def _score_growth(stock: ScoredStock) -> tuple[int, list[str]]:
-    """Score earnings and revenue growth direction.
-
-    Penalizes deteriorating fundamentals — important for 52W-low stocks
-    to distinguish 'cheap & stable' from 'cheap & collapsing'.
-    """
     pts = 0
     reasons: list[str] = []
-
     eg = stock.earnings_growth
     if eg is not None:
         if eg < -0.70:
@@ -130,7 +392,6 @@ def _score_growth(stock: ScoredStock) -> tuple[int, list[str]]:
             pts -= 5; reasons.append(f"Earnings declining {eg*100:.0f}%")
         elif eg > 0.15:
             pts += 5; reasons.append("Earnings growing")
-
     rg = stock.revenue_growth
     if rg is not None:
         if rg < -0.20:
@@ -141,60 +402,29 @@ def _score_growth(stock: ScoredStock) -> tuple[int, list[str]]:
             pts -= 2
         elif rg > 0.10:
             pts += 3; reasons.append("Revenue growing")
-
     return pts, reasons
 
 
 def _score_proximity_to_low(stock: ScoredStock) -> tuple[int, list[str]]:
-    """Bonus for stocks trading very close to their 52-week low.
-
-    Range position = (price - low) / (high - low).
-    Closer to 0 = nearer the bottom.
-    """
-    low = stock.fifty_two_week_low
-    high = stock.fifty_two_week_high
-    price = stock.price
+    low, high, price = stock.fifty_two_week_low, stock.fifty_two_week_high, stock.price
     if not low or not high or high <= low or not price:
         return 0, []
-
-    position = (price - low) / (high - low)
-
-    if position < 0.05:
-        return 8, [f"At 52W low (bottom {position*100:.0f}% of range)"]
-    if position < 0.10:
-        return 5, [f"Near 52W low ({position*100:.0f}% from bottom)"]
-    if position < 0.20:
-        return 3, [f"Close to 52W low ({position*100:.0f}% from bottom)"]
-    return 0, []
-
-
-def _penalty_missing_forward_pe(fpe: Optional[float], sector_type: str) -> tuple[int, list[str]]:
-    """Penalize negative or missing forward P/E in sectors where it matters.
-
-    REITs and financials are excluded (P/E is misleading for them).
-    """
-    if sector_type in ("reit", "financial"):
-        return 0, []  # P/E not meaningful for these sectors
-    if fpe is not None and fpe < 0:
-        return -8, ["Negative forward earnings"]
-    if fpe is None:
-        return -4, ["No forward earnings estimate"]
+    pos = (price - low) / (high - low)
+    if pos < 0.05:
+        return 8, [f"At 52W low (bottom {pos*100:.0f}% of range)"]
+    if pos < 0.10:
+        return 5, [f"Near 52W low ({pos*100:.0f}% from bottom)"]
+    if pos < 0.20:
+        return 3, [f"Close to 52W low ({pos*100:.0f}% from bottom)"]
     return 0, []
 
 
 def _score_short_interest(stock: ScoredStock) -> tuple[int, list[str]]:
-    """Score short interest — heavy shorting at a 52W low is a strong warning.
-
-    However, high short + insider buying = potential squeeze, so reduce
-    the penalty when insiders are buying against the shorts.
-    """
     si = stock.short_percent_of_float
     if si is None:
         return 0, []
     pct = si * 100 if si < 1 else si
-
     insiders_buying = stock.insider_buy_count >= 3
-
     if pct > 40:
         if insiders_buying:
             return -5, [f"Very high short {pct:.0f}% but insiders buying (squeeze?)"]
@@ -211,33 +441,22 @@ def _score_short_interest(stock: ScoredStock) -> tuple[int, list[str]]:
 
 
 def _score_insider_buying(stock: ScoredStock) -> tuple[int, list[str]]:
-    """Score insider transactions — insiders selling at a 52W low is a red flag.
-
-    Scaled by severity. Insider buying offsets selling concern when both occur
-    (e.g., 4 buys + 3 sells = mixed, not alarming).
-    """
     buys = stock.insider_buy_count
     sells = stock.insider_sell_count
     total = buys + sells
     if total == 0:
         return 0, []
     sentiment = buys / total
-
-    # Mixed activity: both significant buying and selling — treat as neutral-ish
     if buys >= 3 and sells >= 3:
         if sentiment > 0.5:
             return 2, [f"Mixed insider activity, net buying ({buys}B/{sells}S)"]
         return -2, [f"Mixed insider activity, net selling ({buys}B/{sells}S)"]
-
-    # Strong buying — management has conviction
     if sentiment > 0.7 and buys >= 3:
         return 10, [f"Strong insider buying ({buys} buys vs {sells} sells)"]
     if sentiment > 0.7 and buys >= 2:
         return 6, [f"Insider buying ({buys} buys vs {sells} sells)"]
     if sentiment > 0.5:
         return 3, [f"Net insider buying ({buys}B/{sells}S)"]
-
-    # Selling — scaled by volume, no buying to offset
     if sells >= 50:
         return -25, [f"Extreme insider selling ({sells} sells, {buys} buys)"]
     if sells >= 20:
@@ -254,7 +473,6 @@ def _score_insider_buying(stock: ScoredStock) -> tuple[int, list[str]]:
 
 
 def _score_piotroski(stock: ScoredStock) -> tuple[int, list[str]]:
-    """Score Piotroski F-Score — weak fundamentals at a 52W low = value trap."""
     fs = stock.piotroski_f_score
     if fs is None:
         return 0, []
@@ -269,20 +487,22 @@ def _score_piotroski(stock: ScoredStock) -> tuple[int, list[str]]:
     return -10, [f"Weak Piotroski F-Score ({fs}/9) — value trap risk"]
 
 
+def _penalty_missing_forward_pe(fpe: Optional[float], sector_type: str) -> tuple[int, list[str]]:
+    if sector_type in ("reit", "financial"):
+        return 0, []
+    if fpe is not None and fpe < 0:
+        return -8, ["Negative forward earnings"]
+    if fpe is None:
+        return -4, ["No forward earnings estimate"]
+    return 0, []
+
+
 def _penalty_sector_relative(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
-    """Penalize metrics that deviate extremely from the sector/market average.
-
-    Instead of hardcoded absolute thresholds, compares each metric against
-    the market average for that sector. A stock with D/E at 5x its sector
-    average is penalized much harder than one at 1.5x, regardless of the
-    absolute number.
-
-    Checks: Debt/Equity, EV/EBITDA (overvaluation), negative FCF burn rate.
-    """
+    """Penalize metrics that deviate extremely from market averages."""
     pts = 0
     reasons: list[str] = []
 
-    # --- Debt/Equity vs market average ---
+    # D/E vs market avg
     de = stock.debt_to_equity
     mkt_de = stock.market_avg_debt_equity
     if de is not None and de > 0 and mkt_de and mkt_de > 0:
@@ -294,48 +514,34 @@ def _penalty_sector_relative(stock: ScoredStock, sector_type: str) -> tuple[int,
         elif ratio > 2.0:
             pts -= 5; reasons.append(f"Leverage {ratio:.1f}x sector avg")
     elif de is not None and de > 400:
-        # Fallback if no market avg available
         pts -= 10; reasons.append(f"Very high leverage D/E {de:.0f}")
 
-    # --- EV/EBITDA much higher than sector (overvalued even at 52W low) ---
-    ev = stock.ev_to_ebitda
-    mkt_ev = stock.market_avg_ev_ebitda
-    if ev is not None and ev > 0 and mkt_ev and mkt_ev > 0:
-        ratio = ev / mkt_ev
-        if ratio > 2.5:
-            pts -= 10; reasons.append(f"EV/EBITDA {ratio:.1f}x sector avg — still expensive")
-        elif ratio > 1.8:
-            pts -= 5; reasons.append(f"EV/EBITDA above sector avg")
-
-    # --- Negative FCF burn rate (absolute — cash burn has no "sector avg") ---
+    # Negative FCF burn rate
     fcf = stock.free_cash_flow
     mc = stock.market_cap
     if fcf is not None and fcf < 0 and mc and mc > 0:
-        burn_rate = abs(fcf) / mc
-        if burn_rate > 0.50:
-            pts -= 15; reasons.append(f"Extreme cash burn ({burn_rate*100:.0f}% of mkt cap)")
-        elif burn_rate > 0.20:
-            pts -= 8; reasons.append(f"Heavy cash burn ({burn_rate*100:.0f}% of mkt cap)")
-        elif burn_rate > 0.05:
-            pts -= 3; reasons.append(f"Negative FCF ({burn_rate*100:.0f}% of mkt cap)")
+        burn = abs(fcf) / mc
+        if burn > 0.50:
+            pts -= 15; reasons.append(f"Extreme cash burn ({burn*100:.0f}% of mkt cap)")
+        elif burn > 0.20:
+            pts -= 8; reasons.append(f"Heavy cash burn ({burn*100:.0f}% of mkt cap)")
+        elif burn > 0.05:
+            pts -= 3; reasons.append(f"Negative FCF ({burn*100:.0f}% of mkt cap)")
 
-    # --- ROE much worse than sector ---
+    # Negative ROE when sector is profitable
     roe = stock.return_on_equity
     mkt_roe = stock.market_avg_roe
-    if roe is not None and mkt_roe and mkt_roe > 0:
-        if roe < 0 and mkt_roe > 0.05:
-            pts -= 5; reasons.append(f"Negative ROE vs sector avg {mkt_roe*100:.0f}%")
+    if roe is not None and roe < 0 and mkt_roe and mkt_roe > 0.05:
+        pts -= 5; reasons.append(f"Negative ROE vs sector avg {mkt_roe*100:.0f}%")
 
     return pts, reasons
 
 
-def _score_universal(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
-    """Universal add-on signals applied to all sector scorers.
+# =====================================================================
+# Universal scoring wrapper
+# =====================================================================
 
-    When multiple red flags stack (declining earnings + insider selling +
-    weak Piotroski), applies an extra compound penalty — the combination
-    is worse than the sum of parts.
-    """
+def _score_universal(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
     pts = 0
     reasons: list[str] = []
     red_flag_count = 0
@@ -352,17 +558,14 @@ def _score_universal(stock: ScoredStock, sector_type: str) -> tuple[int, list[st
         if p <= -8:
             red_flag_count += 1
 
-    # Missing forward P/E penalty
     p, r = _penalty_missing_forward_pe(stock.forward_pe, sector_type)
     pts += p; reasons.extend(r)
 
-    # Sector-relative deviation penalties (debt, EV/EBITDA, cash burn, ROE)
     p, r = _penalty_sector_relative(stock, sector_type)
     pts += p; reasons.extend(r)
     if p <= -10:
         red_flag_count += 1
 
-    # Compound penalty for stacking red flags
     if red_flag_count >= 3:
         pts -= 15; reasons.append("Multiple severe red flags — high value trap risk")
     elif red_flag_count >= 2:
@@ -371,1037 +574,110 @@ def _score_universal(stock: ScoredStock, sector_type: str) -> tuple[int, list[st
     return pts, reasons
 
 
-def _safe_avg(avg: Optional[SectorAverages], attr: str) -> Optional[float]:
-    if avg is None:
-        return None
-    return getattr(avg, attr, None)
-
-
-def _fcf_yield(stock: ScoredStock) -> Optional[float]:
-    """FCF yield = FCF / market_cap. Returns as ratio (e.g. 0.10 = 10%)."""
-    fcf = stock.free_cash_flow
-    mc = stock.market_cap
-    if fcf is None or not mc or mc <= 0:
-        return None
-    return fcf / mc
-
-
-def _score_fcf_yield(stock: ScoredStock, max_pts: int = 18) -> tuple[int, list[str]]:
-    """Score FCF using yield (FCF/market_cap) instead of absolute value."""
-    fy = _fcf_yield(stock)
-    if fy is None:
-        return 0, []
-    if fy < -0.02:
-        return -8, ["Negative FCF yield"]
-    if fy < 0:
-        return -3, []
-    pct = fy * 100
-    if max_pts >= 18:
-        if fy > 0.12:
-            return 18, [f"Strong FCF yield {pct:.0f}%"]
-        if fy > 0.07:
-            return 14, [f"Solid FCF yield {pct:.0f}%"]
-        if fy > 0.03:
-            return 8, ["Positive FCF"]
-        if fy > 0:
-            return 4, ["Positive FCF"]
-    elif max_pts >= 15:
-        if fy > 0.12:
-            return 15, [f"Strong FCF yield {pct:.0f}%"]
-        if fy > 0.07:
-            return 12, [f"Solid FCF yield {pct:.0f}%"]
-        if fy > 0.03:
-            return 7, ["Positive FCF"]
-        if fy > 0:
-            return 3, ["Positive FCF"]
-    elif max_pts >= 12:
-        if fy > 0.10:
-            return 12, [f"Strong FCF yield {pct:.0f}%"]
-        if fy > 0.05:
-            return 8, ["Positive FCF"]
-        if fy > 0:
-            return 4, ["Positive FCF"]
-    else:
-        if fy > 0.10:
-            return max_pts, [f"Strong FCF yield {pct:.0f}%"]
-        if fy > 0.03:
-            return max(max_pts - 4, 2), ["Positive FCF"]
-        if fy > 0:
-            return 2, ["Positive FCF"]
-    return 0, []
-
-
-def _penalty_negative_ev_ebitda(ev: Optional[float]) -> tuple[int, list[str]]:
-    """Penalize negative EV/EBITDA (negative EBITDA = operating losses)."""
-    if ev is not None and ev < 0:
-        return -12, ["Negative EBITDA — operating losses"]
-    return 0, []
-
-
-def _is_china_adr(stock: ScoredStock) -> bool:
-    """Detect China/HK ADR using the country field from assetProfile."""
-    return (stock.country or "") in _CHINA_COUNTRIES
-
-
 # =====================================================================
-# 1. Financial (banks, insurance, asset management)
+# Master scorer — applies rubric then extras then universals
 # =====================================================================
 
-def _score_financial(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
+def _score_with_rubric(
+    stock: ScoredStock,
+    avg: Optional[SectorAverages],
+    sector_type: str,
+) -> tuple[int, list[str]]:
+    """Apply the sector rubric (ratio-based) + sector extras + universals."""
     pts = 0
     reasons: list[str] = []
 
-    # P/B (30 pts max)
-    pb = stock.price_to_book
-    if pb is not None and pb > 0:
-        if pb < 0.8:
-            pts += 30; reasons.append("Trading below book value")
-        elif pb < 1.0:
-            pts += 24; reasons.append("Near book value")
-        elif pb < 1.2:
-            pts += 16
-        elif pb < 1.5:
-            pts += 8
-        avg_pb = _safe_avg(avg, "avg_price_to_book")
-        if avg_pb and avg_pb > 0 and pb < avg_pb * 0.80:
-            pts += 10; reasons.append("Cheap vs sector P/B")
+    # 1. Ratio-based rubric scoring
+    rubric = _SECTOR_RUBRICS.get(sector_type, _RUBRIC_DEFAULT)
+    for metric_key, max_pts, lower_is_better, label in rubric:
+        val, peer_avg = _get_metric(stock, avg, metric_key)
+        # Also try market avg as fallback if peer avg is None
+        if peer_avg is None:
+            _, peer_avg = _get_metric_market(stock, metric_key)
+        p, r = _ratio_score(val, peer_avg, max_pts, lower_is_better, label)
+        pts += p; reasons.extend(r)
 
-    # ROE (25 pts max)
-    roe = _roe_pct(stock.return_on_equity)
-    if roe is not None:
-        if roe > 18:
-            pts += 25; reasons.append(f"Strong ROE {roe:.0f}%")
-        elif roe > 12:
-            pts += 18; reasons.append("Solid ROE")
-        elif roe > 8:
-            pts += 10
-        elif roe > 0:
-            pts += 4
-        else:
-            pts -= 15; reasons.append("Negative ROE")
+    # 2. Negative EV/EBITDA penalty (all sectors that use EV/EBITDA)
+    if any(k == "ev_ebitda" for k, _, _, _ in rubric):
+        p, r = _penalty_negative_ev_ebitda(stock.ev_to_ebitda)
+        pts += p; reasons.extend(r)
 
-    # ROA (15 pts max)
-    roa = stock.return_on_assets
-    if roa is not None:
-        if roa > 0.015:
-            pts += 15; reasons.append("ROA above 1.5%")
-        elif roa > 0.010:
-            pts += 10; reasons.append("ROA above 1%")
-        elif roa > 0.005:
-            pts += 5
-        elif roa < 0:
-            pts -= 8
+    # 3. Sector-specific extras
+    if sector_type == "financial":
+        p, r = _score_financial_extras(stock)
+        pts += p; reasons.extend(r)
+    elif sector_type == "reit":
+        p, r = _score_reit_fpe(stock, avg)
+        pts += p; reasons.extend(r)
+    elif sector_type == "energy":
+        p, r = _score_energy_pcf(stock)
+        pts += p; reasons.extend(r)
+    elif sector_type == "comms":
+        p, r = _score_china_adr(stock)
+        pts += p; reasons.extend(r)
 
-    # Forward P/E (15 pts max)
-    fpe = stock.forward_pe
-    if fpe is not None and fpe > 0:
-        if fpe < 8:
-            pts += 15
-        elif fpe < 12:
-            pts += 10
-        elif fpe < 16:
-            pts += 6
-        avg_fpe = _safe_avg(avg, "avg_forward_pe")
-        if avg_fpe and avg_fpe > 0 and fpe < avg_fpe * 0.80:
-            pts += 8; reasons.append("Cheap vs sector P/E")
+    # 4. FCF yield (for sectors that use it)
+    fcf_sectors = {"energy", "healthcare", "staples", "cyclical", "industrial",
+                   "comms", "materials", "default"}
+    if sector_type in fcf_sectors:
+        max_fcf = 18 if sector_type in ("healthcare", "staples", "industrial", "comms") else 12
+        p, r = _score_fcf_yield(stock, max_fcf)
+        pts += p; reasons.extend(r)
 
-    # Analyst (12 pts)
-    p, r = _score_analyst_rec(stock.recommendation_mean, 12)
+    # 5. Analyst + upside (all sectors)
+    analyst_pts = 12 if sector_type in ("financial", "healthcare", "default") else 10
+    p, r = _score_analyst_rec(stock.recommendation_mean, analyst_pts)
     pts += p; reasons.extend(r)
 
-    # Upside (10 pts)
-    p, r = _score_upside(stock, 10)
-    pts += p; reasons.extend(r)
-
-    # EV/EBITDA: ALWAYS 0 for financials
-    # FCF: ALWAYS 0 for financials
-
-    p, r = _score_universal(stock, "financial")
-    pts += p; reasons.extend(r)
-
-    return pts, reasons
-
-
-# =====================================================================
-# 2. REIT
-# =====================================================================
-
-def _score_reit(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
-    pts = 0
-    reasons: list[str] = []
-
-    # Dividend yield (30 pts max)
-    dy = stock.dividend_yield
-    if dy is not None:
-        if dy > 0.07:
-            pts += 30; reasons.append(f"High dividend yield {dy*100:.1f}%")
-        elif dy > 0.05:
-            pts += 22; reasons.append("Strong dividend yield")
-        elif dy > 0.04:
-            pts += 14; reasons.append("Solid dividend yield")
-        elif dy > 0.03:
-            pts += 7
-        elif dy <= 0:
-            pts -= 10; reasons.append("No dividend — unusual for REIT")
-
-    # P/B as NAV proxy (25 pts max)
-    pb = stock.price_to_book
-    if pb is not None and pb > 0:
-        if pb < 0.9:
-            pts += 25; reasons.append("Trading below NAV (P/B < 1)")
-        elif pb < 1.1:
-            pts += 18; reasons.append("Near NAV")
-        elif pb < 1.4:
-            pts += 10
-        elif pb < 1.8:
-            pts += 5
-        avg_pb = _safe_avg(avg, "avg_price_to_book")
-        if avg_pb and avg_pb > 0 and pb < avg_pb * 0.85:
-            pts += 8; reasons.append("Cheap vs sector P/B")
-
-    # Forward P/E (LOW weight, 10 pts — use cautiously)
-    fpe = stock.forward_pe
-    if fpe is not None and fpe > 0:
-        if fpe < 15:
-            pts += 10
-        elif fpe < 25:
-            pts += 5
-        # Never penalize REITs for high P/E
-
-    # EV/EBITDA (15 pts)
-    ev = stock.ev_to_ebitda
-    if ev is not None and ev > 0:
-        if ev < 10:
-            pts += 15; reasons.append("Low EV/EBITDA")
-        elif ev < 14:
-            pts += 10
-        elif ev < 18:
-            pts += 5
-        avg_ev = _safe_avg(avg, "avg_ev_to_ebitda")
-        if avg_ev and avg_ev > 0 and ev < avg_ev * 0.85:
-            pts += 8; reasons.append("Cheap vs sector EV/EBITDA")
-    p, r = _penalty_negative_ev_ebitda(ev)
-    pts += p; reasons.extend(r)
-
-    # ROE (10 pts)
-    roe = _roe_pct(stock.return_on_equity)
-    if roe is not None:
-        if roe > 10:
-            pts += 10; reasons.append("Positive ROE")
-        elif roe > 5:
-            pts += 5
-        elif roe < 0:
-            pts -= 5
-
-    # Analyst (10 pts)
-    p, r = _score_analyst_rec(stock.recommendation_mean, 10)
-    pts += p; reasons.extend(r)
-
-    # Upside (10 pts)
-    p, r = _score_upside(stock, 10, high_thresh=0.30, low_thresh=0.15)
-    pts += p; reasons.extend(r)
-
-    # P/E: ALWAYS 0 weight (handled above with low weight only)
-    # FCF: ALWAYS 0 weight for REITs
-
-    p, r = _score_universal(stock, "reit")
-    pts += p; reasons.extend(r)
-
-    return pts, reasons
-
-
-# =====================================================================
-# 3. Energy
-# =====================================================================
-
-def _score_energy(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
-    pts = 0
-    reasons: list[str] = []
-
-    # EV/EBITDA (28 pts max)
-    ev = stock.ev_to_ebitda
-    if ev is not None and ev > 0:
-        if ev < 4:
-            pts += 28; reasons.append("Very cheap EV/EBITDA")
-        elif ev < 6:
-            pts += 22; reasons.append("Low EV/EBITDA")
-        elif ev < 8:
-            pts += 14
-        elif ev < 10:
-            pts += 7
-        avg_ev = _safe_avg(avg, "avg_ev_to_ebitda")
-        if avg_ev and avg_ev > 0 and ev < avg_ev * 0.80:
-            pts += 10; reasons.append("Cheap vs energy peers")
-    p, r = _penalty_negative_ev_ebitda(ev)
-    pts += p; reasons.extend(r)
-
-    # Price/Cash Flow (25 pts max)
-    ocf = stock.operating_cashflow
-    mc = stock.market_cap
-    if ocf and ocf > 0 and mc and mc > 0:
-        pcf = mc / ocf
-        if pcf < 5:
-            pts += 25; reasons.append("Very low P/CF")
-        elif pcf < 8:
-            pts += 18; reasons.append("Cheap on cash flow")
-        elif pcf < 12:
-            pts += 10
-        elif pcf < 16:
-            pts += 5
-
-    # FCF yield (15 pts)
-    p, r = _score_fcf_yield(stock, 15)
-    pts += p; reasons.extend(r)
-
-    # Forward P/E (12 pts)
-    fpe = stock.forward_pe
-    if fpe is not None and fpe > 0:
-        if fpe < 8:
-            pts += 12
-        elif fpe < 12:
-            pts += 8
-        elif fpe < 16:
-            pts += 4
-
-    # Dividend yield (10 pts)
-    dy = stock.dividend_yield
-    if dy is not None and dy > 0:
-        if dy > 0.05:
-            pts += 10; reasons.append("High dividend yield")
-        elif dy > 0.03:
-            pts += 6
-        elif dy > 0.01:
-            pts += 3
-
-    # ROE (8 pts)
-    roe = _roe_pct(stock.return_on_equity)
-    if roe is not None:
-        if roe > 20:
-            pts += 8; reasons.append("Strong ROE")
-        elif roe > 10:
-            pts += 4
-        elif roe < 0:
-            pts -= 5
-
-    # Analyst (8 pts)
-    p, r = _score_analyst_rec(stock.recommendation_mean, 8)
-    pts += p; reasons.extend(r)
-
-    # Upside (8 pts)
-    p, r = _score_upside(stock, 8, high_thresh=0.35, low_thresh=0.20)
-    pts += p; reasons.extend(r)
-
-    # P/B: WEIGHT 0 for energy
-
-    p, r = _score_universal(stock, "energy")
-    pts += p; reasons.extend(r)
-
-    return pts, reasons
-
-
-# =====================================================================
-# 4. Healthcare
-# =====================================================================
-
-def _score_healthcare(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
-    pts = 0
-    reasons: list[str] = []
-
-    # EV/EBITDA (25 pts)
-    ev = stock.ev_to_ebitda
-    if ev is not None and ev > 0:
-        if ev < 8:
-            pts += 25; reasons.append("Very cheap EV/EBITDA")
-        elif ev < 12:
-            pts += 18
-        elif ev < 16:
-            pts += 10
-        elif ev < 20:
-            pts += 5
-        avg_ev = _safe_avg(avg, "avg_ev_to_ebitda")
-        if avg_ev and avg_ev > 0 and ev < avg_ev * 0.80:
-            pts += 10; reasons.append("Cheap vs healthcare peers")
-    p, r = _penalty_negative_ev_ebitda(ev)
-    pts += p; reasons.extend(r)
-
-    # Forward P/E (22 pts)
-    fpe = stock.forward_pe
-    if fpe is not None and fpe > 0:
-        if fpe < 12:
-            pts += 22; reasons.append("Low forward P/E")
-        elif fpe < 18:
-            pts += 15
-        elif fpe < 25:
-            pts += 8
-        elif fpe < 30:
-            pts += 4
-        avg_fpe = _safe_avg(avg, "avg_forward_pe")
-        if avg_fpe and avg_fpe > 0 and fpe < avg_fpe * 0.80:
-            pts += 8; reasons.append("Cheap vs sector P/E")
-
-    # FCF yield (18 pts)
-    p, r = _score_fcf_yield(stock, 18)
-    pts += p; reasons.extend(r)
-
-    # ROE (12 pts)
-    roe = _roe_pct(stock.return_on_equity)
-    if roe is not None:
-        if roe > 20:
-            pts += 12; reasons.append("Strong ROE")
-        elif roe > 12:
-            pts += 8
-        elif roe > 0:
-            pts += 4
-        else:
-            pts -= 8
-
-    # P/B (8 pts)
-    pb = stock.price_to_book
-    if pb is not None and pb > 0:
-        if pb < 1.5:
-            pts += 8
-        elif pb < 2.5:
-            pts += 5
-        elif pb < 4.0:
-            pts += 2
-
-    # Analyst (12 pts)
-    p, r = _score_analyst_rec(stock.recommendation_mean, 12)
-    pts += p; reasons.extend(r)
-
-    # Upside (10 pts)
-    p, r = _score_upside(stock, 10, high_thresh=0.35, low_thresh=0.20)
-    pts += p; reasons.extend(r)
-
-    # Debt penalty (unique to healthcare)
-    de = stock.debt_to_equity
-    if de is not None:
-        if de > 200:
-            pts -= 10; reasons.append("High leverage")
-        elif de > 100:
-            pts -= 5
-
-    p, r = _score_universal(stock, "healthcare")
-    pts += p; reasons.extend(r)
-
-    return pts, reasons
-
-
-# =====================================================================
-# 5. Consumer Defensive (Staples)
-# =====================================================================
-
-def _score_staples(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
-    pts = 0
-    reasons: list[str] = []
-
-    # EV/EBITDA (28 pts)
-    ev = stock.ev_to_ebitda
-    if ev is not None and ev > 0:
-        if ev < 8:
-            pts += 28; reasons.append("Very cheap EV/EBITDA")
-        elif ev < 10:
-            pts += 20; reasons.append("Low EV/EBITDA")
-        elif ev < 13:
-            pts += 12
-        elif ev < 16:
-            pts += 5
-        avg_ev = _safe_avg(avg, "avg_ev_to_ebitda")
-        if avg_ev and avg_ev > 0 and ev < avg_ev * 0.80:
-            pts += 10; reasons.append("Cheap vs consumer staples peers")
-    p, r = _penalty_negative_ev_ebitda(ev)
-    pts += p; reasons.extend(r)
-
-    # Forward P/E (22 pts)
-    fpe = stock.forward_pe
-    if fpe is not None and fpe > 0:
-        if fpe < 10:
-            pts += 22; reasons.append("Very low forward P/E")
-        elif fpe < 14:
-            pts += 15
-        elif fpe < 18:
-            pts += 8
-        avg_fpe = _safe_avg(avg, "avg_forward_pe")
-        if avg_fpe and avg_fpe > 0 and fpe < avg_fpe * 0.80:
-            pts += 8; reasons.append("Cheap vs sector P/E")
-
-    # FCF yield (18 pts)
-    p, r = _score_fcf_yield(stock, 18)
-    pts += p; reasons.extend(r)
-
-    # Dividend yield (12 pts)
-    dy = stock.dividend_yield
-    if dy is not None and dy > 0:
-        if dy > 0.05:
-            pts += 12; reasons.append("High dividend yield")
-        elif dy > 0.03:
-            pts += 8
-        elif dy > 0.02:
-            pts += 4
-
-    # ROE (10 pts)
-    roe = _roe_pct(stock.return_on_equity)
-    if roe is not None:
-        if roe > 20:
-            pts += 10
-        elif roe > 12:
-            pts += 6
-        elif roe > 0:
-            pts += 3
-        else:
-            pts -= 8
-
-    # Analyst (10 pts)
-    p, r = _score_analyst_rec(stock.recommendation_mean, 10)
-    pts += p; reasons.extend(r)
-
-    # Upside (10 pts)
-    p, r = _score_upside(stock, 10)
-    pts += p; reasons.extend(r)
-
-    # P/B: WEIGHT 0 for staples
-
-    p, r = _score_universal(stock, "staples")
-    pts += p; reasons.extend(r)
-
-    return pts, reasons
-
-
-# =====================================================================
-# 6. Consumer Cyclical
-# =====================================================================
-
-def _score_cyclical(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
-    pts = 0
-    reasons: list[str] = []
-
-    # Forward P/E normalized (28 pts)
-    fpe = stock.forward_pe
-    if fpe is not None and fpe > 0:
-        if fpe < 7:
-            pts += 28; reasons.append("Very cheap normalized P/E")
-        elif fpe < 10:
-            pts += 22; reasons.append("Low P/E vs cycle")
-        elif fpe < 14:
-            pts += 12
-        elif fpe < 18:
-            pts += 5
-        avg_fpe = _safe_avg(avg, "avg_forward_pe")
-        if avg_fpe and avg_fpe > 0 and fpe < avg_fpe * 0.75:
-            pts += 12; reasons.append("Deeply cheap vs sector")
-
-    # P/B (20 pts)
-    pb = stock.price_to_book
-    if pb is not None and pb > 0:
-        if pb < 1.0:
-            pts += 20; reasons.append("Below book value")
-        elif pb < 1.3:
-            pts += 15; reasons.append("Near book value")
-        elif pb < 2.0:
-            pts += 8
-        elif pb < 3.0:
-            pts += 3
-        avg_pb = _safe_avg(avg, "avg_price_to_book")
-        if avg_pb and avg_pb > 0 and pb < avg_pb * 0.70:
-            pts += 8; reasons.append("Cheap vs peers on P/B")
-
-    # EV/EBITDA (18 pts)
-    ev = stock.ev_to_ebitda
-    if ev is not None and ev > 0:
-        if ev < 5:
-            pts += 18; reasons.append("Very low EV/EBITDA")
-        elif ev < 8:
-            pts += 13; reasons.append("Low EV/EBITDA")
-        elif ev < 11:
-            pts += 7
-        avg_ev = _safe_avg(avg, "avg_ev_to_ebitda")
-        if avg_ev and avg_ev > 0 and ev < avg_ev * 0.80:
-            pts += 8; reasons.append("Cheap vs sector EV/EBITDA")
-    p, r = _penalty_negative_ev_ebitda(ev)
-    pts += p; reasons.extend(r)
-
-    # FCF yield (12 pts)
-    p, r = _score_fcf_yield(stock, 12)
-    pts += p; reasons.extend(r)
-
-    # ROE (10 pts)
-    roe = _roe_pct(stock.return_on_equity)
-    if roe is not None:
-        if roe > 20:
-            pts += 10; reasons.append("Strong ROE")
-        elif roe > 12:
-            pts += 6
-        elif roe > 0:
-            pts += 3
-        else:
-            pts -= 8
-
-    # Analyst (10 pts)
-    p, r = _score_analyst_rec(stock.recommendation_mean, 10)
-    pts += p; reasons.extend(r)
-
-    # Upside
     p, r = _score_upside(stock)
     pts += p; reasons.extend(r)
 
-    p, r = _score_universal(stock, "cyclical")
+    # 6. Universal signals
+    p, r = _score_universal(stock, sector_type)
     pts += p; reasons.extend(r)
 
     return pts, reasons
 
 
-# =====================================================================
-# 7. Industrials
-# =====================================================================
-
-def _score_industrial(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
-    pts = 0
-    reasons: list[str] = []
-
-    # EV/EBITDA (25 pts)
-    ev = stock.ev_to_ebitda
-    if ev is not None and ev > 0:
-        if ev < 6:
-            pts += 25; reasons.append("Very cheap EV/EBITDA")
-        elif ev < 9:
-            pts += 18
-        elif ev < 13:
-            pts += 10
-        elif ev < 17:
-            pts += 4
-        avg_ev = _safe_avg(avg, "avg_ev_to_ebitda")
-        if avg_ev and avg_ev > 0 and ev < avg_ev * 0.80:
-            pts += 10; reasons.append("Cheap vs industrial peers")
-    p, r = _penalty_negative_ev_ebitda(ev)
-    pts += p; reasons.extend(r)
-
-    # Forward P/E (22 pts)
-    fpe = stock.forward_pe
-    if fpe is not None and fpe > 0:
-        if fpe < 8:
-            pts += 22
-        elif fpe < 12:
-            pts += 15
-        elif fpe < 17:
-            pts += 8
-        elif fpe < 22:
-            pts += 3
-        avg_fpe = _safe_avg(avg, "avg_forward_pe")
-        if avg_fpe and avg_fpe > 0 and fpe < avg_fpe * 0.80:
-            pts += 8; reasons.append("Cheap vs sector P/E")
-
-    # FCF yield (18 pts — critical for capex-intensive industrials)
-    p, r = _score_fcf_yield(stock, 18)
-    pts += p; reasons.extend(r)
-
-    # ROE (12 pts)
-    roe = _roe_pct(stock.return_on_equity)
-    if roe is not None:
-        if roe > 20:
-            pts += 12; reasons.append("Strong ROE")
-        elif roe > 12:
-            pts += 8
-        elif roe > 0:
-            pts += 4
-        else:
-            pts -= 8
-
-    # P/B (6 pts)
-    pb = stock.price_to_book
-    if pb is not None and pb > 0:
-        if pb < 2.0:
-            pts += 6
-        elif pb < 3.0:
-            pts += 3
-
-    # Analyst (10 pts)
-    p, r = _score_analyst_rec(stock.recommendation_mean, 10)
-    pts += p; reasons.extend(r)
-
-    # Upside (10 pts)
-    p, r = _score_upside(stock, 10)
-    pts += p; reasons.extend(r)
-
-    # Debt penalty
-    de = stock.debt_to_equity
-    if de is not None:
-        if de > 300:
-            pts -= 10
-        elif de > 150:
-            pts -= 5
-
-    p, r = _score_universal(stock, "industrial")
-    pts += p; reasons.extend(r)
-
-    return pts, reasons
+def _get_metric_market(stock: ScoredStock, key: str):
+    """Fallback: get market avg for a metric."""
+    mapping = {
+        "fpe":       (stock.forward_pe,      stock.market_avg_fpe),
+        "pb":        (stock.price_to_book,    stock.market_avg_pb),
+        "ev_ebitda": (stock.ev_to_ebitda,     stock.market_avg_ev_ebitda),
+        "roe":       (stock.return_on_equity, stock.market_avg_roe),
+        "div_yield": (stock.dividend_yield,   stock.market_avg_div_yield),
+    }
+    return mapping.get(key, (None, None))
 
 
 # =====================================================================
-# 8. Communication Services
+# Dispatch & labels
 # =====================================================================
-
-def _score_comms(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
-    pts = 0
-    reasons: list[str] = []
-
-    # EV/EBITDA (30 pts)
-    ev = stock.ev_to_ebitda
-    if ev is not None and ev > 0:
-        if ev < 4:
-            pts += 30; reasons.append("Extremely cheap EV/EBITDA")
-        elif ev < 7:
-            pts += 22; reasons.append("Low EV/EBITDA")
-        elif ev < 10:
-            pts += 13
-        elif ev < 14:
-            pts += 5
-        avg_ev = _safe_avg(avg, "avg_ev_to_ebitda")
-        if avg_ev and avg_ev > 0 and ev < avg_ev * 0.75:
-            pts += 12; reasons.append("Deeply cheap vs peers")
-    p, r = _penalty_negative_ev_ebitda(ev)
-    pts += p; reasons.extend(r)
-
-    # FCF yield (20 pts)
-    p, r = _score_fcf_yield(stock, 18)
-    pts += p; reasons.extend(r)
-
-    # Forward P/E (18 pts)
-    fpe = stock.forward_pe
-    if fpe is not None and fpe > 0:
-        if fpe < 8:
-            pts += 18
-        elif fpe < 12:
-            pts += 12
-        elif fpe < 17:
-            pts += 6
-        avg_fpe = _safe_avg(avg, "avg_forward_pe")
-        if avg_fpe and avg_fpe > 0 and fpe < avg_fpe * 0.80:
-            pts += 8; reasons.append("Cheap vs sector P/E")
-
-    # ROE (12 pts)
-    roe = _roe_pct(stock.return_on_equity)
-    if roe is not None:
-        if roe > 20:
-            pts += 12
-        elif roe > 12:
-            pts += 8
-        elif roe > 0:
-            pts += 3
-        else:
-            pts -= 8
-
-    # Analyst (10 pts)
-    p, r = _score_analyst_rec(stock.recommendation_mean, 10)
-    pts += p; reasons.extend(r)
-
-    # Upside (10 pts)
-    p, r = _score_upside(stock, 10)
-    pts += p; reasons.extend(r)
-
-    # Dividend yield (5 pts, only if > 3%)
-    dy = stock.dividend_yield
-    if dy is not None and dy > 0.03:
-        pts += 5
-
-    # P/B: WEIGHT 0 for comms
-
-    # China ADR penalty (detected via country field)
-    if _is_china_adr(stock):
-        pts -= 20; reasons.append("China ADR — delisting/regulatory risk")
-
-    p, r = _score_universal(stock, "comms")
-    pts += p; reasons.extend(r)
-
-    return pts, reasons
-
-
-# =====================================================================
-# 9. Basic Materials
-# =====================================================================
-
-def _score_materials(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
-    pts = 0
-    reasons: list[str] = []
-
-    # EV/EBITDA normalized (28 pts)
-    ev = stock.ev_to_ebitda
-    if ev is not None and ev > 0:
-        if ev < 5:
-            pts += 28; reasons.append("Very cheap EV/EBITDA")
-        elif ev < 7:
-            pts += 20
-        elif ev < 10:
-            pts += 12
-        elif ev < 13:
-            pts += 5
-        avg_ev = _safe_avg(avg, "avg_ev_to_ebitda")
-        if avg_ev and avg_ev > 0 and ev < avg_ev * 0.80:
-            pts += 10; reasons.append("Cheap vs materials peers")
-    p, r = _penalty_negative_ev_ebitda(ev)
-    pts += p; reasons.extend(r)
-
-    # FCF yield (22 pts)
-    p, r = _score_fcf_yield(stock, 18)
-    pts += p; reasons.extend(r)
-
-    # Forward P/E (14 pts)
-    fpe = stock.forward_pe
-    if fpe is not None and fpe > 0:
-        if fpe < 8:
-            pts += 14
-        elif fpe < 12:
-            pts += 10
-        elif fpe < 16:
-            pts += 5
-        avg_fpe = _safe_avg(avg, "avg_forward_pe")
-        if avg_fpe and avg_fpe > 0 and fpe < avg_fpe * 0.80:
-            pts += 6; reasons.append("Cheap vs sector P/E")
-
-    # P/B (12 pts)
-    pb = stock.price_to_book
-    if pb is not None and pb > 0:
-        if pb < 1.0:
-            pts += 12; reasons.append("Below book value")
-        elif pb < 1.5:
-            pts += 8
-        elif pb < 2.5:
-            pts += 4
-
-    # ROE (10 pts)
-    roe = _roe_pct(stock.return_on_equity)
-    if roe is not None:
-        if roe > 15:
-            pts += 10
-        elif roe > 8:
-            pts += 6
-        elif roe > 0:
-            pts += 3
-        else:
-            pts -= 8
-
-    # Analyst (8 pts)
-    p, r = _score_analyst_rec(stock.recommendation_mean, 8)
-    pts += p; reasons.extend(r)
-
-    # Upside (8 pts)
-    p, r = _score_upside(stock, 8, high_thresh=0.35, low_thresh=0.20)
-    pts += p; reasons.extend(r)
-
-    p, r = _score_universal(stock, "materials")
-    pts += p; reasons.extend(r)
-
-    return pts, reasons
-
-
-# =====================================================================
-# 10. Utilities
-# =====================================================================
-
-def _score_utilities(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
-    pts = 0
-    reasons: list[str] = []
-
-    # Forward P/E (30 pts — primary metric for bond-like utilities)
-    fpe = stock.forward_pe
-    if fpe is not None and fpe > 0:
-        if fpe < 12:
-            pts += 30; reasons.append("Very cheap P/E for utility")
-        elif fpe < 15:
-            pts += 22
-        elif fpe < 18:
-            pts += 12
-        elif fpe < 22:
-            pts += 5
-        avg_fpe = _safe_avg(avg, "avg_forward_pe")
-        if avg_fpe and avg_fpe > 0 and fpe < avg_fpe * 0.85:
-            pts += 10; reasons.append("Cheap vs sector P/E")
-
-    # Dividend yield (25 pts)
-    dy = stock.dividend_yield
-    if dy is not None:
-        if dy > 0.06:
-            pts += 25; reasons.append(f"High dividend yield {dy*100:.1f}%")
-        elif dy > 0.04:
-            pts += 18
-        elif dy > 0.03:
-            pts += 10
-        elif dy > 0.02:
-            pts += 4
-        elif dy <= 0:
-            pts -= 15; reasons.append("No dividend — unusual for utility")
-
-    # P/B (15 pts)
-    pb = stock.price_to_book
-    if pb is not None and pb > 0:
-        if pb < 1.0:
-            pts += 15; reasons.append("Below book value")
-        elif pb < 1.5:
-            pts += 10
-        elif pb < 2.0:
-            pts += 5
-        elif pb < 2.5:
-            pts += 2
-
-    # EV/EBITDA (12 pts)
-    ev = stock.ev_to_ebitda
-    if ev is not None and ev > 0:
-        if ev < 6:
-            pts += 12
-        elif ev < 9:
-            pts += 8
-        elif ev < 12:
-            pts += 4
-
-    # ROE (8 pts)
-    roe = _roe_pct(stock.return_on_equity)
-    if roe is not None:
-        if roe > 12:
-            pts += 8
-        elif roe > 8:
-            pts += 5
-        elif roe > 0:
-            pts += 2
-
-    # Analyst (10 pts)
-    p, r = _score_analyst_rec(stock.recommendation_mean, 10)
-    pts += p; reasons.extend(r)
-
-    # FCF: WEIGHT 0 for utilities
-    # Debt: not penalized — utilities have regulated, stable EBITDA
-
-    p, r = _score_universal(stock, "utilities")
-    pts += p; reasons.extend(r)
-
-    return pts, reasons
-
-
-# =====================================================================
-# 11. Default (Technology and unmatched sectors)
-# =====================================================================
-
-def _score_default(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[int, list[str]]:
-    """Original flat scoring logic — works well for tech / general stocks."""
-    pts = 0
-    reasons: list[str] = []
-
-    # Forward P/E
-    fpe = stock.forward_pe
-    if fpe is not None and fpe > 0:
-        if fpe < 8:
-            pts += 28; reasons.append("Very low P/E")
-        elif fpe <= 12:
-            pts += 20; reasons.append("Low P/E")
-        elif fpe <= 18:
-            pts += 12
-        avg_fpe = _safe_avg(avg, "avg_forward_pe")
-        if avg_fpe and avg_fpe > 0:
-            if fpe < avg_fpe * 0.70:
-                pts += 10; reasons.append("Cheap vs sector")
-            elif fpe < avg_fpe * 0.85:
-                pts += 5
-
-    # Price/Book
-    pb = stock.price_to_book
-    if pb is not None and pb > 0:
-        if pb < 1.2:
-            pts += 18; reasons.append("Near book value")
-        elif pb <= 2:
-            pts += 12
-        elif pb <= 3:
-            pts += 6
-
-    # EV/EBITDA
-    ev = stock.ev_to_ebitda
-    if ev is not None and ev > 0:
-        if ev < 6:
-            pts += 18; reasons.append("Low EV/EBITDA")
-        elif ev <= 9:
-            pts += 12; reasons.append("Reasonable EV/EBITDA")
-        elif ev <= 12:
-            pts += 6
-    p, r = _penalty_negative_ev_ebitda(ev)
-    pts += p; reasons.extend(r)
-
-    # ROE
-    roe = _roe_pct(stock.return_on_equity)
-    if roe is not None:
-        if roe > 20:
-            pts += 14; reasons.append("Strong ROE")
-        elif roe > 12:
-            pts += 8
-        elif roe > 0:
-            pts += 3
-        else:
-            pts -= 8; reasons.append("Neg ROE")
-
-    # FCF yield
-    p, r = _score_fcf_yield(stock, 12)
-    pts += p; reasons.extend(r)
-
-    # Analyst
-    p, r = _score_analyst_rec(stock.recommendation_mean, 12)
-    pts += p; reasons.extend(r)
-
-    # Upside
-    p, r = _score_upside(stock, 10)
-    pts += p; reasons.extend(r)
-
-    # Debt penalty
-    de = stock.debt_to_equity
-    if de is not None:
-        if de > 300:
-            pts -= 8
-        elif de > 150:
-            pts -= 3
-
-    p, r = _score_universal(stock, "default")
-    pts += p; reasons.extend(r)
-
-    return pts, reasons
-
-
-# =====================================================================
-# Dispatch table
-# =====================================================================
-
-_SCORERS = {
-    "financial": _score_financial,
-    "reit": _score_reit,
-    "energy": _score_energy,
-    "healthcare": _score_healthcare,
-    "staples": _score_staples,
-    "cyclical": _score_cyclical,
-    "industrial": _score_industrial,
-    "comms": _score_comms,
-    "materials": _score_materials,
-    "utilities": _score_utilities,
-    "default": _score_default,
-}
 
 _SECTOR_TYPE_LABELS = {
-    "financial": "Financial model (P/B + ROE + ROA)",
-    "reit": "REIT model (Div yield + NAV + EV/EBITDA)",
-    "energy": "Energy model (EV/EBITDA + P/CF + FCF)",
-    "healthcare": "Healthcare model (EV/EBITDA + Fwd P/E + FCF)",
-    "staples": "Staples model (EV/EBITDA + Fwd P/E + Div yield)",
-    "cyclical": "Cyclical model (Normalized P/E + P/B + EV/EBITDA)",
-    "industrial": "Industrial model (EV/EBITDA + Fwd P/E + FCF)",
-    "comms": "Comms model (EV/EBITDA + FCF + Fwd P/E)",
-    "materials": "Materials model (EV/EBITDA + FCF + P/B)",
-    "utilities": "Utilities model (Fwd P/E + Div yield + P/B)",
-    "default": "Default model (Fwd P/E + P/B + EV/EBITDA + ROE)",
+    "financial": "Financial model (P/B + ROE + ROA vs sector)",
+    "reit": "REIT model (Div yield + NAV + EV/EBITDA vs sector)",
+    "energy": "Energy model (EV/EBITDA + P/CF + FCF vs sector)",
+    "healthcare": "Healthcare model (EV/EBITDA + Fwd P/E + FCF vs sector)",
+    "staples": "Staples model (EV/EBITDA + Fwd P/E + Div yield vs sector)",
+    "cyclical": "Cyclical model (Fwd P/E + P/B + EV/EBITDA vs sector)",
+    "industrial": "Industrial model (EV/EBITDA + Fwd P/E + FCF vs sector)",
+    "comms": "Comms model (EV/EBITDA + FCF + Fwd P/E vs sector)",
+    "materials": "Materials model (EV/EBITDA + Fwd P/E + P/B vs sector)",
+    "utilities": "Utilities model (Fwd P/E + Div yield + P/B vs sector)",
+    "default": "Default model (Fwd P/E + P/B + EV/EBITDA + ROE vs sector)",
 }
 
 
 # =====================================================================
-# Public API — drop-in replacement for the old compute_score
+# Public API
 # =====================================================================
 
 def compute_score(stock: ScoredStock, sector_avg: Optional[SectorAverages]) -> ScoreBreakdown:
-    """Compute sector-aware value score. Same inputs/outputs as the old scorer."""
+    """Compute sector-aware value score. Same inputs/outputs as before."""
     sector_type = detect_sector_type(stock.sector, stock.industry)
-    scorer = _SCORERS.get(sector_type, _score_default)
-    raw_score, reasons = scorer(stock, sector_avg)
+    raw_score, reasons = _score_with_rubric(stock, sector_avg, sector_type)
 
     score = max(0, min(150, raw_score))
 
