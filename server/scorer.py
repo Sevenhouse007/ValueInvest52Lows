@@ -393,15 +393,18 @@ def _score_upside(stock: ScoredStock) -> tuple[int, list[str]]:
 
 
 # =====================================================================
-# FCF yield scoring (ratio to market cap — inherently normalized)
+# FCF yield scoring (FCF / Enterprise Value per Alpha Architect research)
 # =====================================================================
 
 def _score_fcf_yield(stock: ScoredStock, max_pts: int = 18) -> tuple[int, list[str]]:
     fcf = stock.free_cash_flow
-    mc = stock.market_cap
-    if fcf is None or not mc or mc <= 0:
+    # Use Enterprise Value as denominator (more predictive than market cap)
+    # Fall back to market cap if EV not available
+    ev = stock.enterprise_value
+    denom = ev if ev and ev > 0 else stock.market_cap
+    if fcf is None or not denom or denom <= 0:
         return 0, []
-    fy = fcf / mc
+    fy = fcf / denom
     if fy < -0.02:
         return -8, ["Negative FCF yield"]
     if fy < 0:
@@ -457,6 +460,23 @@ def _score_growth(stock: ScoredStock) -> tuple[int, list[str]]:
             pts -= 2
         elif rg > 0.10:
             pts += 3; reasons.append("Revenue growing")
+        elif rg > 0.03:
+            pts += 2; reasons.append("Steady revenue growth")
+        elif rg > 0:
+            pts += 1
+
+    # Relative momentum (stock vs sector peers)
+    rm = stock.relative_momentum
+    if rm is not None:
+        if rm > 10:
+            pts += 4; reasons.append(f"Outperforming sector by {rm:.0f}pp")
+        elif rm > 5:
+            pts += 2
+        elif rm < -15:
+            pts -= 4; reasons.append(f"Underperforming sector by {abs(rm):.0f}pp")
+        elif rm < -8:
+            pts -= 2
+
     return pts, reasons
 
 
@@ -513,17 +533,17 @@ def _score_insider_buying(stock: ScoredStock) -> tuple[int, list[str]]:
     if sentiment > 0.5:
         return 3, [f"Net insider buying ({buys}B/{sells}S)"]
     if sells >= 50:
-        return -25, [f"Extreme insider selling ({sells} sells, {buys} buys)"]
+        return -15, [f"Extreme insider selling ({sells} sells, {buys} buys)"]
     if sells >= 20:
-        return -20, [f"Mass insider exodus ({sells} sells, {buys} buys)"]
+        return -12, [f"Mass insider selling ({sells} sells, {buys} buys)"]
     if sells >= 10:
-        return -16, [f"Heavy insider selling ({sells} sells, {buys} buys)"]
+        return -8, [f"Heavy insider selling ({sells} sells, {buys} buys)"]
     if sells >= 5:
-        return -12, [f"Significant insider selling ({sells} sells, {buys} buys)"]
+        return -6, [f"Insider selling ({sells} sells, {buys} buys)"]
     if sentiment < 0.2 and sells >= 3:
-        return -8, [f"Insider selling ({sells} sells, {buys} buys)"]
+        return -4, [f"Insider selling ({sells} sells, {buys} buys)"]
     if sentiment < 0.3 and sells >= 2:
-        return -4, [f"More insider selling than buying ({sells}S/{buys}B)"]
+        return -2, [f"More insider selling than buying ({sells}S/{buys}B)"]
     return 0, []
 
 
@@ -778,26 +798,38 @@ def compute_quality_score(
         else:
             pts -= 10; reasons.append(f"Weak fundamentals (F-Score {fs}/9)")
 
-    # ── ROE vs sector (20 pts max) ──
+    # ── ROIC (15 pts max — leverage-neutral profitability) ──
+    roic = stock.roic
+    if roic is not None:
+        if roic > 0.20:
+            pts += 15; reasons.append(f"Excellent ROIC {roic*100:.0f}%")
+        elif roic > 0.12:
+            pts += 10; reasons.append(f"Strong ROIC {roic*100:.0f}%")
+        elif roic > 0.06:
+            pts += 5
+        elif roic < 0:
+            pts -= 5; reasons.append("Negative ROIC")
+
+    # ── ROE vs sector (15 pts max — complements ROIC) ──
     roe = stock.return_on_equity
     mkt_roe = stock.market_avg_roe or (peer_avg.avg_roe if peer_avg else None)
     if roe is not None and roe > 0:
         if mkt_roe and mkt_roe > 0:
             ratio = roe / mkt_roe
             if ratio >= 2.0:
-                pts += 20; reasons.append(f"ROE {roe*100:.0f}% — {ratio:.1f}x sector")
+                pts += 15; reasons.append(f"ROE {roe*100:.0f}% — {ratio:.1f}x sector")
             elif ratio >= 1.3:
-                pts += 14; reasons.append(f"ROE {roe*100:.0f}% — above sector")
+                pts += 10; reasons.append(f"ROE {roe*100:.0f}% — above sector")
             elif ratio >= 0.8:
-                pts += 8
+                pts += 5
             else:
-                pts += 3
+                pts += 2
         elif roe > 0.20:
-            pts += 15; reasons.append(f"Strong ROE {roe*100:.0f}%")
+            pts += 12; reasons.append(f"Strong ROE {roe*100:.0f}%")
         elif roe > 0.12:
-            pts += 8
+            pts += 6
     elif roe is not None and roe < 0:
-        pts -= 8; reasons.append("Negative ROE")
+        pts -= 5; reasons.append("Negative ROE")
 
     # ── Earnings growth (15 pts max) ──
     eg = stock.earnings_growth
@@ -827,21 +859,25 @@ def compute_quality_score(
         elif rg < -0.10:
             pts -= 5; reasons.append(f"Revenue declining {rg*100:.0f}%")
 
-    # ── Gross margin trend (8 pts max) ──
+    # ── Gross margin trend (14 pts max — more predictive than earnings surprises) ──
     gm = stock.gross_margin_change
     if gm is not None:
-        if gm > 0.03:
-            pts += 8; reasons.append(f"Margins expanding +{gm*100:.1f}pp")
+        if gm > 0.05:
+            pts += 14; reasons.append(f"Margins expanding strongly +{gm*100:.1f}pp")
+        elif gm > 0.03:
+            pts += 10; reasons.append(f"Margins expanding +{gm*100:.1f}pp")
         elif gm > 0.01:
-            pts += 4; reasons.append("Margins improving")
-        elif gm < -0.03:
-            pts -= 5; reasons.append(f"Margins contracting {gm*100:.1f}pp")
+            pts += 5; reasons.append("Margins improving")
+        elif gm < -0.05:
+            pts -= 8; reasons.append(f"Margins contracting {gm*100:.1f}pp")
+        elif gm < -0.02:
+            pts -= 4; reasons.append(f"Margins slipping {gm*100:.1f}pp")
 
-    # ── FCF yield (8 pts max) ──
+    # ── FCF yield on EV (8 pts max) ──
     fcf = stock.free_cash_flow
-    mc = stock.market_cap
-    if fcf and mc and mc > 0:
-        fy = fcf / mc
+    denom = stock.enterprise_value if stock.enterprise_value and stock.enterprise_value > 0 else stock.market_cap
+    if fcf and denom and denom > 0:
+        fy = fcf / denom
         if fy > 0.08:
             pts += 8; reasons.append(f"Strong FCF yield {fy*100:.0f}%")
         elif fy > 0.03:
@@ -868,9 +904,9 @@ def compute_quality_score(
         elif sentiment > 0.5:
             pts += 4
         elif sells >= 10:
-            pts -= 12; reasons.append(f"Heavy insider selling ({sells}S)")
+            pts -= 8; reasons.append(f"Heavy insider selling ({sells}S)")
         elif sells >= 5:
-            pts -= 6; reasons.append(f"Insider selling ({sells}S)")
+            pts -= 4; reasons.append(f"Insider selling ({sells}S)")
 
     # ── Low short interest (5 pts max) ──
     si = stock.short_percent_of_float

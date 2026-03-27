@@ -39,6 +39,8 @@ class StockFundamentals(BaseModel):
     price_to_sales: Optional[float] = None
     dividend_yield: Optional[float] = None
     operating_cashflow: Optional[float] = None
+    enterprise_value: Optional[float] = None
+    roic: Optional[float] = None
     short_percent_of_float: Optional[float] = None
     insider_buy_count: int = 0
     insider_sell_count: int = 0
@@ -91,6 +93,8 @@ class ScoredStock(BaseModel):
     return_on_assets: Optional[float] = None
     free_cash_flow: Optional[float] = None
     operating_cashflow: Optional[float] = None
+    enterprise_value: Optional[float] = None
+    roic: Optional[float] = None
     recommendation_mean: Optional[float] = None
     target_mean_price: Optional[float] = None
     price_to_sales: Optional[float] = None
@@ -105,6 +109,7 @@ class ScoredStock(BaseModel):
     buyback_yield: Optional[float] = None  # negative = dilution
     price_momentum_3m: Optional[float] = None  # 3-month price change %
     price_momentum_12m: Optional[float] = None  # 12-month price change %
+    relative_momentum: Optional[float] = None  # stock drop vs sector avg drop
     country: str = ""
     debt_to_equity: Optional[float] = None
     ev_to_revenue: Optional[float] = None

@@ -90,6 +90,14 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
     # Buyback yield (share count change)
     bb_yield = _compute_buyback_yield(stats)
 
+    # Enterprise value and ROIC
+    ev = _safe_raw(stats, "enterpriseValue")
+    ocf = _safe_raw(fin, "operatingCashflow")
+    roic = None
+    if ev and ev > 0 and ocf is not None:
+        # ROIC approximated as Operating Cashflow / Enterprise Value
+        roic = round(ocf / ev, 4)
+
     return StockFundamentals(
         symbol=symbol,
         forward_pe=_safe_raw(stats, "forwardPE"),
@@ -99,6 +107,8 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         debt_to_equity=_safe_raw(fin, "debtToEquity"),
         free_cash_flow=_safe_raw(fin, "freeCashflow"),
         operating_cashflow=_safe_raw(fin, "operatingCashflow"),
+        enterprise_value=ev,
+        roic=roic,
         return_on_equity=_safe_raw(fin, "returnOnEquity"),
         return_on_assets=_safe_raw(fin, "returnOnAssets"),
         revenue_growth=_safe_raw(fin, "revenueGrowth"),
@@ -184,6 +194,29 @@ def _compute_buyback_yield(stats: dict) -> Optional[float]:
         if abs(change) > 0.001:  # ignore tiny rounding differences
             return round(-change, 4)  # positive = net buyback
     return None
+
+
+def _compute_relative_momentum(stocks: list) -> None:
+    """Compute each stock's drop vs its sector average drop.
+
+    Positive = outperforming (dropped less than peers).
+    Negative = underperforming (dropped more than peers).
+    """
+    sector_drops: dict[str, list[float]] = defaultdict(list)
+    for s in stocks:
+        if s.price_momentum_12m is not None and s.sector:
+            sector_drops[s.sector].append(s.price_momentum_12m)
+
+    sector_avg_drop: dict[str, float] = {}
+    for sector, drops in sector_drops.items():
+        if drops:
+            sector_avg_drop[sector] = sum(drops) / len(drops)
+
+    for s in stocks:
+        if s.price_momentum_12m is not None and s.sector in sector_avg_drop:
+            # Relative = stock drop - sector avg drop
+            # If stock dropped -30% and sector avg is -25%, relative = -5 (underperforming)
+            s.relative_momentum = round(s.price_momentum_12m - sector_avg_drop[s.sector], 1)
 
 
 def _compute_piotroski(data: dict, fin: dict) -> tuple[Optional[int], list[str]]:
@@ -464,6 +497,8 @@ def merge_quote_and_fundamentals(
         s.return_on_assets = fundamentals.return_on_assets
         s.free_cash_flow = fundamentals.free_cash_flow
         s.operating_cashflow = fundamentals.operating_cashflow
+        s.enterprise_value = fundamentals.enterprise_value
+        s.roic = fundamentals.roic
         s.recommendation_mean = fundamentals.recommendation_mean
         s.target_mean_price = fundamentals.target_mean_price
         s.price_to_sales = fundamentals.price_to_sales
@@ -521,6 +556,9 @@ async def run_pipeline(client: Optional[YahooClient] = None) -> ScanResult:
             fund = fundamentals_map.get(sym)
             quote = quote_map[sym]
             stocks.append(merge_quote_and_fundamentals(quote, fund))
+
+        # Compute relative momentum (stock drop vs sector avg drop)
+        _compute_relative_momentum(stocks)
 
         # Step 5a: Compute scan-level sector and industry averages
         logger.info("Step 5a: Computing scan-level sector and industry averages...")
