@@ -561,6 +561,24 @@ function detailPanel(s) {
     });
   }
 
+  // Earnings quality indicator
+  if (s.accruals_ratio != null) {
+    const ar = s.accruals_ratio;
+    let eqLabel, eqColor, eqBg;
+    if (ar < -0.05) { eqLabel = 'High'; eqColor = 'var(--green)'; eqBg = 'var(--green-bg)'; }
+    else if (ar <= 0.05) { eqLabel = 'Normal'; eqColor = 'var(--text2)'; eqBg = 'rgba(144,152,176,.08)'; }
+    else if (ar <= 0.15) { eqLabel = 'Watch'; eqColor = 'var(--amber)'; eqBg = 'var(--amber-bg)'; }
+    else { eqLabel = 'Risk'; eqColor = 'var(--red)'; eqBg = 'var(--red-bg)'; }
+    reasonsHtml += `<div style="margin-top:10px;padding:5px 8px;background:${eqBg};border-radius:4px;font-size:11px;display:inline-block;">Earnings Quality: <strong style="color:${eqColor}">${eqLabel}</strong> <span style="color:var(--text2)">(accruals ${(ar*100).toFixed(1)}%)</span></div>`;
+  }
+  // Contrarian setup callout (Change B interaction)
+  if (s.eps_surprise_trend != null && s.eps_surprise_trend > 0.03 && s.fifty_two_week_high > 0 && s.price) {
+    const pos = (s.price - s.fifty_two_week_low) / (s.fifty_two_week_high - s.fifty_two_week_low);
+    if (pos < 0.10) {
+      reasonsHtml += `<div style="margin-top:10px;padding:8px 10px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);border-radius:6px;font-size:12px;color:var(--amber);font-weight:600;">Contrarian setup: improving estimates at 52-week low</div>`;
+    }
+  }
+
   const modelDesc = MODEL_DESCRIPTIONS[s.sector_type] || MODEL_DESCRIPTIONS['default'];
   const peerDesc = usesIndustry
     ? `Peer comparison: ${s.industry} (${s.industry_peer_count} peers)`

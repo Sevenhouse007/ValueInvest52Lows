@@ -164,6 +164,32 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
                 x5 = total_rev / ta
                 altman_z = round(1.2 * x1 + 1.4 * x2 + 3.3 * x3 + 0.6 * x4 + 0.99 * x5, 2)
 
+    # ── Change A: Accruals quality ratio ──
+    accruals_ratio = None
+    yf_ni = yf_fin.get("net_income")
+    if yf_ni is not None and ocf is not None and bs_total_assets and bs_total_assets > 0:
+        raw_accruals = (yf_ni - ocf) / bs_total_assets
+        accruals_ratio = round(max(-0.30, min(0.30, raw_accruals)), 4)
+
+    # ── Change B: EPS surprise trend from earningsHistory ──
+    avg_eps_surprise = None
+    eps_surprise_trend = None
+    eh = data.get("earningsHistory", {}).get("history", [])
+    if eh and len(eh) >= 2:
+        surprises = [_safe_raw(q, "surprisePercent") for q in eh]
+        valid = [s for s in surprises if s is not None]
+        if valid:
+            avg_eps_surprise = round(sum(valid) / len(valid), 4)
+        if len(valid) >= 2:
+            eps_surprise_trend = round(valid[0] - valid[-1], 4)
+
+    # ── Change C: Historical mean reversion fields ──
+    five_yr_avg_dy = _safe_raw(summary, "fiveYearAvgDividendYield")
+    # Yahoo returns this as a percentage (e.g., 3.5 meaning 3.5%), convert to decimal
+    if five_yr_avg_dy and five_yr_avg_dy > 1:
+        five_yr_avg_dy = five_yr_avg_dy / 100
+    trailing_pe = _safe_raw(summary, "trailingPE")
+
     return StockFundamentals(
         symbol=symbol,
         forward_pe=_safe_raw(stats, "forwardPE"),
@@ -204,6 +230,11 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         piotroski_details=f_details,
         gross_margin_change=gm_change,
         buyback_yield=bb_yield,
+        accruals_ratio=accruals_ratio,
+        avg_eps_surprise=avg_eps_surprise,
+        eps_surprise_trend=eps_surprise_trend,
+        five_year_avg_div_yield=five_yr_avg_dy,
+        trailing_pe=trailing_pe,
         sector=profile.get("sector", ""),
         industry=profile.get("industry", ""),
         country=profile.get("country", ""),
@@ -601,6 +632,11 @@ def merge_quote_and_fundamentals(
         s.piotroski_details = fundamentals.piotroski_details
         s.gross_margin_change = fundamentals.gross_margin_change
         s.buyback_yield = fundamentals.buyback_yield
+        s.accruals_ratio = fundamentals.accruals_ratio
+        s.avg_eps_surprise = fundamentals.avg_eps_surprise
+        s.eps_surprise_trend = fundamentals.eps_surprise_trend
+        s.five_year_avg_div_yield = fundamentals.five_year_avg_div_yield
+        s.trailing_pe = fundamentals.trailing_pe
         s.debt_to_equity = fundamentals.debt_to_equity
         s.ev_to_revenue = fundamentals.ev_to_revenue
         s.revenue_growth = fundamentals.revenue_growth

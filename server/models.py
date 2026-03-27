@@ -65,6 +65,14 @@ class StockFundamentals(BaseModel):
     piotroski_details: list[str] = Field(default_factory=list)
     gross_margin_change: Optional[float] = None
     buyback_yield: Optional[float] = None
+    # Change A: Accruals quality
+    accruals_ratio: Optional[float] = None
+    # Change B: Earnings estimate revision
+    avg_eps_surprise: Optional[float] = None
+    eps_surprise_trend: Optional[float] = None
+    # Change C: Historical mean reversion
+    five_year_avg_div_yield: Optional[float] = None
+    trailing_pe: Optional[float] = None
     sector: str = ""
     industry: str = ""
     country: str = ""
@@ -139,9 +147,14 @@ class ScoredStock(BaseModel):
     piotroski_details: list[str] = Field(default_factory=list)
     gross_margin_change: Optional[float] = None
     buyback_yield: Optional[float] = None
-    price_momentum_3m: Optional[float] = None  # 3-month price change %
-    price_momentum_12m: Optional[float] = None  # 12-month price change %
-    relative_momentum: Optional[float] = None  # stock drop vs sector avg drop
+    accruals_ratio: Optional[float] = None
+    avg_eps_surprise: Optional[float] = None
+    eps_surprise_trend: Optional[float] = None
+    five_year_avg_div_yield: Optional[float] = None
+    trailing_pe: Optional[float] = None
+    price_momentum_3m: Optional[float] = None
+    price_momentum_12m: Optional[float] = None
+    relative_momentum: Optional[float] = None
     country: str = ""
     debt_to_equity: Optional[float] = None
     ev_to_revenue: Optional[float] = None

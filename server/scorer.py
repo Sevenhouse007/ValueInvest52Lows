@@ -573,6 +573,142 @@ def _score_short_interest(stock: ScoredStock) -> tuple[int, list[str]]:
     return 0, []
 
 
+def _score_accruals_quality(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Change A: Sloan accruals quality ratio for Value Score."""
+    if sector_type in ("financial", "reit"):
+        return 0, []
+    ar = stock.accruals_ratio
+    if ar is None:
+        return 0, []
+    if ar < -0.10:
+        return 8, [f"High earnings quality: cash earnings well above reported (accruals {ar*100:.0f}%)"]
+    if ar < -0.05:
+        return 5, ["Good earnings quality: cash exceeds reported earnings"]
+    if ar < 0:
+        return 2, []
+    if ar <= 0.05:
+        return 0, []
+    if ar <= 0.10:
+        return -5, ["Moderate accruals: reported earnings above cash flow"]
+    if ar <= 0.20:
+        return -10, ["High accruals: earnings quality concern"]
+    return -15, ["Very high accruals: significant earnings quality risk"]
+
+
+def _score_accruals_quality_q(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Change A: Accruals quality for Quality Score."""
+    if sector_type in ("financial", "reit"):
+        return 0, []
+    ar = stock.accruals_ratio
+    if ar is None:
+        return 0, []
+    if ar < -0.05:
+        return 6, ["Cash earnings exceed reported — quality"]
+    if ar > 0.20:
+        return -12, ["Severe accruals — possible earnings manipulation"]
+    if ar > 0.10:
+        return -8, ["Reported earnings materially above cash — earnings quality risk"]
+    return 0, []
+
+
+def _score_eps_revision(stock: ScoredStock) -> tuple[int, list[str]]:
+    """Change B: Earnings estimate revision momentum for Quality Score."""
+    pts = 0
+    reasons: list[str] = []
+
+    # Primary: EPS surprise trend
+    st = stock.eps_surprise_trend
+    used_primary = False
+    if st is not None:
+        used_primary = True
+        if st > 0.10:
+            pts += 8; reasons.append("EPS surprises improving — estimate revision tailwind")
+        elif st > 0.03:
+            pts += 4; reasons.append("EPS surprises stable-to-improving")
+        elif st < -0.10:
+            pts -= 8; reasons.append("EPS surprises deteriorating — estimate cuts likely")
+        elif st < -0.03:
+            pts -= 4; reasons.append("EPS surprise trend weakening")
+
+    # Secondary: earningsGrowth if no surprise trend
+    if not used_primary:
+        eg = stock.earnings_growth
+        if eg is not None:
+            if eg > 0.20:
+                pts += 5; reasons.append("Strong earnings growth momentum")
+            elif eg > 0.05:
+                pts += 3
+            elif eg < -0.20:
+                pts -= 5; reasons.append("Earnings contracting sharply")
+            elif eg < -0.05:
+                pts -= 2
+
+    # Independent: average EPS surprise
+    avg = stock.avg_eps_surprise
+    if avg is not None:
+        if avg > 0.05:
+            pts += 4; reasons.append("Consistent EPS beats — management guides conservatively")
+        elif avg < -0.05:
+            pts -= 4; reasons.append("Consistent EPS misses — guidance credibility concern")
+
+    # Interaction: positive revision at 52W low
+    if pts > 0 and stock.fifty_two_week_high and stock.price and stock.fifty_two_week_high > 0:
+        pos = (stock.price - stock.fifty_two_week_low) / (stock.fifty_two_week_high - stock.fifty_two_week_low) if stock.fifty_two_week_high > stock.fifty_two_week_low else 1
+        if pos < 0.10:
+            pts += 5; reasons.append("Improving estimates at 52W low — high-conviction contrarian setup")
+
+    return pts, reasons
+
+
+def _score_historical_mean_reversion(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Change C: Historical multiple mean reversion signal for Value Score."""
+    if sector_type == "energy":
+        return 0, []  # commodity earnings too volatile
+
+    pts = 0
+    reasons: list[str] = []
+
+    # Dividend yield vs 5-year average
+    dy = stock.dividend_yield
+    avg_dy = stock.five_year_avg_div_yield
+    if dy and dy > 0.01 and avg_dy and avg_dy > 0:
+        ratio = dy / avg_dy
+        dy_pts = 0
+        if ratio > 1.5:
+            dy_pts = 8; reasons.append(f"Yielding {ratio:.0f}x above 5-year avg — historically cheap")
+        elif ratio > 1.25:
+            dy_pts = 5; reasons.append("Yield above 5-year average")
+        elif ratio > 1.0:
+            dy_pts = 2
+        elif ratio < 0.75:
+            dy_pts = -5; reasons.append("Yield well below historical average")
+        # Double for utilities
+        if sector_type == "utility":
+            dy_pts = int(dy_pts * 2)
+        pts += dy_pts
+
+    # Forward P/E recovery signal (skip for financial/reit)
+    if sector_type not in ("financial", "reit"):
+        fpe = stock.forward_pe
+        tpe = stock.trailing_pe
+        if fpe and fpe > 0 and fpe < 200 and tpe and tpe > 0 and tpe < 200:
+            recovery = fpe / tpe
+            if recovery < 0.60:
+                pts += 8; reasons.append("Forward P/E 40%+ below trailing — earnings recovery priced in")
+            elif recovery < 0.75:
+                pts += 5; reasons.append("Forward P/E well below trailing — improving earnings expected")
+            elif recovery < 0.85:
+                pts += 2
+            elif recovery > 1.50:
+                pts -= 10; reasons.append("Significant earnings deterioration expected")
+            elif recovery > 1.20:
+                pts -= 5; reasons.append("Forward P/E above trailing — earnings expected to decline")
+
+    # Cap at +12 to prevent double-counting
+    pts = max(-15, min(12, pts))
+    return pts, reasons
+
+
 def _score_insider_buying(stock: ScoredStock) -> tuple[int, list[str]]:
     """Change 2: Sell penalties reduced ~40% (most sells are pre-planned 10b5-1)."""
     buys = stock.insider_buy_count
@@ -800,6 +936,16 @@ def _score_universal(stock: ScoredStock, sector_type: str) -> tuple[int, list[st
 
     # Change 11: Dividend sustainability
     p, r = _score_dividend_sustainability(stock, sector_type)
+    pts += p; reasons.extend(r)
+
+    # Change A: Accruals quality (Value Score)
+    p, r = _score_accruals_quality(stock, sector_type)
+    pts += p; reasons.extend(r)
+    if p <= -10:
+        red_flag_count += 1
+
+    # Change C: Historical mean reversion (Value Score)
+    p, r = _score_historical_mean_reversion(stock, sector_type)
     pts += p; reasons.extend(r)
 
     if red_flag_count >= 3:
@@ -1135,6 +1281,14 @@ def compute_quality_score(
             pts += 5; reasons.append("Also cheap on P/E")
         elif ratio < 0.75:
             pts += 2
+
+    # Change A: Accruals quality (Quality Score)
+    p, r = _score_accruals_quality_q(stock, st)
+    pts += p; reasons.extend(r)
+
+    # Change B: EPS revision momentum (Quality Score)
+    p, r = _score_eps_revision(stock)
+    pts += p; reasons.extend(r)
 
     score = max(0, min(100, pts))
     if score >= 65:
