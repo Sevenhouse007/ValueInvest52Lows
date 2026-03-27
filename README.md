@@ -16,11 +16,11 @@ Open [http://localhost:8000](http://localhost:8000) in your browser.
 
 ## How It Works
 
-1. **Fetches** the 250 most recent 52-week low stocks from Yahoo Finance
-2. **Filters** out penny stocks (<$10), small caps (<$2B), and software/IT stocks
-3. **Enriches** each stock with fundamentals (P/E, P/B, EV/EBITDA, ROE, FCF, analyst targets)
-4. **Computes sector averages** for peer comparison
-5. **Scores** each stock on a 0–100+ composite value scale
+1. **Fetches** all recent 52-week low stocks from Yahoo Finance (no hardcoded filters — all filtering is user-controlled)
+2. **Enriches** each stock with fundamentals via quoteSummary API + yfinance financials
+3. **Computes peer averages** at industry level (leave-one-out), market level (55 blue-chip benchmarks), and scan level
+4. **Scores** each stock with a sector-aware hybrid system (80% ratio-based + 20% absolute) plus 16 universal signals
+5. **Assigns both** a Value Score (0-150, cheapness-focused) and Quality Score (0-100, business quality)
 6. **Displays** results in an interactive sortable/filterable table
 
 ## Daily Schedule
