@@ -381,25 +381,29 @@ def _score_analyst_rec(rec: Optional[float], max_pts: int = 10) -> tuple[int, li
 
 
 def _score_upside(stock: ScoredStock) -> tuple[int, list[str]]:
-    """Capped at 6 pts — analyst targets lag at 52W lows."""
+    """Change 7: Increased upside cap from 6 to 10 pts."""
     if stock.target_mean_price and stock.price and stock.price > 0:
         u = (stock.target_mean_price - stock.price) / stock.price
         stock.upside_percent = round(u * 100, 1)
+        if u > 0.60:
+            return 10, [f"{stock.upside_percent:.0f}%+ analyst upside to target"]
         if u > 0.40:
-            return 6, [f"{stock.upside_percent:.0f}% upside"]
-        if u > 0.20:
-            return 4, [f"{stock.upside_percent:.0f}% upside"]
+            return 8, [f"{stock.upside_percent:.0f}%+ analyst upside to target"]
+        if u > 0.25:
+            return 5, [f"{stock.upside_percent:.0f}%+ analyst upside"]
+        if u > 0.10:
+            return 3, []
+        if u < 0:
+            return -5, ["Analyst consensus below current price"]
     return 0, []
 
 
 # =====================================================================
-# FCF yield scoring (FCF / Enterprise Value per Alpha Architect research)
+# Change 1: FCF yield on EV + sector-relative bonus
 # =====================================================================
 
 def _score_fcf_yield(stock: ScoredStock, max_pts: int = 18) -> tuple[int, list[str]]:
     fcf = stock.free_cash_flow
-    # Use Enterprise Value as denominator (more predictive than market cap)
-    # Fall back to market cap if EV not available
     ev = stock.enterprise_value
     denom = ev if ev and ev > 0 else stock.market_cap
     if fcf is None or not denom or denom <= 0:
@@ -410,15 +414,25 @@ def _score_fcf_yield(stock: ScoredStock, max_pts: int = 18) -> tuple[int, list[s
     if fy < 0:
         return -3, []
     pct = fy * 100
+    pts = 0
+    reasons: list[str] = []
     if fy > 0.12:
-        return min(max_pts, 18), [f"Strong FCF yield {pct:.0f}%"]
-    if fy > 0.07:
-        return min(max_pts, 14), [f"Solid FCF yield {pct:.0f}%"]
-    if fy > 0.03:
-        return min(max_pts, 8), ["Positive FCF"]
-    if fy > 0:
-        return min(max_pts, 4), ["Positive FCF"]
-    return 0, []
+        pts = min(max_pts, 18); reasons.append(f"Strong FCF/EV yield {pct:.0f}%")
+    elif fy > 0.07:
+        pts = min(max_pts, 14); reasons.append(f"Solid FCF/EV yield {pct:.0f}%")
+    elif fy > 0.03:
+        pts = min(max_pts, 8); reasons.append("Positive FCF")
+    elif fy > 0:
+        pts = min(max_pts, 4); reasons.append("Positive FCF")
+    # Sector-relative FCF yield bonus (Change 1 addition)
+    # Compare to a rough sector FCF yield if we have market avg data
+    mkt_ev_ebitda = stock.market_avg_ev_ebitda
+    if mkt_ev_ebitda and mkt_ev_ebitda > 0 and fy > 0:
+        # Approximate sector FCF yield as ~60% of 1/EV_EBITDA (rough FCF proxy)
+        sector_fy = 0.6 / mkt_ev_ebitda
+        if fy > sector_fy * 1.5:
+            pts += 4; reasons.append("FCF yield well above sector")
+    return pts, reasons
 
 
 # =====================================================================
@@ -436,44 +450,77 @@ def _penalty_negative_ev_ebitda(ev: Optional[float]) -> tuple[int, list[str]]:
 # =====================================================================
 
 def _score_growth(stock: ScoredStock) -> tuple[int, list[str]]:
+    """Changes 6, 8: Enhanced revenue tiers + EBITDA cross-check on collapse."""
     pts = 0
     reasons: list[str] = []
     eg = stock.earnings_growth
+    rg = stock.revenue_growth
+    ebitda_g = stock.ebitda_growth
+
+    # --- Earnings growth with Change 8: EBITDA cross-check ---
     if eg is not None:
+        raw_penalty = 0
         if eg < -0.70:
-            pts -= 20; reasons.append(f"Earnings collapsing {eg*100:.0f}%")
+            raw_penalty = -20; reasons.append(f"Earnings collapsing {eg*100:.0f}%")
         elif eg < -0.50:
-            pts -= 15; reasons.append(f"Earnings plunging {eg*100:.0f}%")
+            raw_penalty = -15; reasons.append(f"Earnings plunging {eg*100:.0f}%")
         elif eg < -0.30:
-            pts -= 10; reasons.append(f"Earnings declining {eg*100:.0f}%")
+            raw_penalty = -10; reasons.append(f"Earnings declining {eg*100:.0f}%")
         elif eg < -0.10:
-            pts -= 5; reasons.append(f"Earnings declining {eg*100:.0f}%")
+            raw_penalty = -5; reasons.append(f"Earnings declining {eg*100:.0f}%")
         elif eg > 0.15:
             pts += 5; reasons.append("Earnings growing")
-    rg = stock.revenue_growth
-    if rg is not None:
-        if rg < -0.20:
-            pts -= 10; reasons.append(f"Revenue shrinking {rg*100:.0f}%")
-        elif rg < -0.10:
-            pts -= 5; reasons.append(f"Revenue declining {rg*100:.0f}%")
-        elif rg < -0.05:
-            pts -= 2
-        elif rg > 0.10:
-            pts += 3; reasons.append("Revenue growing")
-        elif rg > 0.03:
-            pts += 2; reasons.append("Steady revenue growth")
-        elif rg > 0:
-            pts += 1
 
-    # Relative momentum (stock vs sector peers)
+        # Change 8: EBITDA cross-check on collapse
+        if raw_penalty <= -10 and ebitda_g is not None:
+            if eg < -0.50 and ebitda_g > -0.20:
+                # GAAP earnings collapse but EBITDA is okay — likely one-time items
+                raw_penalty = int(raw_penalty * 0.50)
+                reasons.append("GAAP earnings decline may include one-time items")
+            elif rg is not None and rg > 0 and eg < -0.30:
+                # Earnings declining but revenue growing — margin compression
+                raw_penalty = int(raw_penalty * 0.70)
+                if reasons and "collaps" in reasons[-1].lower():
+                    reasons[-1] = f"Margin compression {eg*100:.0f}%"
+        # Double confirmation: both earnings AND revenue negative → full penalty
+        if raw_penalty < 0 and rg is not None and rg < 0 and eg < -0.30:
+            pass  # keep full penalty, no reduction
+
+        pts += raw_penalty
+
+    # --- Change 6: Enhanced revenue growth tiers ---
+    if rg is not None:
+        if rg < -0.15:
+            pts -= 15; reasons.append(f"Revenue collapsing {rg*100:.0f}%")
+        elif rg < -0.05:
+            pts -= 8; reasons.append(f"Revenue declining {rg*100:.0f}%")
+        elif rg < 0:
+            pts -= 3
+        elif rg > 0.15:
+            pts += 5; reasons.append("Strong revenue growth")
+        elif rg > 0.08:
+            pts += 4; reasons.append("Solid revenue growth")
+        elif rg > 0.03:
+            pts += 3; reasons.append("Positive revenue growth")
+        elif rg > 0:
+            pts += 2; reasons.append("Modest but positive growth")
+
+    # Revenue acceleration bonus (Change 6)
+    ra = stock.revenue_acceleration
+    if ra is not None and ra > 0.05:
+        pts += 4; reasons.append("Revenue accelerating")
+
+    # Relative momentum (Change 5 — enhanced tiers)
     rm = stock.relative_momentum
     if rm is not None:
-        if rm > 10:
-            pts += 4; reasons.append(f"Outperforming sector by {rm:.0f}pp")
+        if rm > 15:
+            pts += 8; reasons.append(f"Strong positive relative momentum (+{rm:.0f}pp vs sector)")
         elif rm > 5:
-            pts += 2
-        elif rm < -15:
-            pts -= 4; reasons.append(f"Underperforming sector by {abs(rm):.0f}pp")
+            pts += 5; reasons.append(f"Outperforming sector peers (+{rm:.0f}pp)")
+        elif rm > 0:
+            pts += 3
+        elif rm < -20:
+            pts -= 5; reasons.append(f"Underperforming sector peers badly ({rm:.0f}pp)")
         elif rm < -8:
             pts -= 2
 
@@ -481,16 +528,27 @@ def _score_growth(stock: ScoredStock) -> tuple[int, list[str]]:
 
 
 def _score_proximity_to_low(stock: ScoredStock) -> tuple[int, list[str]]:
+    """Change 12: Proximity as interaction signal only (with F-Score + FCF)."""
     low, high, price = stock.fifty_two_week_low, stock.fifty_two_week_high, stock.price
     if not low or not high or high <= low or not price:
         return 0, []
     pos = (price - low) / (high - low)
+    fs = stock.piotroski_f_score
+
+    # FCF yield for interaction check
+    ev = stock.enterprise_value
+    denom = ev if ev and ev > 0 else stock.market_cap
+    fcf_yield = stock.free_cash_flow / denom if stock.free_cash_flow and denom and denom > 0 else 0
+
     if pos < 0.05:
-        return 8, [f"At 52W low (bottom {pos*100:.0f}% of range)"]
-    if pos < 0.10:
-        return 5, [f"Near 52W low ({pos*100:.0f}% from bottom)"]
-    if pos < 0.20:
-        return 3, [f"Close to 52W low ({pos*100:.0f}% from bottom)"]
+        if fs is not None and fs >= 7:
+            return 6, ["Deeply oversold with strong fundamentals — potential capitulation bottom"]
+        if fs is not None and fs <= 3:
+            return -5, ["At 52W low with weak fundamentals — possible free fall"]
+    elif pos < 0.20:
+        if fs is not None and fs >= 7 and fcf_yield > 0.05:
+            return 4, ["Slight recovery from low with strong quality + FCF"]
+
     return 0, []
 
 
@@ -516,12 +574,14 @@ def _score_short_interest(stock: ScoredStock) -> tuple[int, list[str]]:
 
 
 def _score_insider_buying(stock: ScoredStock) -> tuple[int, list[str]]:
+    """Change 2: Sell penalties reduced ~40% (most sells are pre-planned 10b5-1)."""
     buys = stock.insider_buy_count
     sells = stock.insider_sell_count
     total = buys + sells
     if total == 0:
         return 0, []
     sentiment = buys / total
+    # Buy signals unchanged
     if buys >= 3 and sells >= 3:
         if sentiment > 0.5:
             return 2, [f"Mixed insider activity, net buying ({buys}B/{sells}S)"]
@@ -532,16 +592,15 @@ def _score_insider_buying(stock: ScoredStock) -> tuple[int, list[str]]:
         return 6, [f"Insider buying ({buys} buys vs {sells} sells)"]
     if sentiment > 0.5:
         return 3, [f"Net insider buying ({buys}B/{sells}S)"]
+    # Sell penalties reduced ~40% from original
     if sells >= 50:
         return -15, [f"Extreme insider selling ({sells} sells, {buys} buys)"]
     if sells >= 20:
-        return -12, [f"Mass insider selling ({sells} sells, {buys} buys)"]
-    if sells >= 10:
-        return -8, [f"Heavy insider selling ({sells} sells, {buys} buys)"]
+        return -10, [f"Mass insider selling ({sells} sells, {buys} buys)"]
     if sells >= 5:
-        return -6, [f"Insider selling ({sells} sells, {buys} buys)"]
+        return -5, [f"Insider selling ({sells} sells, {buys} buys)"]
     if sentiment < 0.2 and sells >= 3:
-        return -4, [f"Insider selling ({sells} sells, {buys} buys)"]
+        return -3, [f"Insider selling ({sells} sells, {buys} buys)"]
     if sentiment < 0.3 and sells >= 2:
         return -2, [f"More insider selling than buying ({sells}S/{buys}B)"]
     return 0, []
@@ -572,26 +631,42 @@ def _penalty_missing_forward_pe(fpe: Optional[float], sector_type: str) -> tuple
     return 0, []
 
 
-def _penalty_sector_relative(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
-    """Penalize metrics that deviate extremely from market averages."""
+def _penalty_leverage(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Change 10: Net Debt/EBITDA replaces D/E for leverage assessment."""
+    if sector_type in ("utility", "reit"):
+        return 0, []  # high leverage structurally normal
+
     pts = 0
     reasons: list[str] = []
+    nde = stock.net_debt_ebitda
 
-    # D/E vs market avg
-    de = stock.debt_to_equity
-    mkt_de = stock.market_avg_debt_equity
-    if de is not None and de > 0 and mkt_de and mkt_de > 0:
-        ratio = de / mkt_de
-        if ratio > 5.0:
-            pts -= 15; reasons.append(f"Leverage {ratio:.1f}x sector avg (D/E {de:.0f} vs {mkt_de:.0f})")
-        elif ratio > 3.0:
-            pts -= 10; reasons.append(f"Leverage {ratio:.1f}x sector avg (D/E {de:.0f})")
-        elif ratio > 2.0:
-            pts -= 5; reasons.append(f"Leverage {ratio:.1f}x sector avg")
-    elif de is not None and de > 400:
-        pts -= 10; reasons.append(f"Very high leverage D/E {de:.0f}")
+    if nde is not None:
+        if nde < -0.5:
+            pts += 8; reasons.append("Significant net cash — fortress balance sheet")
+        elif nde < 0:
+            pts += 5; reasons.append("Net cash position")
+        elif nde <= 2.5:
+            pass  # healthy
+        elif nde <= 4.0:
+            pts -= 3; reasons.append(f"Elevated leverage ({nde:.1f}x Net Debt/EBITDA)")
+        elif nde <= 6.0:
+            pts -= 10; reasons.append(f"High leverage: {nde:.1f}x Net Debt/EBITDA")
+        else:
+            pts -= 15; reasons.append(f"Extreme leverage: {nde:.1f}x Net Debt/EBITDA")
+    else:
+        # Fallback: check D/E vs sector avg (old approach)
+        de = stock.debt_to_equity
+        mkt_de = stock.market_avg_debt_equity
+        if de is not None and de > 0 and mkt_de and mkt_de > 0:
+            ratio = de / mkt_de
+            if ratio > 5.0:
+                pts -= 12; reasons.append(f"Leverage {ratio:.1f}x sector avg (D/E {de:.0f})")
+            elif ratio > 3.0:
+                pts -= 8; reasons.append(f"Leverage {ratio:.1f}x sector avg")
+            elif ratio > 2.0:
+                pts -= 4; reasons.append(f"Elevated leverage vs sector")
 
-    # Negative FCF burn rate
+    # Negative FCF burn rate (kept from old _penalty_sector_relative)
     fcf = stock.free_cash_flow
     mc = stock.market_cap
     if fcf is not None and fcf < 0 and mc and mc > 0:
@@ -603,7 +678,79 @@ def _penalty_sector_relative(stock: ScoredStock, sector_type: str) -> tuple[int,
         elif burn > 0.05:
             pts -= 3; reasons.append(f"Negative FCF ({burn*100:.0f}% of mkt cap)")
 
-    # ROE: handled by ratio scorer — no double-counting here
+    return pts, reasons
+
+
+def _score_altman_z(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Change 9: Altman Z-Score distress flag."""
+    if sector_type in ("financial", "reit", "utility"):
+        return 0, []
+    z = stock.altman_z_score
+    if z is None:
+        return 0, []
+    if z < 1.81:
+        return -20, [f"Bankruptcy risk: Altman Z-Score {z:.1f} (distress zone)"]
+    if z < 2.99:
+        return -8, [f"Altman Z-Score {z:.1f} (grey zone — elevated risk)"]
+    if z > 4.0:
+        return 5, [f"Strong Altman Z-Score {z:.1f} — low distress risk"]
+    return 0, []
+
+
+def _score_interest_coverage(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Change 13: Interest coverage ratio penalty/bonus."""
+    if sector_type in ("financial", "reit"):
+        return 0, []
+    ic = stock.interest_coverage
+    if ic is None:
+        return 0, []
+    pts = 0
+    reasons: list[str] = []
+    if ic < 1.0:
+        pts -= 18; reasons.append("EBIT does not cover interest — acute distress risk")
+    elif ic < 1.5:
+        pts -= 10; reasons.append("Thin interest coverage — one bad quarter from distress")
+    elif ic < 2.5:
+        pts -= 4; reasons.append("Below-average interest coverage")
+    elif ic < 5.0:
+        pass  # acceptable
+    elif ic < 10.0:
+        pts += 4; reasons.append("Strong interest coverage")
+    else:
+        pts += 8; reasons.append("Excellent debt service capacity")
+
+    # Compounding: high leverage + thin coverage
+    nde = stock.net_debt_ebitda
+    if nde is not None and nde > 4.0 and ic < 2.0:
+        pts -= 10; reasons.append("High leverage + thin coverage = significant distress risk")
+
+    return pts, reasons
+
+
+def _score_dividend_sustainability(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Change 11: Dividend payout ratio sustainability check."""
+    if sector_type not in ("reit", "utility", "staples", "comms"):
+        return 0, []
+    pr = stock.payout_ratio
+    if pr is None or pr < 0:
+        return 0, []
+    pts = 0
+    reasons: list[str] = []
+    if pr > 1.5:
+        pts -= 15; reasons.append("Dividend likely unsustainable — payout exceeds earnings by 50%")
+    elif pr > 1.0:
+        pts -= 8; reasons.append("Dividend payout ratio above 100% — at risk of cut")
+    elif pr > 0.85:
+        pts -= 3; reasons.append("Payout ratio stretched")
+    elif pr < 0.4:
+        pts += 4; reasons.append("Conservative payout ratio — dividend well covered")
+
+    # Override: if FCF covers dividend even when GAAP doesn't
+    if pts < 0 and stock.free_cash_flow and stock.dividend_yield and stock.market_cap:
+        div_cost = stock.dividend_yield * stock.market_cap
+        if stock.free_cash_flow > div_cost:
+            pts = int(pts * 0.50)
+            reasons.append("FCF covers dividend despite high payout ratio")
 
     return pts, reasons
 
@@ -613,6 +760,7 @@ def _penalty_sector_relative(stock: ScoredStock, sector_type: str) -> tuple[int,
 # =====================================================================
 
 def _score_universal(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """All 13 changes integrated into universal signal pipeline."""
     pts = 0
     reasons: list[str] = []
     red_flag_count = 0
@@ -632,10 +780,27 @@ def _score_universal(stock: ScoredStock, sector_type: str) -> tuple[int, list[st
     p, r = _penalty_missing_forward_pe(stock.forward_pe, sector_type)
     pts += p; reasons.extend(r)
 
-    p, r = _penalty_sector_relative(stock, sector_type)
+    # Change 10: Net Debt/EBITDA leverage (replaces old D/E)
+    p, r = _penalty_leverage(stock, sector_type)
     pts += p; reasons.extend(r)
     if p <= -10:
         red_flag_count += 1
+
+    # Change 9: Altman Z-Score
+    p, r = _score_altman_z(stock, sector_type)
+    pts += p; reasons.extend(r)
+    if p <= -10:
+        red_flag_count += 1
+
+    # Change 13: Interest coverage
+    p, r = _score_interest_coverage(stock, sector_type)
+    pts += p; reasons.extend(r)
+    if p <= -10:
+        red_flag_count += 1
+
+    # Change 11: Dividend sustainability
+    p, r = _score_dividend_sustainability(stock, sector_type)
+    pts += p; reasons.extend(r)
 
     if red_flag_count >= 3:
         pts -= 15; reasons.append("Multiple severe red flags — high value trap risk")
@@ -798,17 +963,20 @@ def compute_quality_score(
         else:
             pts -= 10; reasons.append(f"Weak fundamentals (F-Score {fs}/9)")
 
-    # ── ROIC (15 pts max — leverage-neutral profitability) ──
+    # ── Change 4: ROIC (15 pts max — leverage-neutral, skip financial/reit) ──
     roic = stock.roic
-    if roic is not None:
-        if roic > 0.20:
-            pts += 15; reasons.append(f"Excellent ROIC {roic*100:.0f}%")
-        elif roic > 0.12:
-            pts += 10; reasons.append(f"Strong ROIC {roic*100:.0f}%")
-        elif roic > 0.06:
-            pts += 5
+    st = detect_sector_type(stock.sector, stock.industry)
+    if roic is not None and st not in ("financial", "reit"):
+        if roic > 0.25:
+            pts += 10; reasons.append(f"Exceptional ROIC {roic*100:.0f}%")
+        elif roic > 0.15:
+            pts += 7; reasons.append(f"Strong ROIC {roic*100:.0f}%")
+        elif roic > 0.08:
+            pts += 4
+        elif roic > 0:
+            pts += 2
         elif roic < 0:
-            pts -= 5; reasons.append("Negative ROIC")
+            pts -= 6; reasons.append("Negative ROIC — destroying capital")
 
     # ── ROE vs sector (15 pts max — complements ROIC) ──
     roe = stock.return_on_equity
@@ -847,31 +1015,45 @@ def compute_quality_score(
         else:
             pts -= 15; reasons.append(f"Earnings collapsing {eg*100:.0f}%")
 
-    # ── Revenue growth (10 pts max) ──
+    # ── Change 6: Enhanced revenue growth tiers (10 pts max) ──
     rg = stock.revenue_growth
     if rg is not None:
         if rg > 0.15:
-            pts += 10; reasons.append(f"Revenue growing {rg*100:.0f}%")
-        elif rg > 0.05:
-            pts += 6
+            pts += 10; reasons.append(f"Strong revenue growth {rg*100:.0f}%")
+        elif rg > 0.08:
+            pts += 7; reasons.append(f"Solid revenue growth {rg*100:.0f}%")
+        elif rg > 0.03:
+            pts += 4; reasons.append("Positive revenue growth")
         elif rg > 0:
-            pts += 2
-        elif rg < -0.10:
-            pts -= 5; reasons.append(f"Revenue declining {rg*100:.0f}%")
+            pts += 2; reasons.append("Modest but positive growth")
+        elif rg > -0.05:
+            pts -= 3
+        elif rg > -0.15:
+            pts -= 8; reasons.append(f"Revenue declining {rg*100:.0f}%")
+        else:
+            pts -= 15; reasons.append(f"Revenue collapsing {rg*100:.0f}%")
+    # Revenue acceleration bonus
+    ra = stock.revenue_acceleration
+    if ra is not None and ra > 0.05:
+        pts += 4; reasons.append("Revenue accelerating")
 
-    # ── Gross margin trend (14 pts max — more predictive than earnings surprises) ──
+    # ── Change 3: Gross margin trend (14 pts max) ──
     gm = stock.gross_margin_change
     if gm is not None:
-        if gm > 0.05:
-            pts += 14; reasons.append(f"Margins expanding strongly +{gm*100:.1f}pp")
-        elif gm > 0.03:
-            pts += 10; reasons.append(f"Margins expanding +{gm*100:.1f}pp")
-        elif gm > 0.01:
-            pts += 5; reasons.append("Margins improving")
-        elif gm < -0.05:
-            pts -= 8; reasons.append(f"Margins contracting {gm*100:.1f}pp")
+        if gm > 0.01:
+            # Expanding
+            if gm > 0.01:
+                pts += 14; reasons.append(f"Meaningful gross margin expansion +{gm*100:.0f}bps")
+            else:
+                pts += 8; reasons.append("Gross margin expanding")
+        elif abs(gm) <= 0.005:
+            pts += 4; reasons.append("Stable margins")
+        elif gm < -0.04:
+            pts -= 15; reasons.append(f"Significant margin deterioration {gm*100:.0f}bps")
         elif gm < -0.02:
-            pts -= 4; reasons.append(f"Margins slipping {gm*100:.1f}pp")
+            pts -= 10; reasons.append(f"Margin compression {gm*100:.0f}bps")
+        else:
+            pts -= 5; reasons.append(f"Margins contracting {gm*100:.0f}bps")
 
     # ── FCF yield on EV (8 pts max) ──
     fcf = stock.free_cash_flow
@@ -928,7 +1110,23 @@ def compute_quality_score(
         elif drop > 0.15:
             pts += 3
 
-    # ── Mild valuation bonus (not the main focus, but a nice-to-have) ──
+    # ── Change 5: Relative momentum in quality score ──
+    rm = stock.relative_momentum
+    if rm is not None:
+        if rm > 15:
+            pts += 8; reasons.append(f"Strong positive relative momentum (+{rm:.0f}pp)")
+        elif rm > 5:
+            pts += 5; reasons.append("Outperforming sector peers")
+        elif rm > 0:
+            pts += 3; reasons.append("Slightly ahead of sector")
+        elif rm < -20:
+            pts -= 5; reasons.append("Underperforming sector peers badly")
+
+    # ── Change 7: Analyst upside in quality score ──
+    p, r = _score_upside(stock)
+    pts += p; reasons.extend(r)
+
+    # ── Mild valuation bonus ──
     fpe = stock.forward_pe
     mkt_fpe = stock.market_avg_fpe or (peer_avg.avg_forward_pe if peer_avg else None)
     if fpe and fpe > 0 and mkt_fpe and mkt_fpe > 0:

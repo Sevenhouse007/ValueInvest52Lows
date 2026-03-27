@@ -114,6 +114,9 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .dual-badge { display:inline-block; margin-left:6px; padding:1px 5px; border-radius:3px; background:linear-gradient(135deg, var(--green-bg), rgba(59,130,246,.15)); color:#a78bfa; font-size:9px; font-weight:700; vertical-align:middle; border:1px solid rgba(167,139,250,.25); }
 tbody tr.dual-signal { border-left:3px solid #a78bfa; }
 
+/* Risk badge */
+.risk-badge { display:inline-block; margin-left:4px; padding:1px 4px; border-radius:3px; background:var(--red-bg); color:var(--red); font-size:8px; font-weight:700; vertical-align:middle; }
+
 /* Watchlist star */
 .star { cursor:pointer; font-size:16px; color:var(--text2); }
 .star.active { color:var(--amber); }
@@ -425,10 +428,11 @@ function renderTable() {
     const eg = s.earnings_growth;
     const rg = s.revenue_growth;
     const isDual = s.value_score >= 70 && s.quality_score >= 65;
+    const hasRisk = (s.altman_z_score != null && s.altman_z_score < 1.81) || (s.interest_coverage != null && s.interest_coverage < 1.5) || (s.payout_ratio != null && s.payout_ratio > 1.2);
     const rowClass = [expandedSymbol === s.symbol ? 'expanded' : '', isDual ? 'dual-signal' : ''].join(' ').trim();
     html += `<tr data-sym="${s.symbol}" class="${rowClass}">
       <td><span class="star ${isWL?'active':''}" onclick="toggleWL(event,'${s.symbol}')">★</span></td>
-      <td><strong>${s.symbol}</strong>${isDual?'<span class="dual-badge">V+Q</span>':''}${isNew?'<span class="new-badge">NEW</span>':''}</td>
+      <td><strong>${s.symbol}</strong>${isDual?'<span class="dual-badge">V+Q</span>':''}${hasRisk?'<span class="risk-badge">RISK</span>':''}${isNew?'<span class="new-badge">NEW</span>':''}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${s.short_name||''}</td>
       <td>${s.sector||'—'}</td>
       <td>${isQ ? fmtFScore(s.piotroski_f_score) : '<span class=\"model-tag\">'+fmtModel(s.sector_type)+'</span>'}</td>

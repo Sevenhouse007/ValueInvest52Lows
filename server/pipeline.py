@@ -95,8 +95,94 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
     ocf = _safe_raw(fin, "operatingCashflow")
     roic = None
     if ev and ev > 0 and ocf is not None:
-        # ROIC approximated as Operating Cashflow / Enterprise Value
         roic = round(ocf / ev, 4)
+
+    # New fields for changes 8-13
+    inc_hist = data.get("incomeStatementHistory", {}).get("incomeStatementHistory", [])
+    ebitda_val = _safe_raw(fin, "ebitda")
+    total_debt = _safe_raw(fin, "totalDebt")
+    total_cash = _safe_raw(fin, "totalCash")
+    total_rev_fin = _safe_raw(fin, "totalRevenue")
+    op_margins = _safe_raw(fin, "operatingMargins")
+    payout = _safe_raw(summary, "payoutRatio")
+
+    # Compute EBIT from revenue * operating margins
+    ebit_val = None
+    if total_rev_fin and op_margins:
+        ebit_val = total_rev_fin * op_margins
+
+    # Interest expense from income statement history
+    interest_exp = None
+    if inc_hist:
+        interest_exp = _safe_raw(inc_hist[0], "interestExpense")
+    bs_total_assets = None
+    bs_total_ca = None
+    bs_total_cl = None
+    bs_total_liab = None
+    bs_retained = None
+    # Try financialData for total assets (currentRatio * currentLiabilities approximation)
+    # These may not be available — Z-Score will skip if missing
+
+    # Net Debt / EBITDA
+    net_debt_ebitda = None
+    if total_debt is not None and total_cash is not None and ebitda_val and ebitda_val > 0:
+        net_debt = total_debt - total_cash
+        net_debt_ebitda = round(net_debt / ebitda_val, 2)
+
+    # Interest coverage
+    interest_cov = None
+    if ebit_val is not None and interest_exp is not None and interest_exp != 0:
+        interest_cov = round(ebit_val / abs(interest_exp), 2)
+
+    # EBITDA growth (from income statement history)
+    ebitda_growth = None
+    if len(inc_hist) >= 2:
+        cur_rev = _safe_raw(inc_hist[0], "totalRevenue")
+        prev_rev = _safe_raw(inc_hist[1], "totalRevenue")
+        cur_cost = _safe_raw(inc_hist[0], "costOfRevenue")
+        prev_cost = _safe_raw(inc_hist[1], "costOfRevenue")
+        cur_opex = _safe_raw(inc_hist[0], "totalOperatingExpenses")
+        prev_opex = _safe_raw(inc_hist[1], "totalOperatingExpenses")
+        # Approximate EBITDA growth from operating income trend
+        if cur_rev and cur_opex and prev_rev and prev_opex:
+            cur_oi = cur_rev - cur_opex
+            prev_oi = prev_rev - prev_opex
+            if prev_oi and abs(prev_oi) > 0:
+                ebitda_growth = round((cur_oi - prev_oi) / abs(prev_oi), 4)
+
+    # Revenue acceleration (current YoY growth - prior YoY growth)
+    rev_accel = None
+    if len(inc_hist) >= 3:
+        rev0 = _safe_raw(inc_hist[0], "totalRevenue")
+        rev1 = _safe_raw(inc_hist[1], "totalRevenue")
+        rev2 = _safe_raw(inc_hist[2], "totalRevenue")
+        if rev0 and rev1 and rev2 and rev1 > 0 and rev2 > 0:
+            g_cur = (rev0 - rev1) / rev1
+            g_prev = (rev1 - rev2) / rev2
+            rev_accel = round(g_cur - g_prev, 4)
+
+    # Altman Z-Score (approximated from available data)
+    altman_z = None
+    roa = _safe_raw(fin, "returnOnAssets")
+    ni = _safe_raw(inc_hist[0], "netIncome") if inc_hist else None
+    mc_val = _safe_raw(summary, "marketCap") or _safe_raw(data.get("price", {}), "marketCap")
+    total_rev = _safe_raw(inc_hist[0], "totalRevenue") if inc_hist else total_rev_fin
+
+    # Derive total assets from ROA (ROA = NI / TA → TA = NI / ROA)
+    if roa and abs(roa) > 0.001 and ni and ni > 0:
+        bs_total_assets = ni / roa
+        # Sanity: total assets should be larger than market cap for most companies
+        if bs_total_assets > 0 and mc_val and bs_total_assets > mc_val * 0.1:
+            ta = bs_total_assets
+            if total_rev and ebit_val is not None and total_debt is not None:
+                wc = (total_cash or 0) - (total_debt * 0.3)
+                x1 = wc / ta
+                x2 = (ni / ta)
+                x3 = ebit_val / ta
+                total_liab_est = total_debt
+                x4 = mc_val / total_liab_est if total_liab_est > 0 else 5.0
+                x5 = total_rev / ta
+                altman_z = round(1.2 * x1 + 1.4 * x2 + 3.3 * x3 + 0.6 * x4 + 0.99 * x5, 2)
 
     return StockFundamentals(
         symbol=symbol,
@@ -106,9 +192,21 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         ev_to_revenue=_safe_raw(stats, "enterpriseToRevenue"),
         debt_to_equity=_safe_raw(fin, "debtToEquity"),
         free_cash_flow=_safe_raw(fin, "freeCashflow"),
-        operating_cashflow=_safe_raw(fin, "operatingCashflow"),
+        operating_cashflow=ocf,
         enterprise_value=ev,
         roic=roic,
+        ebit=ebit_val,
+        ebitda=ebitda_val,
+        total_debt=total_debt,
+        total_cash=total_cash,
+        interest_expense=interest_exp,
+        payout_ratio=payout,
+        total_assets=bs_total_assets,
+        net_debt_ebitda=net_debt_ebitda,
+        interest_coverage=interest_cov,
+        altman_z_score=altman_z,
+        revenue_acceleration=rev_accel,
+        ebitda_growth=ebitda_growth,
         return_on_equity=_safe_raw(fin, "returnOnEquity"),
         return_on_assets=_safe_raw(fin, "returnOnAssets"),
         revenue_growth=_safe_raw(fin, "revenueGrowth"),
@@ -499,6 +597,18 @@ def merge_quote_and_fundamentals(
         s.operating_cashflow = fundamentals.operating_cashflow
         s.enterprise_value = fundamentals.enterprise_value
         s.roic = fundamentals.roic
+        s.ebit = fundamentals.ebit
+        s.ebitda = fundamentals.ebitda
+        s.total_debt = fundamentals.total_debt
+        s.total_cash = fundamentals.total_cash
+        s.interest_expense = fundamentals.interest_expense
+        s.payout_ratio = fundamentals.payout_ratio
+        s.total_assets = fundamentals.total_assets
+        s.net_debt_ebitda = fundamentals.net_debt_ebitda
+        s.interest_coverage = fundamentals.interest_coverage
+        s.altman_z_score = fundamentals.altman_z_score
+        s.revenue_acceleration = fundamentals.revenue_acceleration
+        s.ebitda_growth = fundamentals.ebitda_growth
         s.recommendation_mean = fundamentals.recommendation_mean
         s.target_mean_price = fundamentals.target_mean_price
         s.price_to_sales = fundamentals.price_to_sales

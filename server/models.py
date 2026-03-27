@@ -41,6 +41,22 @@ class StockFundamentals(BaseModel):
     operating_cashflow: Optional[float] = None
     enterprise_value: Optional[float] = None
     roic: Optional[float] = None
+    ebit: Optional[float] = None
+    ebitda: Optional[float] = None
+    total_debt: Optional[float] = None
+    total_cash: Optional[float] = None
+    interest_expense: Optional[float] = None
+    payout_ratio: Optional[float] = None
+    total_assets: Optional[float] = None
+    total_current_assets: Optional[float] = None
+    total_current_liabilities: Optional[float] = None
+    total_liabilities: Optional[float] = None
+    retained_earnings: Optional[float] = None
+    revenue_acceleration: Optional[float] = None  # current YoY growth - prior YoY growth
+    ebitda_growth: Optional[float] = None
+    net_debt_ebitda: Optional[float] = None
+    interest_coverage: Optional[float] = None
+    altman_z_score: Optional[float] = None
     short_percent_of_float: Optional[float] = None
     insider_buy_count: int = 0
     insider_sell_count: int = 0
@@ -95,6 +111,22 @@ class ScoredStock(BaseModel):
     operating_cashflow: Optional[float] = None
     enterprise_value: Optional[float] = None
     roic: Optional[float] = None
+    ebit: Optional[float] = None
+    ebitda: Optional[float] = None
+    total_debt: Optional[float] = None
+    total_cash: Optional[float] = None
+    interest_expense: Optional[float] = None
+    payout_ratio: Optional[float] = None
+    total_assets: Optional[float] = None
+    total_current_assets: Optional[float] = None
+    total_current_liabilities: Optional[float] = None
+    total_liabilities: Optional[float] = None
+    retained_earnings: Optional[float] = None
+    revenue_acceleration: Optional[float] = None
+    ebitda_growth: Optional[float] = None
+    net_debt_ebitda: Optional[float] = None
+    interest_coverage: Optional[float] = None
+    altman_z_score: Optional[float] = None
     recommendation_mean: Optional[float] = None
     target_mean_price: Optional[float] = None
     price_to_sales: Optional[float] = None
@@ -105,8 +137,8 @@ class ScoredStock(BaseModel):
     insider_net_shares: Optional[int] = None
     piotroski_f_score: Optional[int] = None
     piotroski_details: list[str] = Field(default_factory=list)
-    gross_margin_change: Optional[float] = None  # YoY change in gross margin
-    buyback_yield: Optional[float] = None  # negative = dilution
+    gross_margin_change: Optional[float] = None
+    buyback_yield: Optional[float] = None
     price_momentum_3m: Optional[float] = None  # 3-month price change %
     price_momentum_12m: Optional[float] = None  # 12-month price change %
     relative_momentum: Optional[float] = None  # stock drop vs sector avg drop
