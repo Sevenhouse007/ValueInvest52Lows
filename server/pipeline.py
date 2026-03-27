@@ -97,31 +97,17 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
     if ev and ev > 0 and ocf is not None:
         roic = round(ocf / ev, 4)
 
-    # New fields for changes 8-13
-    inc_hist = data.get("incomeStatementHistory", {}).get("incomeStatementHistory", [])
-    ebitda_val = _safe_raw(fin, "ebitda")
+    # ── New fields from yfinance financials (complete income statement) ──
+    yf_fin = data.get("_yf_financials", {})
     total_debt = _safe_raw(fin, "totalDebt")
     total_cash = _safe_raw(fin, "totalCash")
     total_rev_fin = _safe_raw(fin, "totalRevenue")
-    op_margins = _safe_raw(fin, "operatingMargins")
     payout = _safe_raw(summary, "payoutRatio")
 
-    # Compute EBIT from revenue * operating margins
-    ebit_val = None
-    if total_rev_fin and op_margins:
-        ebit_val = total_rev_fin * op_margins
-
-    # Interest expense from income statement history
-    interest_exp = None
-    if inc_hist:
-        interest_exp = _safe_raw(inc_hist[0], "interestExpense")
-    bs_total_assets = None
-    bs_total_ca = None
-    bs_total_cl = None
-    bs_total_liab = None
-    bs_retained = None
-    # Try financialData for total assets (currentRatio * currentLiabilities approximation)
-    # These may not be available — Z-Score will skip if missing
+    # Use yfinance for EBIT, EBITDA, interest expense (API returns empty)
+    ebit_val = yf_fin.get("ebit") or (_safe_raw(fin, "ebitda") and total_rev_fin and _safe_raw(fin, "operatingMargins") and total_rev_fin * _safe_raw(fin, "operatingMargins"))
+    ebitda_val = yf_fin.get("ebitda") or _safe_raw(fin, "ebitda")
+    interest_exp = yf_fin.get("interest_expense")
 
     # Net Debt / EBITDA
     net_debt_ebitda = None
@@ -129,55 +115,49 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         net_debt = total_debt - total_cash
         net_debt_ebitda = round(net_debt / ebitda_val, 2)
 
-    # Interest coverage
+    # Interest coverage (now using yfinance EBIT and interest expense)
     interest_cov = None
     if ebit_val is not None and interest_exp is not None and interest_exp != 0:
         interest_cov = round(ebit_val / abs(interest_exp), 2)
 
-    # EBITDA growth (from income statement history)
+    # EBITDA growth (yfinance gives current + prior year)
     ebitda_growth = None
-    if len(inc_hist) >= 2:
-        cur_rev = _safe_raw(inc_hist[0], "totalRevenue")
-        prev_rev = _safe_raw(inc_hist[1], "totalRevenue")
-        cur_cost = _safe_raw(inc_hist[0], "costOfRevenue")
-        prev_cost = _safe_raw(inc_hist[1], "costOfRevenue")
-        cur_opex = _safe_raw(inc_hist[0], "totalOperatingExpenses")
-        prev_opex = _safe_raw(inc_hist[1], "totalOperatingExpenses")
-        # Approximate EBITDA growth from operating income trend
-        if cur_rev and cur_opex and prev_rev and prev_opex:
-            cur_oi = cur_rev - cur_opex
-            prev_oi = prev_rev - prev_opex
-            if prev_oi and abs(prev_oi) > 0:
-                ebitda_growth = round((cur_oi - prev_oi) / abs(prev_oi), 4)
+    ebitda_prev = yf_fin.get("ebitda_prev")
+    if ebitda_val and ebitda_prev and abs(ebitda_prev) > 0:
+        ebitda_growth = round((ebitda_val - ebitda_prev) / abs(ebitda_prev), 4)
 
-    # Revenue acceleration (current YoY growth - prior YoY growth)
+    # Gross margin change (yfinance gives exact gross profit)
+    yf_gp = yf_fin.get("gross_profit")
+    yf_gp_prev = yf_fin.get("gross_profit_prev")
+    yf_rev = yf_fin.get("total_revenue")
+    yf_rev_prev = yf_fin.get("total_revenue_prev")
+    if yf_gp and yf_rev and yf_gp_prev and yf_rev_prev and yf_rev > 0 and yf_rev_prev > 0:
+        gm_change = round(yf_gp / yf_rev - yf_gp_prev / yf_rev_prev, 4)
+
+    # Revenue acceleration (yfinance gives 3 years)
     rev_accel = None
-    if len(inc_hist) >= 3:
-        rev0 = _safe_raw(inc_hist[0], "totalRevenue")
-        rev1 = _safe_raw(inc_hist[1], "totalRevenue")
-        rev2 = _safe_raw(inc_hist[2], "totalRevenue")
-        if rev0 and rev1 and rev2 and rev1 > 0 and rev2 > 0:
-            g_cur = (rev0 - rev1) / rev1
-            g_prev = (rev1 - rev2) / rev2
-            rev_accel = round(g_cur - g_prev, 4)
+    yf_rev_2yr = yf_fin.get("total_revenue_2yr")
+    if yf_rev and yf_rev_prev and yf_rev_2yr and yf_rev_prev > 0 and yf_rev_2yr > 0:
+        g_cur = (yf_rev - yf_rev_prev) / yf_rev_prev
+        g_prev = (yf_rev_prev - yf_rev_2yr) / yf_rev_2yr
+        rev_accel = round(g_cur - g_prev, 4)
 
-    # Altman Z-Score (approximated from available data)
+    # Altman Z-Score
     altman_z = None
     roa = _safe_raw(fin, "returnOnAssets")
-    ni = _safe_raw(inc_hist[0], "netIncome") if inc_hist else None
+    ni = yf_fin.get("net_income")
     mc_val = _safe_raw(summary, "marketCap") or _safe_raw(data.get("price", {}), "marketCap")
-    total_rev = _safe_raw(inc_hist[0], "totalRevenue") if inc_hist else total_rev_fin
+    total_rev = yf_rev or total_rev_fin
+    bs_total_assets = None
 
-    # Derive total assets from ROA (ROA = NI / TA → TA = NI / ROA)
     if roa and abs(roa) > 0.001 and ni and ni > 0:
         bs_total_assets = ni / roa
-        # Sanity: total assets should be larger than market cap for most companies
         if bs_total_assets > 0 and mc_val and bs_total_assets > mc_val * 0.1:
             ta = bs_total_assets
             if total_rev and ebit_val is not None and total_debt is not None:
                 wc = (total_cash or 0) - (total_debt * 0.3)
                 x1 = wc / ta
-                x2 = (ni / ta)
+                x2 = ni / ta
                 x3 = ebit_val / ta
                 total_liab_est = total_debt
                 x4 = mc_val / total_liab_est if total_liab_est > 0 else 5.0

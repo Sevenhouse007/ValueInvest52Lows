@@ -24,6 +24,40 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS)
 
 
+def _fetch_yf_financials(symbol: str) -> Optional[dict]:
+    """Fetch complete income statement via yfinance (has data the API lacks)."""
+    try:
+        ticker = yf.Ticker(symbol)
+        fin = ticker.financials
+        if fin is None or fin.empty:
+            return None
+        # Extract key fields for current and prior year
+        def _get(field: str, year: int = 0) -> Optional[float]:
+            if field not in fin.index:
+                return None
+            val = fin.iloc[:, year].get(field) if year < len(fin.columns) else None
+            if val is not None and not (isinstance(val, float) and val != val):  # not NaN
+                return float(val)
+            return None
+
+        return {
+            "ebit": _get("EBIT"),
+            "ebitda": _get("EBITDA"),
+            "ebitda_prev": _get("EBITDA", 1),
+            "interest_expense": _get("Interest Expense"),
+            "gross_profit": _get("Gross Profit"),
+            "gross_profit_prev": _get("Gross Profit", 1),
+            "total_revenue": _get("Total Revenue"),
+            "total_revenue_prev": _get("Total Revenue", 1),
+            "total_revenue_2yr": _get("Total Revenue", 2),
+            "operating_income": _get("Operating Income"),
+            "net_income": _get("Net Income"),
+        }
+    except Exception as e:
+        logger.error(f"Error fetching yf financials for {symbol}: {e}")
+        return None
+
+
 def _get_session():
     """Get a fresh yfinance session with valid cookies/crumb."""
     ticker = yf.Ticker("AAPL")
@@ -138,6 +172,11 @@ class YahooClient:
     async def _fetch_one(self, symbol: str, results: dict):
         data = await self.fetch_quote_summary(symbol)
         if data:
+            # Enrich with yfinance financials (complete income statement)
+            loop = asyncio.get_event_loop()
+            fin_data = await loop.run_in_executor(_executor, _fetch_yf_financials, symbol)
+            if fin_data:
+                data["_yf_financials"] = fin_data
             results[symbol] = data
 
     async def fetch_spark(self, symbol: str) -> Optional[list[dict]]:
