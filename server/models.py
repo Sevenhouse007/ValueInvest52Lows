@@ -224,6 +224,8 @@ class ScoredStock(BaseModel):
     quality_score: int = 0
     quality_tier: str = "Limited"
     quality_reasons: list[str] = Field(default_factory=list)
+    # Composite score (normalized 0-100 combining both scores)
+    composite_score: float = 0.0
     # Upside
     upside_percent: Optional[float] = None
 

@@ -909,6 +909,8 @@ async def run_pipeline(client: Optional[YahooClient] = None) -> ScanResult:
             s.quality_score = q.total
             s.quality_tier = q.tier
             s.quality_reasons = q.reasons
+            # Composite score: normalize both to 0-50 and sum to 0-100
+            s.composite_score = round((s.value_score / 150 * 50) + (s.quality_score / 100 * 50), 1)
 
         # Sort by score descending
         stocks.sort(key=lambda x: x.value_score, reverse=True)

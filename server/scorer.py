@@ -16,6 +16,17 @@ from server.models import ScoreBreakdown, ScoredStock, SectorAverages
 # ── Constants ────────────────────────────────────────────────────────
 _CHINA_COUNTRIES = {"China", "Hong Kong"}
 
+# Score thresholds (extracted from magic numbers)
+VALUE_STRONG_THRESHOLD = 70
+VALUE_MODERATE_THRESHOLD = 45
+QUALITY_BUY_THRESHOLD = 65
+QUALITY_WATCH_THRESHOLD = 45
+VQ_VALUE_THRESHOLD = 70   # V+Q badge: value score must be >= this
+VQ_QUALITY_THRESHOLD = 65  # V+Q badge: quality score must be >= this
+VALUE_SCORE_MAX = 150
+QUALITY_SCORE_MAX = 100
+LARGE_SCORE_CHANGE = 15    # !! alert threshold
+
 
 # =====================================================================
 # Sector detection
@@ -1097,7 +1108,11 @@ def _is_biotech(stock: ScoredStock) -> bool:
 
 
 def _score_biotech_cash_runway(stock: ScoredStock) -> tuple[int, list[str]]:
-    """Cash runway signal for pre-revenue biotech."""
+    """Cash runway signal for pre-revenue biotech (Priority 3).
+
+    Replaces all standard sector metrics (P/E, EV/EBITDA, P/B, ROE).
+    Only FCF/EV, analyst upside, insider transactions, and this signal apply.
+    """
     cash = (stock.total_cash or 0)
     ocf = stock.operating_cashflow
     if ocf is None or ocf >= 0:
@@ -1107,14 +1122,12 @@ def _score_biotech_cash_runway(stock: ScoredStock) -> tuple[int, list[str]]:
         return -5, ["Biotech: cannot compute cash runway"]
     runway = cash / quarterly_burn
     if runway > 8:
-        return 8, [f"Biotech: {runway:.0f} quarters cash runway"]
-    if runway > 6:
-        return 4, [f"Biotech: {runway:.0f} quarters runway"]
-    if runway > 4:
-        return 0, [f"Biotech: {runway:.0f} quarters runway"]
-    if runway > 2:
-        return -10, [f"Biotech: only {runway:.1f} quarters runway — dilution risk"]
-    return -20, [f"Biotech: critical — {runway:.1f} quarters runway"]
+        return 20, [f"Biotech: strong cash runway ({runway:.0f} quarters)"]
+    if runway > 5:
+        return 12, [f"Biotech: adequate runway ({runway:.0f} quarters)"]
+    if runway > 3:
+        return 5, [f"Biotech: limited runway ({runway:.0f} quarters)"]
+    return -15, [f"Biotech: critical runway ({runway:.1f} quarters) — dilution imminent"]
 
 
 # =====================================================================
@@ -1333,11 +1346,11 @@ def compute_score(stock: ScoredStock, sector_avg: Optional[SectorAverages]) -> S
     sector_type = detect_sector_type(stock.sector, stock.industry)
     raw_score, reasons = _score_with_rubric(stock, sector_avg, sector_type)
 
-    score = max(0, min(150, raw_score))
+    score = max(0, min(VALUE_SCORE_MAX, raw_score))
 
-    if score >= 70:
+    if score >= VALUE_STRONG_THRESHOLD:
         tier = "Strong Value"
-    elif score >= 45:
+    elif score >= VALUE_MODERATE_THRESHOLD:
         tier = "Moderate Value"
     else:
         tier = "Limited Signal"
@@ -1417,43 +1430,44 @@ def compute_quality_score(
     elif roe is not None and roe < 0:
         pts -= 5; reasons.append("Negative ROE")
 
-    # ── Earnings growth (15 pts max) ──
+    # ── Earnings growth (8 pts max — halved from 15, also scored in Value) ──
+    # NOTE: Intentional cross-score signal. Value Score gets full weight via
+    # _score_growth(). Quality Score gets half weight to avoid 2x inflation.
     eg = stock.earnings_growth
     if eg is not None:
         if eg > 0.25:
-            pts += 15; reasons.append(f"Earnings growing {eg*100:.0f}%")
+            pts += 8; reasons.append(f"Earnings growing {eg*100:.0f}%")
         elif eg > 0.10:
-            pts += 10; reasons.append(f"Earnings growing {eg*100:.0f}%")
+            pts += 5; reasons.append(f"Earnings growing {eg*100:.0f}%")
         elif eg > 0:
-            pts += 5
+            pts += 2
         elif eg > -0.15:
-            pts -= 3
+            pts -= 2
         elif eg > -0.40:
-            pts -= 8; reasons.append(f"Earnings declining {eg*100:.0f}%")
+            pts -= 4; reasons.append(f"Earnings declining {eg*100:.0f}%")
         else:
-            pts -= 15; reasons.append(f"Earnings collapsing {eg*100:.0f}%")
+            pts -= 8; reasons.append(f"Earnings collapsing {eg*100:.0f}%")
 
-    # ── Change 6: Enhanced revenue growth tiers (10 pts max) ──
+    # ── Revenue growth (5 pts max — halved from 10, also scored in Value) ──
+    # NOTE: Intentional cross-score. Value gets full weight via _score_growth().
     rg = stock.revenue_growth
     if rg is not None:
         if rg > 0.15:
-            pts += 10; reasons.append(f"Strong revenue growth {rg*100:.0f}%")
+            pts += 5; reasons.append(f"Strong revenue growth {rg*100:.0f}%")
         elif rg > 0.08:
-            pts += 7; reasons.append(f"Solid revenue growth {rg*100:.0f}%")
+            pts += 4; reasons.append(f"Solid revenue growth {rg*100:.0f}%")
         elif rg > 0.03:
-            pts += 4; reasons.append("Positive revenue growth")
+            pts += 2; reasons.append("Positive revenue growth")
         elif rg > 0:
-            pts += 2; reasons.append("Modest but positive growth")
-        elif rg > -0.05:
-            pts -= 3
-        elif rg > -0.15:
-            pts -= 8; reasons.append(f"Revenue declining {rg*100:.0f}%")
-        else:
-            pts -= 15; reasons.append(f"Revenue collapsing {rg*100:.0f}%")
-    # Revenue acceleration bonus
+            pts += 1
+        elif rg < -0.15:
+            pts -= 8; reasons.append(f"Revenue collapsing {rg*100:.0f}%")
+        elif rg < -0.05:
+            pts -= 4; reasons.append(f"Revenue declining {rg*100:.0f}%")
+    # Revenue acceleration bonus (halved)
     ra = stock.revenue_acceleration
     if ra is not None and ra > 0.05:
-        pts += 4; reasons.append("Revenue accelerating")
+        pts += 2; reasons.append("Revenue accelerating")
 
     # ── Change 3: Gross margin trend (14 pts max) ──
     gm = stock.gross_margin_change
@@ -1471,17 +1485,18 @@ def compute_quality_score(
         else:
             pts -= 5; reasons.append(f"Margins contracting {gm*100:.0f}bps")
 
-    # ── FCF yield on EV (8 pts max) ──
+    # ── FCF yield on EV (4 pts max — halved from 8, also scored in Value) ──
+    # NOTE: Intentional cross-score. Value gets full weight via _score_fcf_yield().
     fcf = stock.free_cash_flow
     denom = stock.enterprise_value if stock.enterprise_value and stock.enterprise_value > 0 else stock.market_cap
     if fcf and denom and denom > 0:
         fy = fcf / denom
         if fy > 0.08:
-            pts += 8; reasons.append(f"Strong FCF yield {fy*100:.0f}%")
+            pts += 4; reasons.append(f"Strong FCF yield {fy*100:.0f}%")
         elif fy > 0.03:
-            pts += 4
+            pts += 2
         elif fy < -0.05:
-            pts -= 5; reasons.append("Burning cash")
+            pts -= 3; reasons.append("Burning cash")
 
     # ── Buyback yield (8 pts max when near 52W low) ──
     bb = stock.buyback_yield
@@ -1528,20 +1543,26 @@ def compute_quality_score(
         elif drop > 0.15:
             pts += 3
 
-    # ── Change 5: Relative momentum in quality score ──
+    # ── Relative momentum (4 pts max — halved from 8, also scored in Value) ──
     rm = stock.relative_momentum
     if rm is not None:
         if rm > 15:
-            pts += 8; reasons.append(f"Strong positive relative momentum (+{rm:.0f}pp)")
+            pts += 4; reasons.append(f"Strong positive relative momentum (+{rm:.0f}pp)")
         elif rm > 5:
-            pts += 5; reasons.append("Outperforming sector peers")
+            pts += 3; reasons.append("Outperforming sector peers")
         elif rm > 0:
-            pts += 3; reasons.append("Slightly ahead of sector")
+            pts += 1
         elif rm < -20:
-            pts -= 5; reasons.append("Underperforming sector peers badly")
+            pts -= 3; reasons.append("Underperforming sector peers badly")
 
-    # ── Change 7: Analyst upside in quality score ──
+    # ── Analyst upside (halved, also scored in Value) ──
+    # Priority 4: MICRO badge parity — 50% downweight for micro-caps
     p, r = _score_upside(stock)
+    p = p // 2  # halve for cross-score parity
+    if stock.market_cap and stock.market_cap < 50_000_000:
+        p = p // 2  # additional 50% downweight for micro-caps (MICRO parity)
+        if r:
+            r = [r[0] + " (micro-cap discounted)"]
     pts += p; reasons.extend(r)
 
     # ── Mild valuation bonus ──
@@ -1574,10 +1595,10 @@ def compute_quality_score(
     p, r = _score_eps_revision(stock)
     pts += p; reasons.extend(r)
 
-    score = max(0, min(100, pts))
-    if score >= 65:
+    score = max(0, min(QUALITY_SCORE_MAX, pts))
+    if score >= QUALITY_BUY_THRESHOLD:
         tier = "Quality Buy"
-    elif score >= 45:
+    elif score >= QUALITY_WATCH_THRESHOLD:
         tier = "Quality Watch"
     else:
         tier = "Not Quality"

@@ -471,7 +471,7 @@ function renderTable() {
       <td>${s.sector||'—'}</td>
       <td>${isQ ? fmtFScore(s.piotroski_f_score) : '<span class=\"model-tag\">'+fmtModel(s.sector_type)+'</span>'}</td>
       <td>${scorePill(score, tier)}</td>
-      <td class="num" ${isQ?'style="display:none"':''}>${fmtDelta(delta)}</td>
+      <td class="num" ${isQ?'style="display:none"':''}>${fmtDelta(delta, s.days_in_scan)}</td>
       <td class="num">$${fmt(s.price,2)}</td>
       <td class="num ${s.change_percent>=0?'c-green':'c-red'}">${fmt(s.change_percent,1)}%</td>
       <td class="num">${fmtCap(s.market_cap)}</td>
@@ -838,11 +838,12 @@ function scorePillSmall(score, tier) {
   return `<span class="pill ${cls}" style="font-size:10px;padding:1px 6px;">${score}</span>`;
 }
 
-function fmtDelta(d) {
+function fmtDelta(d, daysInScan) {
   if (d === null || d === undefined) return '<span class="delta-flat">—</span>';
-  const large = Math.abs(d) >= 15;
-  if (d > 0) return `<span class="delta-up">${large?'!!':''} +${d}</span>`;
-  if (d < 0) return `<span class="delta-down">${large?'!!':''} ${d}</span>`;
+  // Priority 7: don't show !! on Day 1 (no baseline to compare)
+  const large = Math.abs(d) >= 15 && (daysInScan || 0) > 1;
+  if (d > 0) return `<span class="delta-up">${large?'!! ':''} +${d}</span>`;
+  if (d < 0) return `<span class="delta-down">${large?'!! ':''}${d}</span>`;
   return '<span class="delta-flat">0</span>';
 }
 
