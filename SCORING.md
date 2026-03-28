@@ -1,5 +1,28 @@
 # Scoring Methodology
 
+## Migration Notes — 2026-03-28
+
+**15 new scoring signals added:**
+1. **GP/A (Novy-Marx)** — Quality Score: Gross Profit / Total Assets, +12 max. Skip financial/REIT.
+2. **ROIC vs WACC** — Quality Score: ROIC spread vs sector WACC (Damodaran), +8/-6. Skip financial/REIT.
+3. **P/FFO for REITs** — Replaces EV/EBITDA in REIT sector model. 15 pts max.
+4. **Beneish M-Score** — Value Score: Earnings manipulation flag, -10/-5. ACCT badge (amber). Skip financial/REIT.
+5. **Asset growth penalty** — Value Score: >30% growth = -5, shrinkage = +3. FCF modifier. Skip REIT.
+6. **Default/Tech model update** — P/B reduced 18→8 pts. EV/Gross Profit added (10 pts).
+7. **Institutional ownership** — Quality Score: <15% = +4 (undiscovered), >80% = -3 (crowded).
+8. **Shareholder yield** — Value Score: Dividend + buyback combined, +6 max.
+9. **Enhanced buyback at 52W low** — Quality Score: +5→+8 when near bottom of range.
+10. **Debt maturity risk** — Value Score: Current LTD / Total LTD, -8/-4. Compound with IC.
+11. **Graham NCAV net-net** — Value Score: Price vs NCAV/share, +15/+8/+3. F-Score cross-check.
+12. **Biotech detection** — Healthcare: Cash runway replaces standard metrics. BIOT badge (teal).
+13. **Market cap badges** — MICRO (<$50M, gray), SMALL ($50-150M, gray).
+
+**New badges:** ACCT (amber, M-Score > -1.78), BIOT (teal, pre-revenue biotech), MICRO/SMALL (gray, market cap).
+
+**Data layer:** yfinance balance sheet now fetched (Total Assets, PPE, Receivables, LTD, Current Debt, Shares Outstanding). WACC estimates added to Damodaran benchmarks.
+
+---
+
 ## Overview
 
 Every stock hitting a 52-week low is evaluated through two independent lenses:
@@ -82,7 +105,7 @@ Each sector uses different metrics with different weights. Metrics misleading fo
 | Sector | Primary Metrics (max pts) | Excluded | Extra |
 |--------|--------------------------|----------|-------|
 | **Financial** | P/B (30), ROE (25), ROA (15), Fwd P/E (15) | EV/EBITDA, FCF | — |
-| **REIT** | Div Yield (30), P/B-NAV (25), EV/EBITDA (15), ROE (10), P/E (10) | P/E penalties, FCF | Div sustainability |
+| **REIT** | Div Yield (30), P/B-NAV (25), **P/FFO (15)**, ROE (10), P/E (10) | P/E penalties, FCF, EV/EBITDA | Div sustainability |
 | **Energy** | EV/EBITDA (28), P/CF (25), Fwd P/E (12), Div Yield (10), ROE (8) | P/B | — |
 | **Healthcare** | EV/EBITDA (25), Fwd P/E (22), ROE (12), P/B (8) | — | Debt penalty |
 | **Staples** | EV/EBITDA (28), Fwd P/E (22), Div Yield (12), ROE (10) | P/B | Div sustainability |
@@ -91,7 +114,7 @@ Each sector uses different metrics with different weights. Metrics misleading fo
 | **Comms** | EV/EBITDA (30), Fwd P/E (18), ROE (12), Div Yield (5) | P/B | China ADR penalty, Div sustainability |
 | **Materials** | EV/EBITDA (28), Fwd P/E (14), P/B (12), ROE (10) | — | — |
 | **Utilities** | Fwd P/E (30), Div Yield (25), P/B (15), EV/EBITDA (12), ROE (8) | FCF, Debt | Div sustainability |
-| **Default/Tech** | Fwd P/E (28), P/B (18), EV/EBITDA (18), ROE (14) | — | — |
+| **Default/Tech** | Fwd P/E (28), P/B (**8**), EV/EBITDA (18), ROE (14), **EV/GP (10)** | — | — |
 
 ---
 
@@ -299,9 +322,59 @@ Compares the stock to its own history. Cap: +12 pts combined.
 | 2+ severe red flags | -8 (compounding) |
 | 3+ severe red flags | -15 (high value trap risk) |
 
+### Beneish M-Score (Earnings Manipulation)
+
+8-variable model detecting likely earnings manipulation. Skipped for financial/REIT.
+
+| M-Score | Points | |
+|---------|--------|--|
+| > -1.78 | -10 | Likely manipulator (ACCT badge) |
+| > -2.22 | -5 | Elevated risk |
+| ≤ -2.22 | 0 | Normal |
+
+### Asset Growth Penalty
+
+YoY total asset growth. Skipped for REIT.
+
+| Growth | Points | |
+|--------|--------|--|
+| > 30% | -5 | Potential overinvestment (halved if FCF yield > 5%) |
+| > 20% | -3 | High growth (halved if FCF yield > 5%) |
+| < -10% | +3 | Restructuring value |
+
+### Shareholder Yield (Dividend + Buyback)
+
+| Yield | Points | |
+|-------|--------|--|
+| > 8% | +6 | |
+| > 5% | +4 | |
+| > 3% | +2 | |
+
+### Debt Maturity Risk
+
+Current portion of LTD / Total LTD. Skipped for utility/REIT.
+
+| Maturity Ratio | Points | |
+|---------------|--------|--|
+| > 50% | -8 | High near-term maturity |
+| > 30% | -4 | Elevated maturity |
+| + IC < 2x | -5 additional | Compound refinancing risk |
+
+### Graham NCAV (Net-Net)
+
+Price / NCAV per share. Skipped for financial/REIT.
+
+| Ratio | Points | |
+|-------|--------|--|
+| < 1.0x | +15 | True net-net |
+| < 1.5x | +8 | Near net-net |
+| < 2.0x | +3 | Close to NCAV |
+| + F-Score ≥ 7 | +5 additional | Quality cross-check |
+| + F-Score ≤ 3 | 50% reduction | Weak fundamentals |
+
 ### China ADR Discount
 
-Configurable via Settings panel or `CHINA_ADR_PENALTY` env var. Default: -20 pts. Range: -25 to 0. Detected automatically via `country` field (China, Hong Kong).
+Configurable via Settings panel or `CHINA_ADR_PENALTY` env var. Default: -20 pts. Range: -25 to 0.
 
 ---
 
@@ -328,6 +401,10 @@ Ignores valuation cheapness. Focuses on business quality and whether the price d
 | **Analyst Upside** | 10 | >60% = +10, <0% = -5 |
 | **Also Cheap on P/E** | 5 | P/E < 0.5x sector |
 | **Revenue Acceleration** | 4 | Current growth > prior by 5%+ |
+| **Gross Profitability (GP/A)** | 12 | >40% = 12, >25% = 8, >15% = 4. Skip financial/REIT |
+| **ROIC vs WACC** | 8 | >2x WACC = 8, >1.5x = 6, >WACC = 3, below = -2, negative = -6 |
+| **Institutional Ownership** | 4 | <15% = +4 (undiscovered), >80% = -3 (crowded) |
+| **Buyback at 52W Low** | 8 | Active buybacks near bottom = +8 (was +5) |
 
 **Tiers:** Quality Buy (65+) | Quality Watch (45-64) | Not Quality (<45)
 
@@ -357,6 +434,17 @@ Red "RISK" badge shown in table. Detail panel shows color-coded explanation card
 | Payout Ratio | > 100% | Medium | Payout exceeds earnings |
 | Net Debt/EBITDA | > 6x | High | Extreme leverage |
 | Net Debt/EBITDA | > 4x | Medium | High leverage |
+| Beneish M-Score | > -1.78 | High (ACCT badge) | Possible earnings manipulation |
+| Beneish M-Score | > -2.22 | Medium | Elevated manipulation risk |
+| Debt Maturity | > 50% | High | Near-term refinancing risk |
+
+### Additional Badges
+
+| Badge | Color | Trigger | Meaning |
+|-------|-------|---------|---------|
+| **BIOT** | Teal | Healthcare + negative EBITDA + low revenue + no dividend | Pre-revenue biotech — cash runway scored instead of standard metrics |
+| **MICRO** | Gray | Market cap < $50M | Micro-cap: analyst upside downweighted 50%, low liquidity warning |
+| **SMALL** | Gray | Market cap $50-150M | Small-cap indicator, no score impact |
 
 ---
 
