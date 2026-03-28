@@ -154,6 +154,103 @@ def get_latest_scan_averages() -> tuple[dict, dict]:
         return sec, mkt
 
 
+def get_performance_rows_needing_update() -> list[dict]:
+    """Get rows where forward prices need to be filled in."""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT id, symbol, scan_date, price_at_scan,
+                   price_30d, price_90d, price_180d,
+                   value_score, quality_score
+            FROM scan_performance
+            WHERE (price_30d IS NULL AND julianday('now') - julianday(scan_date) >= 30)
+               OR (price_90d IS NULL AND julianday('now') - julianday(scan_date) >= 90)
+               OR (price_180d IS NULL AND julianday('now') - julianday(scan_date) >= 180)
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_forward_price(row_id: int, days: int, price: float):
+    """Fill in a forward price and compute return."""
+    with get_db() as conn:
+        row = conn.execute("SELECT price_at_scan FROM scan_performance WHERE id = ?", (row_id,)).fetchone()
+        if not row or not row["price_at_scan"] or row["price_at_scan"] <= 0:
+            return
+        ret = round((price - row["price_at_scan"]) / row["price_at_scan"], 4)
+        if days == 30:
+            conn.execute("UPDATE scan_performance SET price_30d = ?, return_30d = ? WHERE id = ?", (price, ret, row_id))
+        elif days == 90:
+            conn.execute("UPDATE scan_performance SET price_90d = ?, return_90d = ? WHERE id = ?", (price, ret, row_id))
+        elif days == 180:
+            conn.execute("UPDATE scan_performance SET price_180d = ?, return_180d = ? WHERE id = ?", (price, ret, row_id))
+
+
+def get_backtest_summary() -> dict:
+    """Compute backtest summary: returns by score tier."""
+    with get_db() as conn:
+        # Get all rows with at least one forward return
+        rows = conn.execute("""
+            SELECT value_score, quality_score, return_30d, return_90d, return_180d,
+                   scan_date, symbol, price_at_scan
+            FROM scan_performance
+            WHERE return_30d IS NOT NULL OR return_90d IS NOT NULL OR return_180d IS NOT NULL
+        """).fetchall()
+
+        if not rows:
+            return {"has_data": False, "message": "No forward returns computed yet. Returns are filled in 30/90/180 days after each scan."}
+
+        # Group by value tier
+        tiers = {"Strong Value": [], "Moderate Value": [], "Limited Signal": []}
+        for r in rows:
+            vs = r["value_score"] or 0
+            tier = "Strong Value" if vs >= 70 else "Moderate Value" if vs >= 45 else "Limited Signal"
+            tiers[tier].append(dict(r))
+
+        def _avg(vals):
+            valid = [v for v in vals if v is not None]
+            return round(sum(valid) / len(valid) * 100, 2) if valid else None
+
+        summary = {"has_data": True, "total_observations": len(rows), "tiers": {}}
+        for tier, stocks in tiers.items():
+            summary["tiers"][tier] = {
+                "count": len(stocks),
+                "avg_return_30d": _avg([s["return_30d"] for s in stocks]),
+                "avg_return_90d": _avg([s["return_90d"] for s in stocks]),
+                "avg_return_180d": _avg([s["return_180d"] for s in stocks]),
+            }
+
+        # Also group by quality tier
+        q_tiers = {"Quality Buy": [], "Quality Watch": [], "Not Quality": []}
+        for r in rows:
+            qs = r["quality_score"] or 0
+            qt = "Quality Buy" if qs >= 65 else "Quality Watch" if qs >= 45 else "Not Quality"
+            q_tiers[qt].append(dict(r))
+
+        summary["quality_tiers"] = {}
+        for tier, stocks in q_tiers.items():
+            summary["quality_tiers"][tier] = {
+                "count": len(stocks),
+                "avg_return_30d": _avg([s["return_30d"] for s in stocks]),
+                "avg_return_90d": _avg([s["return_90d"] for s in stocks]),
+                "avg_return_180d": _avg([s["return_180d"] for s in stocks]),
+            }
+
+        return summary
+
+
+def get_backtest_details() -> list[dict]:
+    """Get all performance tracking rows with returns for the detail table."""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT symbol, scan_date, price_at_scan,
+                   price_30d, price_90d, price_180d,
+                   return_30d, return_90d, return_180d,
+                   value_score, quality_score
+            FROM scan_performance
+            ORDER BY scan_date DESC, value_score DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_rolling_scores_batch(symbols: list[str]) -> dict:
     """Batch-compute rolling 5-day scores and days_in_scan for all symbols.
 

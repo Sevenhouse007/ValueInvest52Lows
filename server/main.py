@@ -17,7 +17,11 @@ from fastapi.staticfiles import StaticFiles
 
 from server import config
 from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HOST, PORT
-from server.database import get_latest_scan, get_latest_scan_averages, get_scan_by_date, get_scan_history, get_stock_history, init_db, save_performance_tracking, save_scan
+from server.database import (
+    get_backtest_details, get_backtest_summary, get_latest_scan, get_latest_scan_averages,
+    get_performance_rows_needing_update, get_scan_by_date, get_scan_history,
+    get_stock_history, init_db, save_performance_tracking, save_scan, update_forward_price,
+)
 from server.models import ScanResult, ScanSummary
 from server.pipeline import merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
 from server.scorer import compute_quality_score, compute_score
@@ -39,6 +43,45 @@ async def scheduled_refresh():
     """Run by the scheduler at 4:30 PM ET daily."""
     logger.info("Scheduled daily refresh triggered")
     await _do_refresh()
+
+
+async def fill_forward_returns():
+    """Nightly job: fill in 30/90/180 day forward prices for performance tracking."""
+    logger.info("Forward return fill job starting...")
+    try:
+        import yfinance as yf
+        rows = get_performance_rows_needing_update()
+        if not rows:
+            logger.info("No forward returns to fill")
+            return
+        logger.info(f"Filling forward returns for {len(rows)} rows...")
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        filled = 0
+        for r in rows:
+            try:
+                scan_date = datetime.strptime(r["scan_date"], "%Y-%m-%d")
+                days_elapsed = (today - scan_date).days
+                sym = r["symbol"]
+                ticker = yf.Ticker(sym)
+                info = ticker.info
+                price = info.get("regularMarketPrice") or info.get("currentPrice")
+                if not price:
+                    continue
+                if days_elapsed >= 30 and r["price_30d"] is None:
+                    update_forward_price(r["id"], 30, price)
+                    filled += 1
+                if days_elapsed >= 90 and r["price_90d"] is None:
+                    update_forward_price(r["id"], 90, price)
+                    filled += 1
+                if days_elapsed >= 180 and r["price_180d"] is None:
+                    update_forward_price(r["id"], 180, price)
+                    filled += 1
+            except Exception as e:
+                logger.warning(f"Forward return fill failed for {r['symbol']}: {e}")
+        logger.info(f"Forward return fill complete: {filled} prices updated")
+    except Exception as e:
+        logger.error(f"Forward return fill job failed: {e}")
 
 
 async def premarket_refresh():
@@ -126,6 +169,16 @@ async def lifespan(app: FastAPI):
         id="premarket_refresh",
         replace_existing=True,
     )
+    scheduler.add_job(
+        fill_forward_returns,
+        CronTrigger(
+            hour=0,
+            minute=30,
+            timezone="US/Eastern",
+        ),
+        id="forward_returns",
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info(f"Scheduler started — daily refresh at {DAILY_REFRESH_HOUR}:{DAILY_REFRESH_MINUTE:02d} ET")
     yield
@@ -205,6 +258,25 @@ async def get_spark(symbol: str):
     if not data:
         raise HTTPException(404, f"No spark data for {symbol}")
     return data
+
+
+@app.get("/api/backtest/summary")
+async def backtest_summary():
+    """Return backtest summary: average returns by score tier."""
+    return get_backtest_summary()
+
+
+@app.get("/api/backtest/details")
+async def backtest_details():
+    """Return all performance tracking rows with forward returns."""
+    return get_backtest_details()
+
+
+@app.post("/api/backtest/fill")
+async def trigger_forward_fill(background_tasks: BackgroundTasks):
+    """Manually trigger the forward return fill job."""
+    background_tasks.add_task(fill_forward_returns)
+    return {"status": "started", "message": "Forward return fill started in background."}
 
 
 @app.get("/api/settings")

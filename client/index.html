@@ -168,6 +168,7 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
   <div class="tab active" data-tab="value" onclick="switchTab('value')">Deep Value <span class="badge badge-green" id="tabValueCount">0</span></div>
   <div class="tab" data-tab="quality" onclick="switchTab('quality')">Quality on Sale <span class="badge badge-blue" id="tabQualityCount">0</span></div>
   <div class="tab" data-tab="lookup" onclick="switchTab('lookup')">Stock Lookup</div>
+  <div class="tab" data-tab="backtest" onclick="switchTab('backtest')">Backtest</div>
   <span id="tabDualCount" class="badge" style="display:none;margin-left:auto;background:rgba(167,139,250,.15);color:#a78bfa;font-size:11px;padding:3px 8px;align-self:center;">0 V+Q</span>
 </div>
 
@@ -249,6 +250,16 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
     <label style="font-size:13px;color:var(--text);display:flex;align-items:center;gap:6px;">
       <input type="checkbox" id="settingDamodaran" checked> Damodaran blend (60/40)
     </label>
+  </div>
+</div>
+
+<div id="backtestSection" style="display:none;padding:0 24px 24px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;padding:20px 0 12px;">
+    <h3 style="font-size:16px;">Performance Tracking — Do High Scores Predict Returns?</h3>
+    <button class="btn" onclick="triggerFill()">Fill Forward Returns</button>
+  </div>
+  <div id="backtestContent">
+    <p style="color:var(--text2);">Loading backtest data...</p>
   </div>
 </div>
 
@@ -693,13 +704,20 @@ function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
 
   const isLookup = tab === 'lookup';
+  const isBacktest = tab === 'backtest';
+  const isSpecial = isLookup || isBacktest;
   // Show/hide sections
-  document.querySelector('.controls').style.display = isLookup ? 'none' : '';
-  document.querySelector('.score-legend').style.display = isLookup ? 'none' : '';
-  document.querySelector('.table-wrap').style.display = isLookup ? 'none' : '';
+  document.querySelector('.controls').style.display = isSpecial ? 'none' : '';
+  document.querySelector('.score-legend').style.display = isSpecial ? 'none' : '';
+  document.querySelector('.table-wrap').style.display = isSpecial ? 'none' : '';
   document.getElementById('emptyState').style.display = 'none';
   document.getElementById('lookupSection').style.display = isLookup ? 'block' : 'none';
+  document.getElementById('backtestSection').style.display = isBacktest ? 'block' : 'none';
 
+  if (isBacktest) {
+    loadBacktest();
+    return;
+  }
   if (isLookup) {
     document.getElementById('lookupInput').focus();
     return;
@@ -1009,6 +1027,146 @@ function renderLookupResult(s) {
   html += `</div>`;
 
   rd.innerHTML = html;
+}
+
+// ────────── Backtest ──────────
+async function loadBacktest() {
+  const container = document.getElementById('backtestContent');
+  container.innerHTML = '<p style="color:var(--text2);">Loading backtest data...</p>';
+  try {
+    const [sumR, detR] = await Promise.all([
+      fetch('/api/backtest/summary'),
+      fetch('/api/backtest/details'),
+    ]);
+    const summary = await sumR.json();
+    const details = await detR.json();
+    renderBacktest(summary, details);
+  } catch (e) {
+    container.innerHTML = '<p style="color:var(--red);">Failed to load backtest data.</p>';
+  }
+}
+
+async function triggerFill() {
+  await fetch('/api/backtest/fill', { method: 'POST' });
+  alert('Forward return fill started. Check back in a few minutes.');
+}
+
+function renderBacktest(summary, details) {
+  const c = document.getElementById('backtestContent');
+  let html = '';
+
+  if (!summary.has_data) {
+    html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;text-align:center;">`;
+    html += `<h3 style="margin-bottom:8px;">No Forward Returns Yet</h3>`;
+    html += `<p style="color:var(--text2);">Forward returns are computed 30, 90, and 180 days after each scan.</p>`;
+    html += `<p style="color:var(--text2);">Your earliest scan needs to be at least 30 days old for data to appear.</p>`;
+    html += `<p style="color:var(--text2);margin-top:12px;">Click "Fill Forward Returns" to manually trigger the computation, or wait for the nightly 12:30 AM ET job.</p>`;
+    html += `</div>`;
+
+    // Still show tracking table
+    if (details && details.length > 0) {
+      html += renderTrackingTable(details);
+    }
+    c.innerHTML = html;
+    return;
+  }
+
+  // Summary cards
+  html += `<div style="margin-bottom:16px;color:var(--text2);font-size:13px;">${summary.total_observations} stock-observations with forward return data</div>`;
+
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px;">`;
+
+  // Value tier performance
+  html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;">`;
+  html += `<h4 style="margin-bottom:12px;color:var(--text2);font-size:12px;text-transform:uppercase;">Returns by Value Score Tier</h4>`;
+  html += renderTierTable(summary.tiers, 'value');
+  html += `</div>`;
+
+  // Quality tier performance
+  html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;">`;
+  html += `<h4 style="margin-bottom:12px;color:var(--text2);font-size:12px;text-transform:uppercase;">Returns by Quality Score Tier</h4>`;
+  html += renderTierTable(summary.quality_tiers, 'quality');
+  html += `</div>`;
+
+  html += `</div>`;
+
+  // Detail table
+  if (details && details.length > 0) {
+    html += renderTrackingTable(details);
+  }
+
+  c.innerHTML = html;
+}
+
+function renderTierTable(tiers, type) {
+  const tierOrder = type === 'value'
+    ? ['Strong Value', 'Moderate Value', 'Limited Signal']
+    : ['Quality Buy', 'Quality Watch', 'Not Quality'];
+  const colors = type === 'value'
+    ? ['var(--green)', 'var(--amber)', 'var(--text2)']
+    : ['var(--blue)', 'var(--amber)', 'var(--text2)'];
+
+  let html = `<table style="width:100%;font-size:13px;border-collapse:collapse;">`;
+  html += `<tr style="border-bottom:1px solid var(--border);">`;
+  html += `<th style="text-align:left;padding:6px;color:var(--text2);">Tier</th>`;
+  html += `<th style="text-align:right;padding:6px;color:var(--text2);">Count</th>`;
+  html += `<th style="text-align:right;padding:6px;color:var(--text2);">30D Avg</th>`;
+  html += `<th style="text-align:right;padding:6px;color:var(--text2);">90D Avg</th>`;
+  html += `<th style="text-align:right;padding:6px;color:var(--text2);">180D Avg</th>`;
+  html += `</tr>`;
+
+  tierOrder.forEach((tier, i) => {
+    const t = tiers[tier] || { count: 0 };
+    const fmtRet = (v) => v != null ? `<span class="${v >= 0 ? 'c-green' : 'c-red'}">${v >= 0 ? '+' : ''}${v.toFixed(1)}%</span>` : '—';
+    html += `<tr style="border-bottom:1px solid var(--border);">`;
+    html += `<td style="padding:6px;color:${colors[i]};font-weight:600;">${tier}</td>`;
+    html += `<td style="text-align:right;padding:6px;">${t.count}</td>`;
+    html += `<td style="text-align:right;padding:6px;">${fmtRet(t.avg_return_30d)}</td>`;
+    html += `<td style="text-align:right;padding:6px;">${fmtRet(t.avg_return_90d)}</td>`;
+    html += `<td style="text-align:right;padding:6px;">${fmtRet(t.avg_return_180d)}</td>`;
+    html += `</tr>`;
+  });
+  html += `</table>`;
+  return html;
+}
+
+function renderTrackingTable(details) {
+  let html = `<h4 style="margin-bottom:8px;color:var(--text2);font-size:12px;text-transform:uppercase;">All Tracked Stocks</h4>`;
+  html += `<div style="max-height:400px;overflow-y:auto;">`;
+  html += `<table style="width:100%;font-size:12px;border-collapse:collapse;">`;
+  html += `<thead><tr style="border-bottom:2px solid var(--border);position:sticky;top:0;background:var(--surface2);">`;
+  html += `<th style="text-align:left;padding:6px;">Symbol</th>`;
+  html += `<th style="text-align:left;padding:6px;">Scan Date</th>`;
+  html += `<th style="text-align:right;padding:6px;">Price</th>`;
+  html += `<th style="text-align:right;padding:6px;">V</th>`;
+  html += `<th style="text-align:right;padding:6px;">Q</th>`;
+  html += `<th style="text-align:right;padding:6px;">30D</th>`;
+  html += `<th style="text-align:right;padding:6px;">90D</th>`;
+  html += `<th style="text-align:right;padding:6px;">180D</th>`;
+  html += `</tr></thead><tbody>`;
+
+  const fmtRet = (v) => {
+    if (v == null) return '<span style="color:var(--text2)">—</span>';
+    const pct = (v * 100).toFixed(1);
+    return `<span class="${v >= 0 ? 'c-green' : 'c-red'}">${v >= 0 ? '+' : ''}${pct}%</span>`;
+  };
+
+  details.forEach(d => {
+    const vCls = d.value_score >= 70 ? 'c-green' : d.value_score >= 45 ? '' : 'c-red';
+    html += `<tr style="border-bottom:1px solid var(--border);">`;
+    html += `<td style="padding:4px 6px;font-weight:600;">${d.symbol}</td>`;
+    html += `<td style="padding:4px 6px;color:var(--text2);">${d.scan_date}</td>`;
+    html += `<td style="text-align:right;padding:4px 6px;">$${d.price_at_scan ? d.price_at_scan.toFixed(2) : '—'}</td>`;
+    html += `<td style="text-align:right;padding:4px 6px;" class="${vCls}">${d.value_score || '—'}</td>`;
+    html += `<td style="text-align:right;padding:4px 6px;">${d.quality_score || '—'}</td>`;
+    html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_30d)}</td>`;
+    html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_90d)}</td>`;
+    html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_180d)}</td>`;
+    html += `</tr>`;
+  });
+
+  html += `</tbody></table></div>`;
+  return html;
 }
 
 // ────────── Settings ──────────
