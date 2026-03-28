@@ -366,6 +366,10 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         shares_outstanding=yf_shares,
         shareholder_yield=sh_yield,
         debt_maturity_ratio=debt_mat_ratio,
+        days_to_earnings=yf_fin.get("days_to_earnings"),
+        days_to_cover=round(yf_fin.get("shares_short") / yf_fin.get("avg_daily_volume"), 1) if yf_fin.get("shares_short") and yf_fin.get("avg_daily_volume") and yf_fin.get("avg_daily_volume") > 0 else None,
+        goodwill=yf_fin.get("bs_goodwill"),
+        goodwill_prev=yf_fin.get("bs_goodwill_prev"),
         sector=profile.get("sector", ""),
         industry=profile.get("industry", ""),
         country=profile.get("country", ""),
@@ -784,6 +788,10 @@ def merge_quote_and_fundamentals(
         s.shares_outstanding = fundamentals.shares_outstanding
         s.shareholder_yield = fundamentals.shareholder_yield
         s.debt_maturity_ratio = fundamentals.debt_maturity_ratio
+        s.days_to_earnings = fundamentals.days_to_earnings
+        s.days_to_cover = fundamentals.days_to_cover
+        s.goodwill = fundamentals.goodwill
+        s.goodwill_prev = fundamentals.goodwill_prev
         s.debt_to_equity = fundamentals.debt_to_equity
         s.ev_to_revenue = fundamentals.ev_to_revenue
         s.revenue_growth = fundamentals.revenue_growth

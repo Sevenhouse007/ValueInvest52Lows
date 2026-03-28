@@ -119,6 +119,7 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
 .acct-badge { display:inline-block; margin-left:4px; padding:1px 4px; border-radius:3px; background:var(--amber-bg); color:var(--amber); font-size:8px; font-weight:700; vertical-align:middle; }
 .biot-badge { display:inline-block; margin-left:4px; padding:1px 4px; border-radius:3px; background:rgba(20,184,166,.12); color:#14b8a6; font-size:8px; font-weight:700; vertical-align:middle; }
 .size-badge { display:inline-block; margin-left:4px; padding:1px 4px; border-radius:3px; background:rgba(144,152,176,.08); color:var(--text2); font-size:8px; font-weight:700; vertical-align:middle; }
+.earn-badge { display:inline-block; margin-left:4px; padding:1px 4px; border-radius:3px; background:rgba(234,179,8,.12); color:#eab308; font-size:8px; font-weight:700; vertical-align:middle; }
 
 /* Watchlist star */
 .star { cursor:pointer; font-size:16px; color:var(--text2); }
@@ -463,10 +464,11 @@ function renderTable() {
     const isBiot = s.sector === 'Healthcare' && s.ebitda != null && s.ebitda < 0 && (!s.dividend_yield || s.dividend_yield <= 0);
     const isMicro = s.market_cap != null && s.market_cap < 50000000;
     const isSmall = s.market_cap != null && s.market_cap >= 50000000 && s.market_cap < 150000000;
+    const hasEarn = s.days_to_earnings != null && s.days_to_earnings >= 0 && s.days_to_earnings <= 10;
     const rowClass = [expandedSymbol === s.symbol ? 'expanded' : '', isDual ? 'dual-signal' : ''].join(' ').trim();
     html += `<tr data-sym="${s.symbol}" class="${rowClass}">
       <td><span class="star ${isWL?'active':''}" onclick="toggleWL(event,'${s.symbol}')">★</span></td>
-      <td><strong>${s.symbol}</strong>${isDual?'<span class="dual-badge">V+Q</span>':''}${hasRisk?'<span class="risk-badge">RISK</span>':''}${hasAcct?'<span class="acct-badge">ACCT</span>':''}${isBiot?'<span class="biot-badge">BIOT</span>':''}${isMicro?'<span class="size-badge">MICRO</span>':''}${isSmall?'<span class="size-badge">SMALL</span>':''}${isNew?'<span class="new-badge">NEW</span>':''}</td>
+      <td><strong>${s.symbol}</strong>${isDual?'<span class="dual-badge">V+Q</span>':''}${hasRisk?'<span class="risk-badge">RISK</span>':''}${hasAcct?'<span class="acct-badge">ACCT</span>':''}${isBiot?'<span class="biot-badge">BIOT</span>':''}${isMicro?'<span class="size-badge">MICRO</span>':''}${isSmall?'<span class="size-badge">SMALL</span>':''}${hasEarn?'<span class="earn-badge">EARN</span>':''}${isNew?'<span class="new-badge">NEW</span>':''}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${s.short_name||''}</td>
       <td>${s.sector||'—'}</td>
       <td>${isQ ? fmtFScore(s.piotroski_f_score) : '<span class=\"model-tag\">'+fmtModel(s.sector_type)+'</span>'}</td>

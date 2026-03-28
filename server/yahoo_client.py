@@ -76,7 +76,33 @@ def _fetch_yf_financials(symbol: str) -> Optional[dict]:
             "bs_shares_outstanding": _get(bs, "Ordinary Shares Number") or _get(bs, "Share Issued"),
             "bs_cash": _get(bs, "Cash And Cash Equivalents"),
             "bs_short_term_investments": _get(bs, "Other Short Term Investments"),
+            # Balance sheet extras for Priority 8
+            "bs_goodwill": _get(bs, "Goodwill"),
+            "bs_goodwill_prev": _get(bs, "Goodwill", 1),
+            "bs_intangibles": _get(bs, "Other Intangible Assets"),
         }
+
+        # Priority 5: Earnings date + Priority 6: shares short
+        try:
+            cal = ticker.calendar
+            if cal and isinstance(cal, dict):
+                ed = cal.get("Earnings Date")
+                if ed and isinstance(ed, list) and len(ed) > 0:
+                    import datetime
+                    next_earn = ed[0]
+                    if isinstance(next_earn, datetime.date):
+                        days_to_earnings = (next_earn - datetime.date.today()).days
+                        result["days_to_earnings"] = days_to_earnings
+        except Exception:
+            pass
+
+        try:
+            info = ticker.info
+            result["shares_short"] = info.get("sharesShort")
+            result["avg_daily_volume"] = info.get("averageDailyVolume10Day") or info.get("averageVolume")
+        except Exception:
+            pass
+
         return result
     except Exception as e:
         logger.error(f"Error fetching yf financials for {symbol}: {e}")

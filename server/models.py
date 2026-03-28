@@ -91,6 +91,10 @@ class StockFundamentals(BaseModel):
     shares_outstanding: Optional[float] = None
     shareholder_yield: Optional[float] = None
     debt_maturity_ratio: Optional[float] = None
+    days_to_earnings: Optional[int] = None
+    days_to_cover: Optional[float] = None
+    goodwill: Optional[float] = None
+    goodwill_prev: Optional[float] = None
     sector: str = ""
     industry: str = ""
     country: str = ""
@@ -187,6 +191,10 @@ class ScoredStock(BaseModel):
     shares_outstanding: Optional[float] = None
     shareholder_yield: Optional[float] = None
     debt_maturity_ratio: Optional[float] = None
+    days_to_earnings: Optional[int] = None
+    days_to_cover: Optional[float] = None
+    goodwill: Optional[float] = None
+    goodwill_prev: Optional[float] = None
     price_momentum_3m: Optional[float] = None
     price_momentum_12m: Optional[float] = None
     relative_momentum: Optional[float] = None

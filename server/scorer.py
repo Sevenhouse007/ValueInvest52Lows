@@ -568,24 +568,35 @@ def _score_proximity_to_low(stock: ScoredStock) -> tuple[int, list[str]]:
 
 
 def _score_short_interest(stock: ScoredStock) -> tuple[int, list[str]]:
+    """Short interest + days-to-cover modifier (Priority 6)."""
     si = stock.short_percent_of_float
     if si is None:
         return 0, []
     pct = si * 100 if si < 1 else si
     insiders_buying = stock.insider_buy_count >= 3
+    pts = 0
+    reasons: list[str] = []
     if pct > 40:
         if insiders_buying:
-            return -5, [f"Very high short {pct:.0f}% but insiders buying (squeeze?)"]
-        return -15, [f"Very high short interest {pct:.0f}% — crowded short"]
-    if pct > 25:
+            pts = -5; reasons.append(f"Very high short {pct:.0f}% but insiders buying (squeeze?)")
+        else:
+            pts = -15; reasons.append(f"Very high short interest {pct:.0f}% — crowded short")
+    elif pct > 25:
         if insiders_buying:
-            return 0, [f"High short {pct:.0f}% but insiders buying"]
-        return -8, [f"High short interest {pct:.0f}%"]
-    if pct > 15:
-        return -3, [f"Elevated short interest {pct:.0f}%"]
-    if pct < 3:
-        return 3, ["Low short interest"]
-    return 0, []
+            pts = 0; reasons.append(f"High short {pct:.0f}% but insiders buying")
+        else:
+            pts = -8; reasons.append(f"High short interest {pct:.0f}%")
+    elif pct > 15:
+        pts = -3; reasons.append(f"Elevated short interest {pct:.0f}%")
+    elif pct < 3:
+        pts = 3; reasons.append("Low short interest")
+
+    # Priority 6: Days-to-cover modifier
+    dtc = stock.days_to_cover
+    if dtc is not None and dtc > 10:
+        pts += 3; reasons.append(f"Days-to-cover {dtc:.0f} — squeeze fuel")
+
+    return pts, reasons
 
 
 def _score_accruals_quality(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
@@ -983,7 +994,7 @@ def _score_beneish(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]
 
 
 def _score_asset_growth(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
-    """Asset growth penalty (Cooper et al. 2008 asset growth anomaly)."""
+    """Asset growth penalty with goodwill split (Priority 8)."""
     if sector_type == "reit":
         return 0, []
     ag = stock.asset_growth
@@ -991,12 +1002,30 @@ def _score_asset_growth(stock: ScoredStock, sector_type: str) -> tuple[int, list
         return 0, []
     pts = 0
     reasons: list[str] = []
+
+    # Priority 8: Split by goodwill-driven vs organic
+    gw = stock.goodwill
+    gw_prev = stock.goodwill_prev
+    ta_prev = stock.total_assets_prior
+    goodwill_driven = False
+    if ag > 0.20 and gw is not None and gw_prev is not None and ta_prev and ta_prev > 0:
+        gw_growth_pct = (gw - gw_prev) / ta_prev
+        if gw_growth_pct > 0.20:
+            goodwill_driven = True
+
     if ag > 0.30:
-        pts = -5; reasons.append(f"Rapid asset growth {ag*100:.0f}% — potential overinvestment")
+        if goodwill_driven:
+            pts = -8; reasons.append(f"Acquisition-driven asset growth {ag*100:.0f}% — goodwill dilution risk")
+        else:
+            pts = -5; reasons.append(f"Rapid asset growth {ag*100:.0f}% (organic/capex-driven)")
     elif ag > 0.20:
-        pts = -3; reasons.append(f"High asset growth {ag*100:.0f}%")
+        if goodwill_driven:
+            pts = -5; reasons.append(f"Goodwill-heavy asset growth {ag*100:.0f}%")
+        else:
+            pts = -3; reasons.append(f"High asset growth {ag*100:.0f}%")
     elif ag < -0.10:
         pts = 3; reasons.append("Asset base shrinking — potential restructuring value")
+
     # Modifier: if high growth but strong FCF yield, reduce penalty
     if pts < 0:
         ev = stock.enterprise_value
