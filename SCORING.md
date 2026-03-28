@@ -1,23 +1,27 @@
 # Scoring Methodology
 
-## How Stocks Are Scored
+## Overview
 
 Every stock hitting a 52-week low is evaluated through two independent lenses:
 
 - **Value Score (0-150)** — Is this stock cheap relative to its sector peers?
 - **Quality Score (0-100)** — Is this a fundamentally strong business temporarily on sale?
 
-Both scores use live data from Yahoo Finance quoteSummary API + yfinance financials, compared against 55 blue-chip sector benchmarks and industry peers.
+Both scores use live data from Yahoo Finance quoteSummary API + yfinance financials, compared against blended sector benchmarks (60% live blue-chip data from 55 stocks + 40% Damodaran NYU Stern sector medians) and leave-one-out industry peer averages.
 
-Stocks that score highly on **both** get a purple "V+Q" badge — the highest-conviction picks.
+**Badges:**
+- **V+Q** (purple) — Strong Value AND Quality Buy. Highest conviction.
+- **RISK** (red) — Distress flag triggered (Z-Score, interest coverage, payout ratio, or leverage).
+- **NEW** (blue) — Stock appeared since the previous scan.
+- **!!** (orange delta) — Score changed ≥15 pts from previous scan.
 
 ---
 
-## Value Score: The Hybrid Ratio System
+## Value Score: Hybrid Ratio System
 
-The Value Score uses a **hybrid approach: 80% sector-relative ratios + 20% absolute-value sanity check**.
+**80% sector-relative ratios + 20% absolute-value sanity check.**
 
-### How the ratio works
+### Ratio component (80%)
 
 ```
 ratio = stock's metric / peer average
@@ -27,7 +31,7 @@ For "lower is better" metrics (P/E, P/B, EV/EBITDA):
 
 | Ratio vs Peers | Points | Interpretation |
 |---------------|--------|----------------|
-| 0.30x or less | 100% of max | Extremely cheap vs peers |
+| ≤ 0.30x | 100% of max | Extremely cheap vs peers |
 | 0.31x - 0.50x | 85% of max | Very cheap vs peers |
 | 0.51x - 0.65x | 65% of max | Cheap vs peers |
 | 0.66x - 0.80x | 45% of max | Below peers |
@@ -38,16 +42,16 @@ For "higher is better" metrics (ROE, Dividend Yield):
 
 | Ratio vs Peers | Points | Interpretation |
 |---------------|--------|----------------|
-| 2.5x+ | 100% of max | Significantly above sector |
+| ≥ 2.5x | 100% of max | Significantly above sector |
 | 1.8x - 2.5x | 80% of max | Strong vs sector |
 | 1.3x - 1.8x | 60% of max | Good vs sector |
 | 1.0x - 1.3x | 30% of max | Solid |
 | 0.7x - 1.0x | 10% of max | Slightly below |
-| Below 0.7x | 0 pts | Well below |
+| < 0.7x | 0 pts | Well below |
 
-### The 20% absolute nudge
+### Absolute component (20%)
 
-Catches edge cases where the ratio is misleading:
+Catches cases where the ratio is misleading (e.g., P/E 40 at 0.5x a P/E 80 sector):
 
 | Metric | Strong bonus | Cheap bonus | Expensive penalty |
 |--------|-------------|-------------|-------------------|
@@ -59,51 +63,57 @@ Catches edge cases where the ratio is misleading:
 
 ### Peer average priority
 
-1. **Industry average** (leave-one-out, 3+ peers required)
-2. **Market sector average** (55 blue-chip benchmarks, fetched fresh each scan)
-3. **Scan sector average** (other 52W-low stocks — fallback)
+1. **Industry average** (leave-one-out, 3+ peers required) — e.g., "Packaged Foods" avg excluding the stock itself
+2. **Market sector average** (blended: 60% live blue-chip benchmarks + 40% Damodaran medians)
+3. **Scan sector average** (from other 52W-low stocks — fallback, biased cheap)
+
+### Sector benchmark blending
+
+Live blue-chip benchmarks (55 stocks like JPM, AAPL, PG, XOM) are blended with Damodaran NYU Stern January 2026 sector medians. This provides a more representative "normal" valuation than blue-chips alone (which skew premium) or the scan stocks (which skew cheap).
+
+Togglable via `USE_DAMODARAN_BLEND` env var or the Settings panel.
 
 ---
 
 ## Sector-Specific Scoring Models
 
-Each sector uses different metrics with different weights. Metrics misleading for a sector are excluded.
+Each sector uses different metrics with different weights. Metrics misleading for a sector are excluded entirely.
 
 | Sector | Primary Metrics (max pts) | Excluded | Extra |
 |--------|--------------------------|----------|-------|
 | **Financial** | P/B (30), ROE (25), ROA (15), Fwd P/E (15) | EV/EBITDA, FCF | — |
-| **REIT** | Div Yield (30), P/B-NAV (25), EV/EBITDA (15), ROE (10), P/E (10) | P/E penalties, FCF | Div sustainability check |
+| **REIT** | Div Yield (30), P/B-NAV (25), EV/EBITDA (15), ROE (10), P/E (10) | P/E penalties, FCF | Div sustainability |
 | **Energy** | EV/EBITDA (28), P/CF (25), Fwd P/E (12), Div Yield (10), ROE (8) | P/B | — |
 | **Healthcare** | EV/EBITDA (25), Fwd P/E (22), ROE (12), P/B (8) | — | Debt penalty |
-| **Staples** | EV/EBITDA (28), Fwd P/E (22), Div Yield (12), ROE (10) | P/B | Div sustainability check |
+| **Staples** | EV/EBITDA (28), Fwd P/E (22), Div Yield (12), ROE (10) | P/B | Div sustainability |
 | **Cyclical** | Fwd P/E (28), P/B (20), EV/EBITDA (18), ROE (10) | — | — |
 | **Industrial** | EV/EBITDA (25), Fwd P/E (22), ROE (12), P/B (6) | — | Debt penalty |
-| **Comms** | EV/EBITDA (30), Fwd P/E (18), ROE (12), Div Yield (5) | P/B | China ADR -20, Div check |
+| **Comms** | EV/EBITDA (30), Fwd P/E (18), ROE (12), Div Yield (5) | P/B | China ADR penalty, Div sustainability |
 | **Materials** | EV/EBITDA (28), Fwd P/E (14), P/B (12), ROE (10) | — | — |
-| **Utilities** | Fwd P/E (30), Div Yield (25), P/B (15), EV/EBITDA (12), ROE (8) | FCF, Debt | Div sustainability check |
+| **Utilities** | Fwd P/E (30), Div Yield (25), P/B (15), EV/EBITDA (12), ROE (8) | FCF, Debt | Div sustainability |
 | **Default/Tech** | Fwd P/E (28), P/B (18), EV/EBITDA (18), ROE (14) | — | — |
 
 ---
 
 ## Universal Signals — Value Score
 
-Applied after sector-specific scoring to every stock:
+Applied to every stock after sector-specific scoring:
 
-### FCF Yield on Enterprise Value (C1)
+### FCF Yield on Enterprise Value
 
-FCF / Enterprise Value (not market cap — per Alpha Architect 40-year study).
+FCF / Enterprise Value (per Alpha Architect 40-year study — EV-based FCF yield is top-2 most predictive metric).
 
 | FCF/EV Yield | Points | |
 |-------------|--------|--|
-| > 12% | +18 | Strong FCF yield |
-| > 7% | +14 | Solid FCF yield |
+| > 12% | +18 | Strong FCF/EV yield |
+| > 7% | +14 | Solid FCF/EV yield |
 | > 3% | +8 | Positive FCF |
 | > 0% | +4 | Positive |
 | < -2% | -8 | Negative FCF yield |
 
-**Bonus:** +4 if FCF yield > 1.5x sector average.
+**Sector-relative bonus:** +4 if FCF yield > 1.5x sector average.
 
-### Analyst Target Upside (C7)
+### Analyst Target Upside
 
 | Upside | Points | |
 |--------|--------|--|
@@ -111,19 +121,19 @@ FCF / Enterprise Value (not market cap — per Alpha Architect 40-year study).
 | > 40% | +8 | |
 | > 25% | +5 | |
 | > 10% | +3 | |
-| < 0% (below price) | -5 | Target below current price |
+| < 0% | -5 | Target below current price |
 
-### Growth Direction (C6, C8)
+### Growth Direction
 
-**Earnings** (with EBITDA cross-check):
+**Earnings** (with EBITDA cross-check — if GAAP earnings collapse but EBITDA is stable, penalty reduced 50%):
 
 | Earnings Growth | Points | |
 |----------------|--------|--|
-| Collapsing (< -70%) | -20 | Halved if EBITDA stable (GAAP one-time items) |
-| Plunging (< -50%) | -15 | Reduced 30% if revenue growing (margin compression) |
-| Declining (< -30%) | -10 | |
-| Declining (< -10%) | -5 | |
-| Growing (> 15%) | +5 | |
+| < -70% | -20 | Collapsing (halved if EBITDA stable) |
+| < -50% | -15 | Plunging (reduced 30% if revenue growing) |
+| < -30% | -10 | Declining |
+| < -10% | -5 | Declining |
+| > 15% | +5 | Growing |
 
 **Revenue** (enhanced tiers):
 
@@ -137,44 +147,46 @@ FCF / Enterprise Value (not market cap — per Alpha Architect 40-year study).
 | -5% to -15% | -8 | Declining |
 | < -15% | -15 | Collapsing |
 
-**Revenue acceleration:** +4 if current YoY growth > prior YoY growth by 5%+
+**Revenue acceleration:** +4 if current YoY growth exceeds prior YoY growth by 5%+.
 
-### Relative Momentum (C5)
+### Relative Momentum
 
-Stock's 12-month drop vs sector average drop.
+Stock's 12-month drop vs sector average drop:
 
 | Relative Performance | Points | |
 |---------------------|--------|--|
 | +15pp or better | +8 | Strong positive relative momentum |
-| +5pp to +15pp | +5 | Outperforming sector peers |
+| +5pp to +15pp | +5 | Outperforming sector |
 | 0 to +5pp | +3 | Slightly ahead |
 | -8pp to -20pp | -2 | |
 | < -20pp | -5 | Underperforming sector peers badly |
 
-### Proximity to 52W Low — Interaction Only (C12)
+### Proximity to 52W Low — Interaction Only
 
 No standalone bonus. Only fires as interaction with Piotroski F-Score:
 
 | Condition | Points | |
 |-----------|--------|--|
-| Bottom 5% of range AND F-Score >= 7 | +6 | Potential capitulation bottom |
-| Bottom 5% of range AND F-Score <= 3 | -5 | Possible free fall |
-| Bottom 20% AND F-Score >= 7 AND FCF yield > 5% | +4 | Recovery + quality + FCF |
+| Bottom 5% AND F-Score ≥ 7 | +6 | Potential capitulation bottom |
+| Bottom 5% AND F-Score ≤ 3 | -5 | Possible free fall |
+| Bottom 20% AND F-Score ≥ 7 AND FCF yield > 5% | +4 | Recovery with quality + FCF |
 
-### Insider Transactions (C2)
+### Insider Transactions
 
-Buy signals unchanged. Sell penalties reduced ~40% (most sells are pre-planned 10b5-1).
+Buy signals unchanged. Sell penalties reduced ~40% (most sells are pre-planned 10b5-1):
 
 | Signal | Points | |
 |--------|--------|--|
 | Strong buying (3+ buys, >70% buy ratio) | +10 | |
 | Insider buying (2+ buys) | +6 | |
 | Net buying | +3 | |
-| Selling (5-19 sells) | -5 | Reduced from -12 |
-| Mass selling (20-49 sells) | -10 | Reduced from -20 |
-| Extreme selling (50+ sells) | -15 | Reduced from -25 |
+| Selling (5-19 sells) | -5 | |
+| Mass selling (20-49 sells) | -10 | |
+| Extreme selling (50+ sells) | -15 | |
 
 ### Piotroski F-Score
+
+Conservative scoring — raw pass count, no inflation for partial data:
 
 | F-Score | Points | |
 |---------|--------|--|
@@ -183,9 +195,9 @@ Buy signals unchanged. Sell penalties reduced ~40% (most sells are pre-planned 1
 | 2-3/9 | -10 | Value trap risk |
 | 0-1/9 | -15 | Very weak |
 
-### Leverage: Net Debt/EBITDA (C10)
+### Net Debt/EBITDA (replaces Debt/Equity)
 
-Replaces the old Debt/Equity metric. Skipped for utilities and REITs.
+Skipped for utilities and REITs (structural leverage):
 
 | Net Debt/EBITDA | Points | |
 |----------------|--------|--|
@@ -196,20 +208,20 @@ Replaces the old Debt/Equity metric. Skipped for utilities and REITs.
 | 4x to 6x | -10 | High leverage |
 | > 6x | -15 | Extreme leverage |
 
-### Altman Z-Score (C9)
+### Altman Z-Score
 
-Bankruptcy risk predictor. Skipped for financial, REIT, utility sectors.
+Bankruptcy risk predictor. Skipped for financial, REIT, utility:
 
 | Z-Score | Points | |
 |---------|--------|--|
-| < 1.81 | -20 | Distress zone — bankruptcy risk |
-| 1.81 - 2.99 | -8 | Grey zone — elevated risk |
+| < 1.81 | -20 | Distress zone |
+| 1.81 - 2.99 | -8 | Grey zone |
 | > 2.99 | 0 | Safe |
 | > 4.0 | +5 | Very safe |
 
-### Interest Coverage (C13)
+### Interest Coverage (EBIT / Interest Expense)
 
-EBIT / Interest Expense. Skipped for financial and REIT sectors.
+Skipped for financial and REIT:
 
 | Coverage | Points | |
 |----------|--------|--|
@@ -222,23 +234,23 @@ EBIT / Interest Expense. Skipped for financial and REIT sectors.
 
 **Compound:** If Net Debt/EBITDA > 4x AND coverage < 2x → additional -10.
 
-### Dividend Sustainability (C11)
+### Dividend Sustainability (Payout Ratio)
 
-Payout ratio check. Only for REIT, utility, staples, comms sectors.
+Only for REIT, utility, staples, comms:
 
 | Payout Ratio | Points | |
 |-------------|--------|--|
-| > 150% | -15 | Dividend likely unsustainable |
+| > 150% | -15 | Unsustainable |
 | 100% - 150% | -8 | At risk of cut |
 | 85% - 100% | -3 | Stretched |
 | 40% - 85% | 0 | Sustainable |
-| < 40% | +4 | Conservative, well covered |
+| < 40% | +4 | Conservative |
 
 **Override:** Penalty halved if FCF covers the dividend even when GAAP earnings don't.
 
-### Accruals Quality (Change A)
+### Accruals Quality (Sloan 1996)
 
-Sloan (1996) accrual anomaly: `(Net Income - Operating Cashflow) / Total Assets`. Skipped for financial/REIT.
+`(Net Income - Operating Cashflow) / Total Assets`. Skipped for financial/REIT:
 
 | Accruals Ratio | Points | |
 |---------------|--------|--|
@@ -247,23 +259,23 @@ Sloan (1996) accrual anomaly: `(Net Income - Operating Cashflow) / Total Assets`
 | < 0% | +2 | Slight positive quality |
 | 0% to 5% | 0 | Neutral |
 | 5% to 10% | -5 | Moderate accruals concern |
-| 10% to 20% | -10 | High accruals — earnings quality concern |
+| 10% to 20% | -10 | Earnings quality concern |
 | > 20% | -15 | Very high accruals risk |
 
-### Historical Mean Reversion (Change C)
+### Historical Mean Reversion
 
-Compares the stock to its own historical valuation. Cap: +12 pts combined.
+Compares the stock to its own history. Cap: +12 pts combined.
 
 **Dividend yield vs 5-year average** (doubled for utilities, skipped for energy):
 
 | Current / 5Y Avg Yield | Points | |
 |------------------------|--------|--|
-| > 1.5x | +8 | Historically cheap — yielding 50%+ above average |
+| > 1.5x | +8 | Historically cheap |
 | > 1.25x | +5 | Above 5-year average |
 | > 1.0x | +2 | At or above average |
 | < 0.75x | -5 | Below historical average |
 
-**Forward P/E recovery ratio** (forward PE / trailing PE, skipped for financial/REIT/energy):
+**Forward P/E recovery ratio** (fwd/trailing PE, skipped for financial/REIT/energy):
 
 | Fwd / Trailing PE | Points | |
 |-------------------|--------|--|
@@ -271,21 +283,25 @@ Compares the stock to its own historical valuation. Cap: +12 pts combined.
 | < 0.75 | +5 | Improving earnings expected |
 | < 0.85 | +2 | Slight improvement expected |
 | > 1.20 | -5 | Earnings expected to decline |
-| > 1.50 | -10 | Significant deterioration expected |
+| > 1.50 | -10 | Significant deterioration |
 
 ### Other Universal Signals
 
-| Signal | Points | |
-|--------|--------|--|
-| Low short interest (< 3%) | +3 | |
-| Elevated short (> 15%) | -3 | |
-| High short (> 25%) | -8 | Reduced if insiders buying |
-| Very high short (> 40%) | -15 | Reduced to -5 if insiders buying |
-| Missing forward P/E | -4 | Skipped for financial/REIT |
-| Negative forward earnings | -8 | Skipped for financial/REIT |
-| Negative EBITDA | -12 | Operating losses |
-| 2+ severe red flags | -8 | Compounding |
-| 3+ severe red flags | -15 | High value trap risk |
+| Signal | Points |
+|--------|--------|
+| Low short interest (< 3%) | +3 |
+| Elevated short (> 15%) | -3 |
+| High short (> 25%) | -8 (reduced if insiders buying) |
+| Very high short (> 40%) | -15 (reduced to -5 if insiders buying) |
+| Missing forward P/E | -4 (skip for financial/REIT) |
+| Negative forward earnings | -8 (skip for financial/REIT) |
+| Negative EBITDA | -12 |
+| 2+ severe red flags | -8 (compounding) |
+| 3+ severe red flags | -15 (high value trap risk) |
+
+### China ADR Discount
+
+Configurable via Settings panel or `CHINA_ADR_PENALTY` env var. Default: -20 pts. Range: -25 to 0. Detected automatically via `country` field (China, Hong Kong).
 
 ---
 
@@ -295,60 +311,58 @@ Ignores valuation cheapness. Focuses on business quality and whether the price d
 
 | Signal | Max Points | How |
 |--------|-----------|-----|
-| **Piotroski F-Score** | 25 | 8-9/9 = 25, 7 = 20, 6 = 12, <4 = -10 |
-| **ROIC** (C4) | 10 | >25% = 10 (exceptional), >15% = 7, >8% = 4, <0% = -6. Skip financial/REIT |
-| **ROE vs Sector** | 15 | 2x+ sector = 15, 1.3x = 10, 0.8x = 5 |
+| **Piotroski F-Score** | 25 | 8-9 = 25, 7 = 20, 6 = 12, <4 = -10 |
+| **ROIC** | 10 | >25% = 10, >15% = 7, >8% = 4, <0% = -6. Skip financial/REIT |
+| **ROE vs Sector** | 15 | 2x+ = 15, 1.3x = 10, 0.8x = 5 |
 | **Earnings Growth** | 15 | >25% = 15, >10% = 10, <-40% = -15 |
-| **Revenue Growth** (C6) | 10 | >15% = 10, >8% = 7, >3% = 4, >0% = 2, <-15% = -15 |
-| **Gross Margin Trend** (C3) | 14 | >100bps expansion = 14, >50bps = 10, stable = 4, <-200bps = -10, <-400bps = -15 |
+| **Revenue Growth** | 10 | >15% = 10, >8% = 7, >3% = 4, >0% = 2, <-15% = -15 |
+| **Gross Margin Trend** | 14 | >2pp expansion = 14, >0.5pp = 8, stable = 4, <-2pp = -10, <-4pp = -15 |
+| **EPS Revision Momentum** | 8+4+5 | Surprise trend improving = +8, consistent beats = +4, contrarian setup = +5 |
 | **FCF Yield on EV** | 8 | >8% = 8, >3% = 4, <-5% = -5 |
 | **Insider Confidence** | 10 | 2+ buys = 10, 10+ sells = -8, 5+ sells = -4 |
 | **Price Drop from High** | 10 | Down >40% = 10, >25% = 6 |
-| **EPS Revision Momentum** (Change B) | 8+4+5 | Surprise trend improving = +8, consistent beats = +4, contrarian setup = +5 |
-| **Accruals Quality** (Change A) | 6 | Cash > reported = +6, high accruals = -8 to -12 |
-| **Relative Momentum** (C5) | 8 | Outperforming sector = +8 to +3, underperforming = -5 |
+| **Accruals Quality** | 6 | Cash > reported = +6, high accruals = -8 to -12 |
+| **Relative Momentum** | 8 | Outperforming sector = +8 to +3, underperforming = -5 |
 | **Low Short Interest** | 5 | <3% = +5, >25% = -5 |
 | **Buyback Yield** | 5 | Active buybacks = +5, dilution = -3 |
-| **Analyst Upside** (C7) | 10 | >60% = +10, <0% = -5 |
+| **Analyst Upside** | 10 | >60% = +10, <0% = -5 |
 | **Also Cheap on P/E** | 5 | P/E < 0.5x sector |
-| **Revenue Acceleration** (C6) | 4 | Current growth > prior growth by 5%+ |
+| **Revenue Acceleration** | 4 | Current growth > prior by 5%+ |
 
 **Tiers:** Quality Buy (65+) | Quality Watch (45-64) | Not Quality (<45)
 
 ---
 
-## Contrarian Setup Signal (Change B)
+## Key Signal: Contrarian Setup
 
-The highest-conviction signal in the system. When ALL of these are true:
+The highest-conviction signal. When ALL of these are true:
 - Stock is in the bottom 10% of its 52-week range
-- EPS surprise trend is positive (estimates improving)
+- EPS surprise trend is positive (analyst estimates improving)
 
-This triggers a gold-highlighted callout in the detail panel: **"Improving estimates at 52-week low — high-conviction contrarian setup"** (+5 bonus pts in Quality Score).
+Triggers a gold-highlighted callout: **"Improving estimates at 52-week low — high-conviction contrarian setup"** (+5 bonus in Quality Score).
 
 ---
 
 ## Risk Flags
 
-Stocks with any of these get a red "RISK" badge in the table:
+Red "RISK" badge shown in table. Detail panel shows color-coded explanation cards:
 
-| Risk Flag | Threshold | Severity |
-|-----------|-----------|----------|
-| Altman Z-Score | < 1.81 | High (distress zone) |
-| Altman Z-Score | < 2.99 | Medium (grey zone) |
-| Interest Coverage | < 1.0x | High (can't cover interest) |
-| Interest Coverage | < 1.5x | Medium (thin coverage) |
-| Payout Ratio | > 120% | Medium |
-| Payout Ratio | > 150% | High (unsustainable) |
-| Net Debt/EBITDA | > 4x | Medium |
-| Net Debt/EBITDA | > 6x | High (extreme leverage) |
-
-The detail panel shows each risk flag with a color-coded card explaining the metric value and what it means in plain English.
+| Risk Flag | Threshold | Severity | Detail Panel Explanation |
+|-----------|-----------|----------|------------------------|
+| Altman Z-Score | < 1.81 | High | Distress zone — bankruptcy risk |
+| Altman Z-Score | < 2.99 | Medium | Grey zone — moderate stress |
+| Interest Coverage | < 1.0x | High | EBIT doesn't cover interest |
+| Interest Coverage | < 1.5x | Medium | Thin coverage |
+| Payout Ratio | > 150% | High | Dividend unsustainable |
+| Payout Ratio | > 100% | Medium | Payout exceeds earnings |
+| Net Debt/EBITDA | > 6x | High | Extreme leverage |
+| Net Debt/EBITDA | > 4x | Medium | High leverage |
 
 ---
 
 ## Earnings Quality Indicator
 
-Shown in the detail panel based on the Accruals Quality Ratio:
+Shown in detail panel based on Accruals Quality Ratio:
 
 | Accruals Ratio | Label | Color |
 |---------------|-------|-------|
@@ -359,14 +373,50 @@ Shown in the detail panel based on the Accruals Quality Ratio:
 
 ---
 
+## Score Stability
+
+To reduce noise from single-day data fluctuations:
+
+- **5-day rolling average** computed for both Value and Quality scores
+- **Days in scan** counter tracks how many consecutive days a stock has appeared
+- **Large change alert** (!! indicator) when score changes ≥15 pts from previous day
+
+---
+
 ## Data Sources
 
 | Source | What it provides |
 |--------|-----------------|
 | Yahoo quoteSummary API | defaultKeyStatistics, financialData, summaryDetail, assetProfile, insiderTransactions, incomeStatementHistory, price, earningsHistory |
-| yfinance `ticker.financials` | Complete income statement (EBIT, EBITDA, Interest Expense, Gross Profit — data the API lacks) |
-| 55 blue-chip benchmarks | Market-level sector averages (JPM, AAPL, PG, XOM, CAT, etc.) |
+| yfinance `ticker.financials` | Complete income statement: EBIT, EBITDA, Interest Expense, Gross Profit (data the API lacks) |
+| 55 blue-chip benchmarks | Live market-level sector averages (JPM, AAPL, PG, XOM, CAT, etc.) |
+| Damodaran NYU Stern | January 2026 sector medians — blended 60/40 with blue-chip data |
 | Industry peer averages | Leave-one-out averages from scan peers (3+ required) |
+
+---
+
+## Scheduled Jobs
+
+| Job | Schedule | What it does |
+|-----|----------|-------------|
+| Full scan | 4:30 PM ET daily | Fetch all 52W-low stocks, enrich, score, save |
+| Pre-market refresh | 7:00 AM ET Mon-Fri | Update prices only, flag stocks exiting 52W low range |
+| Notifications | After full scan | Email/Slack digest of top 10 new/improved picks |
+| Performance tracking | After full scan | Save price + scores for 30/90/180 day return validation |
+
+---
+
+## Configuration
+
+| Setting | Default | Env Var | Adjustable at Runtime |
+|---------|---------|---------|----------------------|
+| China ADR penalty | -20 | `CHINA_ADR_PENALTY` | Yes (Settings panel) |
+| Damodaran blend | On | `USE_DAMODARAN_BLEND` | Yes (Settings panel) |
+| Notifications | Off | `NOTIFY_ENABLED` | Yes |
+| CORS origins | localhost | `CORS_ORIGINS` | No (restart required) |
+| Settings API key | None | `SETTINGS_API_KEY` | No |
+| SMTP config | None | `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` | No |
+| Slack webhook | None | `SLACK_WEBHOOK_URL` | No |
 
 ---
 
@@ -384,8 +434,4 @@ Shown in the detail panel based on the Accruals Quality Ratio:
 | 45-64 | Quality Watch | Good business, worth monitoring |
 | 0-44 | Not Quality | Not a quality compounder, or deteriorating |
 
-| Badge | Meaning |
-|-------|---------|
-| **V+Q** (purple) | Strong Value AND Quality Buy — highest conviction |
-| **RISK** (red) | Distress flag triggered (Z-Score, coverage, payout, leverage) |
-| **NEW** (blue) | Stock appeared since the previous scan |
+The best opportunities are stocks that rank highly on **both** scores — cheap AND high quality. These get a purple **V+Q** badge and represent the highest-conviction picks in the system.
