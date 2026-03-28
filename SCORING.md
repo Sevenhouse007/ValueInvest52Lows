@@ -17,7 +17,19 @@
 12. **Biotech detection** — Healthcare: Cash runway replaces standard metrics. BIOT badge (teal).
 13. **Market cap badges** — MICRO (<$50M, gray), SMALL ($50-150M, gray).
 
-**New badges:** ACCT (amber, M-Score > -1.78), BIOT (teal, pre-revenue biotech), MICRO/SMALL (gray, market cap).
+**New badges:** ACCT (amber, M-Score > -1.78), BIOT (teal, pre-revenue biotech), MICRO/SMALL (gray, market cap), EARN (gold, earnings within 10 days).
+
+### 2026-03-28 (Priority fixes)
+
+1. **Double-counting fix** — Revenue growth, earnings growth, relative momentum, FCF yield, analyst upside, and revenue acceleration were scored at full weight in BOTH Value and Quality scores. Quality Score contributions now halved to prevent 2x inflation. Each signal has a documenting comment.
+2. **Composite Score** — New field: `composite_score = (value_score/150 * 50) + (quality_score/100 * 50)`, normalizing both to 0-100. Used for V+Q tier ranking.
+3. **Named constants** — All magic number thresholds extracted: `VALUE_STRONG_THRESHOLD`, `VQ_VALUE_THRESHOLD`, `QUALITY_BUY_THRESHOLD`, etc.
+4. **BIOT scoring updated** — Cash runway: >8Q = +20, 5-8Q = +12, 3-5Q = +5, <3Q = -15.
+5. **MICRO parity** — Quality Score analyst upside now applies same 50% micro-cap downweight as Value Score.
+6. **EARN badge** — Gold badge when earnings within 10 calendar days. Informational, no score impact.
+7. **Days-to-cover** — Short interest enhanced: days_to_cover > 10 adds +3 pts ("squeeze fuel").
+8. **Score stability edge case** — !! alert no longer fires on Day 1 (no baseline).
+9. **Asset growth split** — Distinguishes goodwill-driven growth (-8 penalty) from organic growth (-5). Goodwill fetched from balance sheet.
 
 **Data layer:** yfinance balance sheet now fetched (Total Assets, PPE, Receivables, LTD, Current Debt, Shares Outstanding). WACC estimates added to Damodaran benchmarks.
 
