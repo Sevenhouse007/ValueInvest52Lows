@@ -44,11 +44,18 @@ Every stock hitting a 52-week low is evaluated through two independent lenses:
 
 Both scores use live data from Yahoo Finance quoteSummary API + yfinance financials, compared against blended sector benchmarks (60% live blue-chip data from 55 stocks + 40% Damodaran NYU Stern sector medians) and leave-one-out industry peer averages.
 
+**Composite Score:** `(value_score / 150 × 50) + (quality_score / 100 × 50)` = normalized 0-100. Used to rank V+Q stocks.
+
 **Badges:**
-- **V+Q** (purple) — Strong Value AND Quality Buy. Highest conviction.
-- **RISK** (red) — Distress flag triggered (Z-Score, interest coverage, payout ratio, or leverage).
-- **NEW** (blue) — Stock appeared since the previous scan.
-- **!!** (orange delta) — Score changed ≥15 pts from previous scan.
+- **V+Q** (purple) — Value ≥ 70 AND Quality ≥ 65. Highest conviction.
+- **RISK** (red) — Distress flag (Z-Score, interest coverage, payout, leverage, Beneish).
+- **ACCT** (amber) — Beneish M-Score > -1.78. Possible earnings manipulation.
+- **BIOT** (teal) — Pre-revenue biotech. Cash runway replaces standard metrics.
+- **EARN** (gold) — Earnings within 10 calendar days. Informational.
+- **MICRO** (gray) — Market cap < $50M. Analyst upside downweighted 50%.
+- **SMALL** (gray) — Market cap $50-150M. Informational.
+- **NEW** (blue) — First appearance in scan.
+- **!!** (orange) — Score changed ≥15 pts (suppressed on Day 1).
 
 ---
 
@@ -328,6 +335,7 @@ Compares the stock to its own history. Cap: +12 pts combined.
 | Elevated short (> 15%) | -3 |
 | High short (> 25%) | -8 (reduced if insiders buying) |
 | Very high short (> 40%) | -15 (reduced to -5 if insiders buying) |
+| Days-to-cover > 10 | +3 (squeeze fuel modifier) |
 | Missing forward P/E | -4 (skip for financial/REIT) |
 | Negative forward earnings | -8 (skip for financial/REIT) |
 | Negative EBITDA | -12 |
@@ -346,13 +354,15 @@ Compares the stock to its own history. Cap: +12 pts combined.
 
 ### Asset Growth Penalty
 
-YoY total asset growth. Skipped for REIT.
+YoY total asset growth with goodwill-driven vs organic split. Skipped for REIT.
 
-| Growth | Points | |
-|--------|--------|--|
-| > 30% | -5 | Potential overinvestment (halved if FCF yield > 5%) |
-| > 20% | -3 | High growth (halved if FCF yield > 5%) |
-| < -10% | +3 | Restructuring value |
+| Growth | Type | Points | |
+|--------|------|--------|--|
+| > 30% | Goodwill-driven | -8 | Acquisition dilution risk |
+| > 30% | Organic/capex | -5 | Overinvestment (halved if FCF yield > 5%) |
+| > 20% | Goodwill-driven | -5 | |
+| > 20% | Organic | -3 | (halved if FCF yield > 5%) |
+| < -10% | Any | +3 | Restructuring value |
 
 ### Shareholder Yield (Dividend + Buyback)
 
@@ -394,29 +404,30 @@ Configurable via Settings panel or `CHINA_ADR_PENALTY` env var. Default: -20 pts
 
 Ignores valuation cheapness. Focuses on business quality and whether the price drop is an opportunity.
 
+Signals marked *(½)* are also scored in the Value Score — Quality Score gets half weight to prevent double-counting inflation.
+
 | Signal | Max Points | How |
 |--------|-----------|-----|
 | **Piotroski F-Score** | 25 | 8-9 = 25, 7 = 20, 6 = 12, <4 = -10 |
 | **ROIC** | 10 | >25% = 10, >15% = 7, >8% = 4, <0% = -6. Skip financial/REIT |
 | **ROE vs Sector** | 15 | 2x+ = 15, 1.3x = 10, 0.8x = 5 |
-| **Earnings Growth** | 15 | >25% = 15, >10% = 10, <-40% = -15 |
-| **Revenue Growth** | 10 | >15% = 10, >8% = 7, >3% = 4, >0% = 2, <-15% = -15 |
-| **Gross Margin Trend** | 14 | >2pp expansion = 14, >0.5pp = 8, stable = 4, <-2pp = -10, <-4pp = -15 |
-| **EPS Revision Momentum** | 8+4+5 | Surprise trend improving = +8, consistent beats = +4, contrarian setup = +5 |
-| **FCF Yield on EV** | 8 | >8% = 8, >3% = 4, <-5% = -5 |
+| **Gross Profitability (GP/A)** | 12 | >40% = 12, >25% = 8, >15% = 4. Skip financial/REIT |
+| **Gross Margin Trend** | 14 | >2pp = 14, >0.5pp = 8, stable = 4, <-2pp = -10, <-4pp = -15 |
+| **Earnings Growth** *(½)* | 8 | >25% = 8, >10% = 5, <-40% = -8 |
+| **Revenue Growth** *(½)* | 5 | >15% = 5, >8% = 4, >3% = 2, <-15% = -8 |
+| **Revenue Acceleration** *(½)* | 2 | Current growth > prior by 5%+ |
+| **EPS Revision Momentum** | 8+4+5 | Surprise improving = +8, beats = +4, contrarian = +5 |
+| **ROIC vs WACC** | 8 | >2x WACC = 8, >1.5x = 6, >WACC = 3, below = -2, neg = -6 |
 | **Insider Confidence** | 10 | 2+ buys = 10, 10+ sells = -8, 5+ sells = -4 |
 | **Price Drop from High** | 10 | Down >40% = 10, >25% = 6 |
+| **Buyback at 52W Low** | 8 | Active buybacks near bottom = +8 |
 | **Accruals Quality** | 6 | Cash > reported = +6, high accruals = -8 to -12 |
-| **Relative Momentum** | 8 | Outperforming sector = +8 to +3, underperforming = -5 |
+| **FCF Yield on EV** *(½)* | 4 | >8% = 4, >3% = 2, <-5% = -3 |
+| **Relative Momentum** *(½)* | 4 | Outperforming = +4 to +1, underperforming = -3 |
+| **Analyst Upside** *(½)* | 5 | Halved; additional 50% downweight for MICRO caps |
 | **Low Short Interest** | 5 | <3% = +5, >25% = -5 |
-| **Buyback Yield** | 5 | Active buybacks = +5, dilution = -3 |
-| **Analyst Upside** | 10 | >60% = +10, <0% = -5 |
-| **Also Cheap on P/E** | 5 | P/E < 0.5x sector |
-| **Revenue Acceleration** | 4 | Current growth > prior by 5%+ |
-| **Gross Profitability (GP/A)** | 12 | >40% = 12, >25% = 8, >15% = 4. Skip financial/REIT |
-| **ROIC vs WACC** | 8 | >2x WACC = 8, >1.5x = 6, >WACC = 3, below = -2, negative = -6 |
 | **Institutional Ownership** | 4 | <15% = +4 (undiscovered), >80% = -3 (crowded) |
-| **Buyback at 52W Low** | 8 | Active buybacks near bottom = +8 (was +5) |
+| **Also Cheap on P/E** | 5 | P/E < 0.5x sector |
 
 **Tiers:** Quality Buy (65+) | Quality Watch (45-64) | Not Quality (<45)
 
@@ -455,8 +466,9 @@ Red "RISK" badge shown in table. Detail panel shows color-coded explanation card
 | Badge | Color | Trigger | Meaning |
 |-------|-------|---------|---------|
 | **BIOT** | Teal | Healthcare + negative EBITDA + low revenue + no dividend | Pre-revenue biotech — cash runway scored instead of standard metrics |
-| **MICRO** | Gray | Market cap < $50M | Micro-cap: analyst upside downweighted 50%, low liquidity warning |
+| **MICRO** | Gray | Market cap < $50M | Micro-cap: analyst upside downweighted 50% in both scores |
 | **SMALL** | Gray | Market cap $50-150M | Small-cap indicator, no score impact |
+| **EARN** | Gold | Earnings within 10 calendar days | Informational — price may be catalytic or volatile |
 
 ---
 
@@ -479,7 +491,8 @@ To reduce noise from single-day data fluctuations:
 
 - **5-day rolling average** computed for both Value and Quality scores
 - **Days in scan** counter tracks how many consecutive days a stock has appeared
-- **Large change alert** (!! indicator) when score changes ≥15 pts from previous day
+- **Large change alert** (!! indicator) when score changes ≥15 pts from previous day — suppressed on Day 1 (no baseline)
+- **Composite score** (0-100) normalizes both scores for unified ranking
 
 ---
 
@@ -488,9 +501,12 @@ To reduce noise from single-day data fluctuations:
 | Source | What it provides |
 |--------|-----------------|
 | Yahoo quoteSummary API | defaultKeyStatistics, financialData, summaryDetail, assetProfile, insiderTransactions, incomeStatementHistory, price, earningsHistory |
-| yfinance `ticker.financials` | Complete income statement: EBIT, EBITDA, Interest Expense, Gross Profit (data the API lacks) |
+| yfinance `ticker.financials` | Income statement: EBIT, EBITDA, Interest Expense, Gross Profit, SGA, Depreciation, Net Income (current + prior year) |
+| yfinance `ticker.balance_sheet` | Total Assets, Current Assets, PPE, Receivables, Long Term Debt, Current Debt, Goodwill, Shares Outstanding, Cash (current + prior year) |
+| yfinance `ticker.calendar` | Next earnings date (for EARN badge) |
+| yfinance `ticker.info` | Shares short, average daily volume (for days-to-cover) |
 | 55 blue-chip benchmarks | Live market-level sector averages (JPM, AAPL, PG, XOM, CAT, etc.) |
-| Damodaran NYU Stern | January 2026 sector medians — blended 60/40 with blue-chip data |
+| Damodaran NYU Stern | January 2026 sector medians + WACC estimates — blended 60/40 with blue-chip data |
 | Industry peer averages | Leave-one-out averages from scan peers (3+ required) |
 
 ---
@@ -503,6 +519,7 @@ To reduce noise from single-day data fluctuations:
 | Pre-market refresh | 7:00 AM ET Mon-Fri | Update prices only, flag stocks exiting 52W low range |
 | Notifications | After full scan | Email/Slack digest of top 10 new/improved picks |
 | Performance tracking | After full scan | Save price + scores for 30/90/180 day return validation |
+| Forward return fill | 12:30 AM ET daily | Fill in 30/90/180 day forward prices for backtesting |
 
 ---
 
@@ -534,4 +551,4 @@ To reduce noise from single-day data fluctuations:
 | 45-64 | Quality Watch | Good business, worth monitoring |
 | 0-44 | Not Quality | Not a quality compounder, or deteriorating |
 
-The best opportunities are stocks that rank highly on **both** scores — cheap AND high quality. These get a purple **V+Q** badge and represent the highest-conviction picks in the system.
+The best opportunities are stocks that rank highly on **both** scores — cheap AND high quality. These get a purple **V+Q** badge (Value ≥ 70 AND Quality ≥ 65) and are ranked by their **Composite Score** (0-100) which normalizes and combines both scores. The Backtest tab tracks whether these picks actually outperform over 30, 90, and 180 days.
