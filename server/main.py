@@ -64,8 +64,8 @@ async def premarket_refresh():
                 if price and low and price > low * 1.15:
                     logger.info(f"  {sym}: ${price:.2f} — 15%+ above 52W low, possible exit")
                 updated += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Pre-market fetch failed for {sym}: {e}")
         logger.info(f"Pre-market refresh complete: {updated} stocks checked")
     except Exception as e:
         logger.error(f"Pre-market refresh failed: {e}")
@@ -316,16 +316,17 @@ def _build_response(result: ScanResult) -> dict:
         top_sector=top_sector,
         top_sector_count=top_count,
     )
-    # Compute rolling averages and days_in_scan from historical data
+    # Compute rolling averages and days_in_scan (single batch query)
+    from server.database import get_rolling_scores_batch
+    rolling = get_rolling_scores_batch([s.symbol for s in stocks])
     stock_dicts = []
     for s in stocks:
         d = s.model_dump()
-        hist = get_stock_history(s.symbol)
-        if len(hist) >= 2:
-            recent = hist[:5]  # last 5 scans
-            d["rolling_value_score"] = round(sum(h["value_score"] for h in recent) / len(recent))
-            d["rolling_quality_score"] = round(sum(h["quality_score"] for h in recent) / len(recent))
-            d["days_in_scan"] = len(hist)
+        r = rolling.get(s.symbol)
+        if r:
+            d["rolling_value_score"] = r["rolling_value"]
+            d["rolling_quality_score"] = r["rolling_quality"]
+            d["days_in_scan"] = r["days"]
         else:
             d["rolling_value_score"] = s.value_score
             d["rolling_quality_score"] = s.quality_score

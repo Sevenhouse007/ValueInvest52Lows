@@ -97,7 +97,7 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
     ocf = _safe_raw(fin, "operatingCashflow")
     roic = None
     if ev and ev > 0 and ocf is not None:
-        roic = round(ocf / ev, 4)
+        roic = round(max(-5.0, min(5.0, ocf / ev)), 4)  # clamp to prevent infinity
 
     # ── New fields from yfinance financials (complete income statement) ──
     yf_fin = data.get("_yf_financials", {})

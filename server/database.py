@@ -158,6 +158,43 @@ def get_latest_scan_averages() -> tuple[dict, dict]:
         return sec, mkt
 
 
+def get_rolling_scores_batch(symbols: list[str]) -> dict:
+    """Batch-compute rolling 5-day scores and days_in_scan for all symbols.
+
+    Returns {symbol: {rolling_value, rolling_quality, days}} in one query.
+    """
+    if not symbols:
+        return {}
+    with get_db() as conn:
+        # Get the last 5 scan dates
+        dates = conn.execute(
+            "SELECT DISTINCT scan_date FROM scan_stocks ORDER BY scan_date DESC LIMIT 5"
+        ).fetchall()
+        if not dates:
+            return {}
+        date_list = [d["scan_date"] for d in dates]
+        placeholders = ",".join("?" * len(date_list))
+
+        rows = conn.execute(f"""
+            SELECT symbol,
+                   AVG(value_score) as avg_value,
+                   COUNT(*) as days,
+                   AVG(CAST(json_extract(data_json, '$.quality_score') AS REAL)) as avg_quality
+            FROM scan_stocks
+            WHERE scan_date IN ({placeholders})
+            GROUP BY symbol
+        """, date_list).fetchall()
+
+        return {
+            r["symbol"]: {
+                "rolling_value": round(r["avg_value"]) if r["avg_value"] else 0,
+                "rolling_quality": round(r["avg_quality"]) if r["avg_quality"] else 0,
+                "days": r["days"],
+            }
+            for r in rows
+        }
+
+
 def get_stock_history(symbol: str) -> list[dict]:
     """Get score history for a single stock across all scan dates."""
     with get_db() as conn:
@@ -189,8 +226,9 @@ def save_performance_tracking(scan_date: str, stocks: list):
                     "INSERT OR IGNORE INTO scan_performance (symbol, scan_date, price_at_scan, value_score, quality_score) VALUES (?, ?, ?, ?, ?)",
                     (s.symbol, scan_date, s.price, s.value_score, s.quality_score),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Performance tracking insert failed for {s.symbol}: {e}")
 
 
 def get_scan_history() -> list[ScanHistoryEntry]:

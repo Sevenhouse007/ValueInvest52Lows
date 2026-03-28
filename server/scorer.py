@@ -1189,12 +1189,10 @@ def compute_quality_score(
     # ── Change 3: Gross margin trend (14 pts max) ──
     gm = stock.gross_margin_change
     if gm is not None:
-        if gm > 0.01:
-            # Expanding
-            if gm > 0.01:
-                pts += 14; reasons.append(f"Meaningful gross margin expansion +{gm*100:.0f}bps")
-            else:
-                pts += 8; reasons.append("Gross margin expanding")
+        if gm > 0.02:
+            pts += 14; reasons.append(f"Meaningful gross margin expansion +{gm*100:.0f}bps")
+        elif gm > 0.005:
+            pts += 8; reasons.append("Gross margin expanding")
         elif abs(gm) <= 0.005:
             pts += 4; reasons.append("Stable margins")
         elif gm < -0.04:
@@ -1301,4 +1299,4 @@ def compute_quality_score(
     else:
         tier = "Not Quality"
 
-    return ScoreBreakdown(total=score, tier=tier, reasons=reasons, sector_type="")
+    return ScoreBreakdown(total=score, tier=tier, reasons=reasons, sector_type=st)
