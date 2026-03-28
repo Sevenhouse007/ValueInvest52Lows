@@ -71,6 +71,9 @@ SMTP_PASS = os.getenv("SMTP_PASS", "")
 NOTIFY_FROM = os.getenv("NOTIFY_FROM", "")
 NOTIFY_TO = os.getenv("NOTIFY_TO", "")
 
+# API settings key (set to protect /api/settings endpoint)
+SETTINGS_API_KEY = os.getenv("SETTINGS_API_KEY", "")
+
 # Scoring thresholds
 OUTLIER_FPE_MAX = 100
 OUTLIER_PB_MAX = 20
@@ -83,3 +86,4 @@ DAILY_REFRESH_MINUTE = 30
 # Server
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",")

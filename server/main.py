@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from server import config
 from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HOST, PORT
 from server.database import get_latest_scan, get_latest_scan_averages, get_scan_by_date, get_scan_history, get_stock_history, init_db, save_performance_tracking, save_scan
 from server.models import ScanResult, ScanSummary
@@ -137,7 +138,7 @@ app = FastAPI(title="52W Low Value Scanner", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=config.CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -219,9 +220,15 @@ async def get_settings():
 
 
 @app.post("/api/settings")
-async def update_settings(body: dict):
-    """Update configurable settings at runtime."""
+async def update_settings(body: dict, request: "Request" = None):
+    """Update configurable settings at runtime. Protected by API key if set."""
     from server import config
+    from fastapi import Request as _Req
+    # Auth check: if SETTINGS_API_KEY is configured, require it
+    if config.SETTINGS_API_KEY:
+        key = body.pop("api_key", "") or ""
+        if key != config.SETTINGS_API_KEY:
+            raise HTTPException(403, "Invalid API key")
     if "china_adr_penalty" in body:
         val = int(body["china_adr_penalty"])
         config.CHINA_ADR_PENALTY = max(-25, min(0, val))

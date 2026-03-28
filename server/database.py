@@ -110,17 +110,13 @@ def save_scan(result: ScanResult):
             "INSERT INTO scans (scan_date, scanned_at, total_stocks, sector_averages_json, market_sector_averages_json) VALUES (?, ?, ?, ?, ?)",
             (result.scan_date, result.scanned_at, result.total_stocks, sector_avg_json, market_avg_json),
         )
-        for stock in result.stocks:
-            conn.execute(
-                "INSERT INTO scan_stocks (scan_date, symbol, data_json, value_score, sector) VALUES (?, ?, ?, ?, ?)",
-                (
-                    result.scan_date,
-                    stock.symbol,
-                    stock.model_dump_json(),
-                    stock.value_score,
-                    stock.sector,
-                ),
-            )
+        conn.executemany(
+            "INSERT INTO scan_stocks (scan_date, symbol, data_json, value_score, sector) VALUES (?, ?, ?, ?, ?)",
+            [
+                (result.scan_date, stock.symbol, stock.model_dump_json(), stock.value_score, stock.sector)
+                for stock in result.stocks
+            ],
+        )
 
 
 def get_latest_scan() -> Optional[ScanResult]:

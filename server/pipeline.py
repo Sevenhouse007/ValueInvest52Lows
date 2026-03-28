@@ -187,8 +187,10 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
 
     # ── Change C: Historical mean reversion fields ──
     five_yr_avg_dy = _safe_raw(summary, "fiveYearAvgDividendYield")
-    # Yahoo returns this as a percentage (e.g., 3.5 meaning 3.5%), convert to decimal
-    if five_yr_avg_dy and five_yr_avg_dy > 1:
+    # Yahoo always returns fiveYearAvgDividendYield as percentage (e.g., 3.5 = 3.5%)
+    # dividendYield is returned as decimal (e.g., 0.035 = 3.5%)
+    # Always convert to decimal for consistency
+    if five_yr_avg_dy is not None and five_yr_avg_dy > 0.5:
         five_yr_avg_dy = five_yr_avg_dy / 100
     trailing_pe = _safe_raw(summary, "trailingPE")
 
@@ -424,10 +426,9 @@ def _compute_piotroski(data: dict, fin: dict) -> tuple[Optional[int], list[str]]
     if max_tests < 5:
         return None, []  # insufficient data
 
-    # Normalize to 0-9 scale if we couldn't run all 9 tests
-    if max_tests < 9:
-        score = round(score * 9 / max_tests)
-
+    # Conservative normalization: don't inflate partial scores.
+    # If only 7/9 tests ran and 5 passed, report 5 (not scaled 6).
+    # The raw pass count is more honest than an inflated projection.
     return min(score, 9), details
 
 
@@ -739,11 +740,16 @@ async def run_pipeline(client: Optional[YahooClient] = None) -> ScanResult:
 
         # Step 6: Score each stock
         # Priority: industry avg (≥3 peers) → market sector avg → scan sector avg
-        logger.info("Step 6: Scoring stocks (value + quality)...")
+        # Precompute industry peer averages (leave-one-out) for all stocks
+        logger.info("Step 6: Precomputing peer averages + scoring...")
+        _peer_cache: dict[str, SectorAverages] = {}
         for s in stocks:
             peers = industry_groups.get(s.industry, [])
             if len(peers) >= 4:
-                peer_avg = _industry_avg_excluding(peers, s.symbol)
+                cache_key = f"{s.industry}:{s.symbol}"
+                if cache_key not in _peer_cache:
+                    _peer_cache[cache_key] = _industry_avg_excluding(peers, s.symbol)
+                peer_avg = _peer_cache[cache_key]
             elif s.sector in market_averages:
                 peer_avg = market_averages[s.sector]
             else:
