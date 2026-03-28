@@ -116,6 +116,9 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
 
 /* Risk badge */
 .risk-badge { display:inline-block; margin-left:4px; padding:1px 4px; border-radius:3px; background:var(--red-bg); color:var(--red); font-size:8px; font-weight:700; vertical-align:middle; }
+.acct-badge { display:inline-block; margin-left:4px; padding:1px 4px; border-radius:3px; background:var(--amber-bg); color:var(--amber); font-size:8px; font-weight:700; vertical-align:middle; }
+.biot-badge { display:inline-block; margin-left:4px; padding:1px 4px; border-radius:3px; background:rgba(20,184,166,.12); color:#14b8a6; font-size:8px; font-weight:700; vertical-align:middle; }
+.size-badge { display:inline-block; margin-left:4px; padding:1px 4px; border-radius:3px; background:rgba(144,152,176,.08); color:var(--text2); font-size:8px; font-weight:700; vertical-align:middle; }
 
 /* Watchlist star */
 .star { cursor:pointer; font-size:16px; color:var(--text2); }
@@ -445,10 +448,14 @@ function renderTable() {
     const rg = s.revenue_growth;
     const isDual = s.value_score >= 70 && s.quality_score >= 65;
     const hasRisk = (s.altman_z_score != null && s.altman_z_score < 1.81) || (s.interest_coverage != null && s.interest_coverage < 1.5) || (s.payout_ratio != null && s.payout_ratio > 1.2);
+    const hasAcct = s.beneish_m_score != null && s.beneish_m_score > -1.78;
+    const isBiot = s.sector === 'Healthcare' && s.ebitda != null && s.ebitda < 0 && (!s.dividend_yield || s.dividend_yield <= 0);
+    const isMicro = s.market_cap != null && s.market_cap < 50000000;
+    const isSmall = s.market_cap != null && s.market_cap >= 50000000 && s.market_cap < 150000000;
     const rowClass = [expandedSymbol === s.symbol ? 'expanded' : '', isDual ? 'dual-signal' : ''].join(' ').trim();
     html += `<tr data-sym="${s.symbol}" class="${rowClass}">
       <td><span class="star ${isWL?'active':''}" onclick="toggleWL(event,'${s.symbol}')">★</span></td>
-      <td><strong>${s.symbol}</strong>${isDual?'<span class="dual-badge">V+Q</span>':''}${hasRisk?'<span class="risk-badge">RISK</span>':''}${isNew?'<span class="new-badge">NEW</span>':''}</td>
+      <td><strong>${s.symbol}</strong>${isDual?'<span class="dual-badge">V+Q</span>':''}${hasRisk?'<span class="risk-badge">RISK</span>':''}${hasAcct?'<span class="acct-badge">ACCT</span>':''}${isBiot?'<span class="biot-badge">BIOT</span>':''}${isMicro?'<span class="size-badge">MICRO</span>':''}${isSmall?'<span class="size-badge">SMALL</span>':''}${isNew?'<span class="new-badge">NEW</span>':''}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${s.short_name||''}</td>
       <td>${s.sector||'—'}</td>
       <td>${isQ ? fmtFScore(s.piotroski_f_score) : '<span class=\"model-tag\">'+fmtModel(s.sector_type)+'</span>'}</td>
@@ -566,6 +573,9 @@ function detailPanel(s) {
   else if (s.payout_ratio != null && s.payout_ratio > 1.0) riskItems.push({label: 'Payout Ratio', value: (s.payout_ratio*100).toFixed(0)+'%', detail: 'Payout exceeds earnings. Dividend at risk unless FCF covers it.', severity: 'med'});
   if (s.net_debt_ebitda != null && s.net_debt_ebitda > 6) riskItems.push({label: 'Net Debt/EBITDA', value: s.net_debt_ebitda.toFixed(1)+'x', detail: 'Extreme leverage. Over 6x net debt relative to cash earnings.', severity: 'high'});
   else if (s.net_debt_ebitda != null && s.net_debt_ebitda > 4) riskItems.push({label: 'Net Debt/EBITDA', value: s.net_debt_ebitda.toFixed(1)+'x', detail: 'High leverage. Over 4x net debt relative to cash earnings.', severity: 'med'});
+  if (s.beneish_m_score != null && s.beneish_m_score > -1.78) riskItems.push({label: 'Beneish M-Score', value: s.beneish_m_score.toFixed(1), detail: 'Beneish M-Score signals possible earnings manipulation. Review financials carefully.', severity: 'high'});
+  else if (s.beneish_m_score != null && s.beneish_m_score > -2.22) riskItems.push({label: 'Beneish M-Score', value: s.beneish_m_score.toFixed(1), detail: 'Elevated earnings manipulation risk.', severity: 'med'});
+  if (s.debt_maturity_ratio != null && s.debt_maturity_ratio > 0.50) riskItems.push({label: 'Debt Maturity', value: (s.debt_maturity_ratio*100).toFixed(0)+'%', detail: 'High near-term debt maturity — refinancing risk.', severity: 'high'});
   if (riskItems.length > 0) {
     reasonsHtml += `<h4 style="margin-top:14px;margin-bottom:6px;color:var(--red);font-size:11px;text-transform:uppercase;">Risk Flags</h4>`;
     riskItems.forEach(ri => {

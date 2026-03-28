@@ -9,6 +9,21 @@ Used to blend with live blue-chip benchmarks:
 
 LAST_UPDATED = "2026-01-15"
 
+# Sector WACC estimates (Damodaran Jan 2026)
+SECTOR_WACC = {
+    "Technology": 0.099,
+    "Financial Services": 0.088,
+    "Healthcare": 0.082,
+    "Consumer Cyclical": 0.087,
+    "Consumer Defensive": 0.072,
+    "Energy": 0.091,
+    "Industrials": 0.083,
+    "Basic Materials": 0.085,
+    "Real Estate": 0.076,
+    "Utilities": 0.065,
+    "Communication Services": 0.091,
+}
+
 SECTOR_MEDIANS = {
     "Financial Services": {"pe": 12.5, "pb": 1.4, "ev_ebitda": None, "roe": 0.112},
     "Real Estate":        {"pe": 26.2, "pb": 1.6, "ev_ebitda": 16.4, "roe": 0.068},

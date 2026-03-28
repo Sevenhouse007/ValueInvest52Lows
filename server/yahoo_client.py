@@ -25,34 +25,59 @@ _executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS)
 
 
 def _fetch_yf_financials(symbol: str) -> Optional[dict]:
-    """Fetch complete income statement via yfinance (has data the API lacks)."""
+    """Fetch complete income statement + balance sheet via yfinance."""
     try:
         ticker = yf.Ticker(symbol)
-        fin = ticker.financials
-        if fin is None or fin.empty:
-            return None
-        # Extract key fields for current and prior year
-        def _get(field: str, year: int = 0) -> Optional[float]:
-            if field not in fin.index:
+
+        def _get(df, field: str, year: int = 0) -> Optional[float]:
+            if df is None or df.empty or field not in df.index:
                 return None
-            val = fin.iloc[:, year].get(field) if year < len(fin.columns) else None
-            if val is not None and not (isinstance(val, float) and val != val):  # not NaN
+            val = df.iloc[:, year].get(field) if year < len(df.columns) else None
+            if val is not None and not (isinstance(val, float) and val != val):
                 return float(val)
             return None
 
-        return {
-            "ebit": _get("EBIT"),
-            "ebitda": _get("EBITDA"),
-            "ebitda_prev": _get("EBITDA", 1),
-            "interest_expense": _get("Interest Expense"),
-            "gross_profit": _get("Gross Profit"),
-            "gross_profit_prev": _get("Gross Profit", 1),
-            "total_revenue": _get("Total Revenue"),
-            "total_revenue_prev": _get("Total Revenue", 1),
-            "total_revenue_2yr": _get("Total Revenue", 2),
-            "operating_income": _get("Operating Income"),
-            "net_income": _get("Net Income"),
+        fin = ticker.financials
+        bs = ticker.balance_sheet
+
+        result = {
+            # Income statement
+            "ebit": _get(fin, "EBIT"),
+            "ebitda": _get(fin, "EBITDA"),
+            "ebitda_prev": _get(fin, "EBITDA", 1),
+            "interest_expense": _get(fin, "Interest Expense"),
+            "gross_profit": _get(fin, "Gross Profit"),
+            "gross_profit_prev": _get(fin, "Gross Profit", 1),
+            "total_revenue": _get(fin, "Total Revenue"),
+            "total_revenue_prev": _get(fin, "Total Revenue", 1),
+            "total_revenue_2yr": _get(fin, "Total Revenue", 2),
+            "operating_income": _get(fin, "Operating Income"),
+            "net_income": _get(fin, "Net Income"),
+            "net_income_prev": _get(fin, "Net Income", 1),
+            "depreciation": _get(fin, "Reconciled Depreciation") or _get(fin, "Depreciation And Amortization In Income Statement"),
+            "sga": _get(fin, "Selling General And Administration"),
+            "sga_prev": _get(fin, "Selling General And Administration", 1),
+            # Balance sheet (current year)
+            "bs_total_assets": _get(bs, "Total Assets"),
+            "bs_total_assets_prev": _get(bs, "Total Assets", 1),
+            "bs_current_assets": _get(bs, "Current Assets") or _get(bs, "Total Current Assets"),
+            "bs_current_assets_prev": (_get(bs, "Current Assets", 1) or _get(bs, "Total Current Assets", 1)),
+            "bs_total_liabilities": _get(bs, "Total Liabilities Net Minority Interest") or _get(bs, "Total Liab"),
+            "bs_total_liabilities_prev": (_get(bs, "Total Liabilities Net Minority Interest", 1) or _get(bs, "Total Liab", 1)),
+            "bs_current_liabilities": _get(bs, "Current Liabilities") or _get(bs, "Total Current Liabilities"),
+            "bs_current_liabilities_prev": (_get(bs, "Current Liabilities", 1) or _get(bs, "Total Current Liabilities", 1)),
+            "bs_ppe": _get(bs, "Net PPE") or _get(bs, "Gross PPE"),
+            "bs_ppe_prev": (_get(bs, "Net PPE", 1) or _get(bs, "Gross PPE", 1)),
+            "bs_receivables": _get(bs, "Receivables") or _get(bs, "Accounts Receivable"),
+            "bs_receivables_prev": (_get(bs, "Receivables", 1) or _get(bs, "Accounts Receivable", 1)),
+            "bs_long_term_debt": _get(bs, "Long Term Debt"),
+            "bs_current_debt": _get(bs, "Current Debt") or _get(bs, "Current Portion Of Long Term Debt"),
+            "bs_long_term_debt_prev": _get(bs, "Long Term Debt", 1),
+            "bs_shares_outstanding": _get(bs, "Ordinary Shares Number") or _get(bs, "Share Issued"),
+            "bs_cash": _get(bs, "Cash And Cash Equivalents"),
+            "bs_short_term_investments": _get(bs, "Other Short Term Investments"),
         }
+        return result
     except Exception as e:
         logger.error(f"Error fetching yf financials for {symbol}: {e}")
         return None

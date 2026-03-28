@@ -201,7 +201,7 @@ _RUBRIC_FINANCIAL = [
 _RUBRIC_REIT = [
     ("div_yield", 30, False, "Div Yield"),
     ("pb",        25, True,  "P/B (NAV proxy)"),
-    ("ev_ebitda", 15, True,  "EV/EBITDA"),
+    # EV/EBITDA replaced by P/FFO (scored separately in extras)
     ("roe",       10, False, "ROE"),
     # P/E: low weight, no penalty (depreciation distorts it)
 ]
@@ -269,9 +269,10 @@ _RUBRIC_UTILITIES = [
 
 _RUBRIC_DEFAULT = [
     ("fpe",       28, True,  "Fwd P/E"),
-    ("pb",        18, True,  "P/B"),
+    ("pb",         8, True,  "P/B"),
     ("ev_ebitda", 18, True,  "EV/EBITDA"),
     ("roe",       14, False, "ROE"),
+    # EV/Gross Profit scored separately in extras (10 pts)
 ]
 
 
@@ -895,11 +896,233 @@ def _score_dividend_sustainability(stock: ScoredStock, sector_type: str) -> tupl
 
 
 # =====================================================================
+# New batch scoring functions
+# =====================================================================
+
+def _score_gp_to_assets(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Novy-Marx (2013) gross profitability: GP / Total Assets."""
+    if sector_type in ("financial", "reit"):
+        return 0, []
+    gpa = stock.gp_to_assets
+    if gpa is None:
+        return 0, []
+    if gpa > 0.40:
+        return 12, [f"High gross profitability (GP/A {gpa*100:.0f}%)"]
+    if gpa > 0.25:
+        return 8, [f"Good gross profitability (GP/A {gpa*100:.0f}%)"]
+    if gpa > 0.15:
+        return 4, []
+    if gpa > 0.05:
+        return 2, []
+    if gpa <= 0:
+        return -5, ["Negative gross profitability"]
+    return 0, []
+
+
+def _score_roic_vs_wacc(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """ROIC vs sector WACC spread."""
+    if sector_type in ("financial", "reit"):
+        return 0, []
+    roic = stock.roic
+    if roic is None:
+        return 0, []
+    from server.damodaran_benchmarks import SECTOR_WACC
+    wacc = SECTOR_WACC.get(stock.sector, 0.085)
+    if roic > wacc * 2:
+        return 8, [f"ROIC {roic*100:.0f}% > 2x WACC ({wacc*100:.0f}%) — exceptional value creation"]
+    if roic > wacc * 1.5:
+        return 6, [f"ROIC {roic*100:.0f}% > 1.5x WACC"]
+    if roic > wacc:
+        return 3, [f"ROIC above sector WACC"]
+    if roic > 0:
+        return -2, ["ROIC below sector WACC"]
+    return -6, ["Negative ROIC — destroying value"]
+
+
+def _score_p_ffo(stock: ScoredStock) -> tuple[int, list[str]]:
+    """P/FFO for REITs (replaces EV/EBITDA in REIT model)."""
+    pffo = stock.p_ffo
+    if pffo is None or pffo <= 0:
+        return 0, []
+    if pffo < 8:
+        return 15, [f"Very low P/FFO ({pffo:.1f}x)"]
+    if pffo < 12:
+        return 12, [f"Low P/FFO ({pffo:.1f}x)"]
+    if pffo < 16:
+        return 8, [f"Reasonable P/FFO ({pffo:.1f}x)"]
+    if pffo < 20:
+        return 4, []
+    if pffo <= 28:
+        return 0, []
+    return -5, [f"Expensive P/FFO ({pffo:.1f}x)"]
+
+
+def _score_beneish(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Beneish M-Score earnings manipulation flag."""
+    if sector_type in ("financial", "reit"):
+        return 0, []
+    m = stock.beneish_m_score
+    if m is None:
+        return 0, []
+    if m > -1.78:
+        return -10, [f"Beneish M-Score {m:.1f} — possible earnings manipulation"]
+    if m > -2.22:
+        return -5, [f"Beneish M-Score {m:.1f} — elevated manipulation risk"]
+    return 0, []
+
+
+def _score_asset_growth(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Asset growth penalty (Cooper et al. 2008 asset growth anomaly)."""
+    if sector_type == "reit":
+        return 0, []
+    ag = stock.asset_growth
+    if ag is None:
+        return 0, []
+    pts = 0
+    reasons: list[str] = []
+    if ag > 0.30:
+        pts = -5; reasons.append(f"Rapid asset growth {ag*100:.0f}% — potential overinvestment")
+    elif ag > 0.20:
+        pts = -3; reasons.append(f"High asset growth {ag*100:.0f}%")
+    elif ag < -0.10:
+        pts = 3; reasons.append("Asset base shrinking — potential restructuring value")
+    # Modifier: if high growth but strong FCF yield, reduce penalty
+    if pts < 0:
+        ev = stock.enterprise_value
+        denom = ev if ev and ev > 0 else stock.market_cap
+        if stock.free_cash_flow and denom and denom > 0:
+            fcf_y = stock.free_cash_flow / denom
+            if fcf_y > 0.05:
+                pts = int(pts * 0.5)
+                reasons.append("Penalty reduced — strong FCF yield")
+    return pts, reasons
+
+
+def _score_institutional_ownership(stock: ScoredStock) -> tuple[int, list[str]]:
+    """Institutional ownership signal."""
+    inst = stock.held_pct_institutions
+    if inst is None:
+        return 0, []
+    pct = inst * 100 if inst < 1 else inst
+    if pct < 15:
+        return 4, [f"Low institutional ownership {pct:.0f}% — undiscovered"]
+    if pct < 30:
+        return 2, []
+    if pct > 80:
+        return -3, [f"Crowded institutional ownership {pct:.0f}%"]
+    return 0, []
+
+
+def _score_shareholder_yield(stock: ScoredStock) -> tuple[int, list[str]]:
+    """Combined shareholder yield (dividend + buyback)."""
+    sy = stock.shareholder_yield
+    if sy is None or sy <= 0:
+        return 0, []
+    if sy > 0.08:
+        return 6, [f"High shareholder yield {sy*100:.1f}%"]
+    if sy > 0.05:
+        return 4, [f"Solid shareholder yield {sy*100:.1f}%"]
+    if sy > 0.03:
+        return 2, []
+    return 0, []
+
+
+def _score_debt_maturity(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Debt maturity refinancing risk."""
+    if sector_type in ("utility", "reit"):
+        return 0, []
+    mr = stock.debt_maturity_ratio
+    if mr is None:
+        return 0, []
+    pts = 0
+    reasons: list[str] = []
+    if mr > 0.50:
+        pts = -8; reasons.append(f"High near-term debt maturity ({mr*100:.0f}% of LTD due soon)")
+    elif mr > 0.30:
+        pts = -4; reasons.append(f"Elevated debt maturity ratio ({mr*100:.0f}%)")
+    # Compound: high maturity + thin interest coverage
+    ic = stock.interest_coverage
+    if pts < 0 and ic is not None and ic < 2.0:
+        pts -= 5; reasons.append("Maturity risk + thin coverage = refinancing risk")
+    return pts, reasons
+
+
+def _score_ncav(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
+    """Graham NCAV (Net-Net) deep value bonus."""
+    if sector_type in ("financial", "reit"):
+        return 0, []
+    ncav_ps = stock.ncav_per_share
+    price = stock.price
+    if ncav_ps is None or price is None or price <= 0 or ncav_ps <= 0:
+        return 0, []
+    ratio = price / ncav_ps
+    pts = 0
+    reasons: list[str] = []
+    if ratio < 1.0:
+        pts = 15; reasons.append(f"True net-net: trading below NCAV ({ratio:.1f}x)")
+    elif ratio < 1.5:
+        pts = 8; reasons.append(f"Near net-net value ({ratio:.1f}x NCAV)")
+    elif ratio < 2.0:
+        pts = 3; reasons.append(f"Close to NCAV ({ratio:.1f}x)")
+    # F-Score cross-check
+    if pts > 0:
+        fs = stock.piotroski_f_score
+        if fs is not None and fs >= 7:
+            pts += 5; reasons.append("NCAV + strong F-Score")
+        elif fs is not None and fs <= 3:
+            pts = int(pts * 0.5); reasons.append("NCAV discounted — weak fundamentals")
+    return pts, reasons
+
+
+def _is_biotech(stock: ScoredStock) -> bool:
+    """Detect pre-revenue biotech within Healthcare sector."""
+    if stock.sector != "Healthcare":
+        return False
+    ebitda = stock.ebitda
+    rev = stock.gross_profit  # use as proxy for revenue scale
+    dy = stock.dividend_yield
+    gp = stock.gross_profit
+    ta = stock.total_assets
+    if ebitda is None or ebitda >= 0:
+        return False
+    # Revenue below $100M or no gross profit
+    total_rev = None
+    if stock.price_to_sales and stock.market_cap and stock.price_to_sales > 0:
+        total_rev = stock.market_cap / stock.price_to_sales
+    if total_rev and total_rev > 100_000_000:
+        return False
+    if dy and dy > 0:
+        return False
+    return True
+
+
+def _score_biotech_cash_runway(stock: ScoredStock) -> tuple[int, list[str]]:
+    """Cash runway signal for pre-revenue biotech."""
+    cash = (stock.total_cash or 0)
+    ocf = stock.operating_cashflow
+    if ocf is None or ocf >= 0:
+        return -5, ["Biotech: cannot compute cash runway"]
+    quarterly_burn = abs(ocf) / 4
+    if quarterly_burn <= 0:
+        return -5, ["Biotech: cannot compute cash runway"]
+    runway = cash / quarterly_burn
+    if runway > 8:
+        return 8, [f"Biotech: {runway:.0f} quarters cash runway"]
+    if runway > 6:
+        return 4, [f"Biotech: {runway:.0f} quarters runway"]
+    if runway > 4:
+        return 0, [f"Biotech: {runway:.0f} quarters runway"]
+    if runway > 2:
+        return -10, [f"Biotech: only {runway:.1f} quarters runway — dilution risk"]
+    return -20, [f"Biotech: critical — {runway:.1f} quarters runway"]
+
+
+# =====================================================================
 # Universal scoring wrapper
 # =====================================================================
 
 def _score_universal(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
-    """All 13 changes integrated into universal signal pipeline."""
+    """All scoring signals integrated into universal pipeline."""
     pts = 0
     reasons: list[str] = []
     red_flag_count = 0
@@ -946,6 +1169,30 @@ def _score_universal(stock: ScoredStock, sector_type: str) -> tuple[int, list[st
     pts += p; reasons.extend(r)
     if p <= -10:
         red_flag_count += 1
+
+    # Beneish M-Score
+    p, r = _score_beneish(stock, sector_type)
+    pts += p; reasons.extend(r)
+    if p <= -8:
+        red_flag_count += 1
+
+    # Asset growth penalty
+    p, r = _score_asset_growth(stock, sector_type)
+    pts += p; reasons.extend(r)
+
+    # Shareholder yield bonus
+    p, r = _score_shareholder_yield(stock)
+    pts += p; reasons.extend(r)
+
+    # Debt maturity risk
+    p, r = _score_debt_maturity(stock, sector_type)
+    pts += p; reasons.extend(r)
+    if p <= -8:
+        red_flag_count += 1
+
+    # Graham NCAV net-net bonus
+    p, r = _score_ncav(stock, sector_type)
+    pts += p; reasons.extend(r)
 
     # Change C: Historical mean reversion (Value Score)
     p, r = _score_historical_mean_reversion(stock, sector_type)
@@ -994,11 +1241,33 @@ def _score_with_rubric(
     elif sector_type == "reit":
         p, r = _score_reit_fpe(stock, avg)
         pts += p; reasons.extend(r)
+        # P/FFO replaces EV/EBITDA for REITs
+        p, r = _score_p_ffo(stock)
+        pts += p; reasons.extend(r)
     elif sector_type == "energy":
         p, r = _score_energy_pcf(stock)
         pts += p; reasons.extend(r)
     elif sector_type == "comms":
         p, r = _score_china_adr(stock)
+        pts += p; reasons.extend(r)
+
+    # EV/Gross Profit for Default/Tech sector (10 pts)
+    if sector_type == "default":
+        evgp = stock.ev_gross_profit
+        if evgp is not None and stock.gross_profit and stock.gross_profit > 0:
+            if evgp < 3:
+                pts += 10; reasons.append(f"Very low EV/Gross Profit ({evgp:.1f}x)")
+            elif evgp < 6:
+                pts += 7; reasons.append(f"Low EV/Gross Profit ({evgp:.1f}x)")
+            elif evgp < 10:
+                pts += 4
+            elif evgp < 15:
+                pts += 1
+
+    # Biotech detection and cash runway (Healthcare)
+    if sector_type == "healthcare" and _is_biotech(stock):
+        # Skip normal valuation metrics — already applied via rubric but biotech overrides
+        p, r = _score_biotech_cash_runway(stock)
         pts += p; reasons.extend(r)
 
     # 4. FCF yield (for sectors that use it)
@@ -1214,11 +1483,13 @@ def compute_quality_score(
         elif fy < -0.05:
             pts -= 5; reasons.append("Burning cash")
 
-    # ── Buyback yield (5 pts max) ──
+    # ── Buyback yield (8 pts max when near 52W low) ──
     bb = stock.buyback_yield
     if bb is not None:
         if bb > 0.02:
-            pts += 5; reasons.append("Active buybacks")
+            # Increase to +8 when at bottom of 52W range (all stocks in scan qualify)
+            bb_pts = 8 if (stock.fifty_two_week_high and stock.price and stock.fifty_two_week_high > 0 and (stock.price - stock.fifty_two_week_low) / (stock.fifty_two_week_high - stock.fifty_two_week_low) < 0.20) else 5
+            pts += bb_pts; reasons.append(f"Active buybacks at 52W low (+{bb_pts})")
         elif bb < -0.03:
             pts -= 3; reasons.append("Share dilution")
 
@@ -1285,6 +1556,18 @@ def compute_quality_score(
 
     # Change A: Accruals quality (Quality Score)
     p, r = _score_accruals_quality_q(stock, st)
+    pts += p; reasons.extend(r)
+
+    # Gross profitability (Novy-Marx)
+    p, r = _score_gp_to_assets(stock, st)
+    pts += p; reasons.extend(r)
+
+    # ROIC vs WACC spread
+    p, r = _score_roic_vs_wacc(stock, st)
+    pts += p; reasons.extend(r)
+
+    # Institutional ownership
+    p, r = _score_institutional_ownership(stock)
     pts += p; reasons.extend(r)
 
     # Change B: EPS revision momentum (Quality Score)

@@ -187,12 +187,119 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
 
     # ── Change C: Historical mean reversion fields ──
     five_yr_avg_dy = _safe_raw(summary, "fiveYearAvgDividendYield")
-    # Yahoo always returns fiveYearAvgDividendYield as percentage (e.g., 3.5 = 3.5%)
-    # dividendYield is returned as decimal (e.g., 0.035 = 3.5%)
-    # Always convert to decimal for consistency
     if five_yr_avg_dy is not None and five_yr_avg_dy > 0.5:
         five_yr_avg_dy = five_yr_avg_dy / 100
     trailing_pe = _safe_raw(summary, "trailingPE")
+
+    # ── New batch: GP/A, FFO, Beneish, asset growth, NCAV, debt maturity, etc. ──
+    yf_gp = yf_fin.get("gross_profit")
+    yf_bs_ta = yf_fin.get("bs_total_assets")
+    yf_bs_ta_prev = yf_fin.get("bs_total_assets_prev")
+    yf_deprec = yf_fin.get("depreciation")
+    yf_ni_cur = yf_fin.get("net_income")
+    yf_ni_prev = yf_fin.get("net_income_prev")
+    yf_rev = yf_fin.get("total_revenue")
+    yf_rev_prev = yf_fin.get("total_revenue_prev")
+
+    # Use yfinance balance sheet total assets (more reliable than ROA-derived)
+    if yf_bs_ta and yf_bs_ta > 0:
+        bs_total_assets = yf_bs_ta
+
+    # GP/A (Novy-Marx gross profitability)
+    gp_to_assets = None
+    if yf_gp and bs_total_assets and bs_total_assets > 0:
+        gp_to_assets = round(yf_gp / bs_total_assets, 4)
+
+    # EV / Gross Profit (for tech sector model)
+    ev_gp = None
+    if ev and ev > 0 and yf_gp and yf_gp > 0:
+        ev_gp = round(ev / yf_gp, 2)
+
+    # FFO (Funds From Operations) for REITs: net income + depreciation
+    ffo_val = None
+    p_ffo = None
+    if yf_ni_cur is not None and yf_deprec and yf_deprec > 0:
+        ffo_val = yf_ni_cur + abs(yf_deprec)
+    mc_val_raw = _safe_raw(summary, "marketCap") or _safe_raw(data.get("price", {}), "marketCap")
+    if ffo_val and ffo_val > 0 and mc_val_raw and mc_val_raw > 0:
+        p_ffo = round(mc_val_raw / ffo_val, 2)
+
+    # Asset growth
+    asset_growth_val = None
+    if yf_bs_ta and yf_bs_ta_prev and yf_bs_ta_prev > 0:
+        asset_growth_val = round((yf_bs_ta - yf_bs_ta_prev) / yf_bs_ta_prev, 4)
+
+    # Institutional ownership
+    held_inst = _safe_raw(stats, "heldPercentInstitutions")
+
+    # Debt maturity ratio
+    yf_ltd = yf_fin.get("bs_long_term_debt")
+    yf_current_debt = yf_fin.get("bs_current_debt")
+    debt_mat_ratio = None
+    if yf_current_debt and yf_ltd and yf_ltd > 0:
+        debt_mat_ratio = round(yf_current_debt / yf_ltd, 4)
+
+    # NCAV (Graham Net-Net)
+    yf_ca = yf_fin.get("bs_current_assets")
+    yf_tl = yf_fin.get("bs_total_liabilities")
+    yf_shares = yf_fin.get("bs_shares_outstanding") or _safe_raw(stats, "sharesOutstanding")
+    ncav_val = None
+    ncav_ps = None
+    if yf_ca is not None and yf_tl is not None:
+        ncav_val = yf_ca - yf_tl
+        if yf_shares and yf_shares > 0:
+            ncav_ps = round(ncav_val / yf_shares, 2)
+
+    # Shareholder yield = dividend yield + buyback yield
+    div_y = _safe_raw(summary, "dividendYield") or 0
+    sh_yield = None
+    if bb_yield is not None:
+        sh_yield = round(div_y + bb_yield, 4)
+
+    # Beneish M-Score (requires 2 years of data)
+    beneish = None
+    if (yf_rev and yf_rev_prev and yf_bs_ta and yf_bs_ta_prev
+            and yf_gp and yf_fin.get("gross_profit_prev")
+            and yf_rev_prev > 0 and yf_bs_ta_prev > 0):
+        try:
+            recv = yf_fin.get("bs_receivables") or 0
+            recv_prev = yf_fin.get("bs_receivables_prev") or 0
+            ca = yf_ca or 0
+            ca_prev = yf_fin.get("bs_current_assets_prev") or 0
+            ppe = yf_fin.get("bs_ppe") or 0
+            ppe_prev = yf_fin.get("bs_ppe_prev") or 0
+            dep = abs(yf_deprec) if yf_deprec else 0
+            sga = yf_fin.get("sga") or 0
+            sga_prev = yf_fin.get("sga_prev") or 0
+            ltd = yf_ltd or 0
+            ltd_prev = yf_fin.get("bs_long_term_debt_prev") or 0
+            cl = yf_fin.get("bs_current_liabilities") or 0
+            cl_prev = yf_fin.get("bs_current_liabilities_prev") or 0
+
+            def _safe_div(a, b):
+                return a / b if b and b != 0 else 1.0
+
+            dsri = _safe_div(recv / yf_rev, recv_prev / yf_rev_prev) if yf_rev > 0 and yf_rev_prev > 0 and recv_prev > 0 else 1.0
+            gm_cur = (yf_rev - (yf_rev - yf_gp)) / yf_rev if yf_rev > 0 else 0
+            gm_prev_val = yf_fin.get("gross_profit_prev")
+            gm_pr = gm_prev_val / yf_rev_prev if yf_rev_prev > 0 and gm_prev_val else 0
+            gmi = _safe_div(gm_pr, gm_cur) if gm_cur > 0 else 1.0
+            aqi_cur = 1 - (ca + ppe) / yf_bs_ta if yf_bs_ta > 0 else 0
+            aqi_prev = 1 - (ca_prev + ppe_prev) / yf_bs_ta_prev if yf_bs_ta_prev > 0 else 0
+            aqi = _safe_div(aqi_cur, aqi_prev) if aqi_prev != 0 else 1.0
+            sgi = _safe_div(yf_rev, yf_rev_prev)
+            depi_cur = dep / (ppe + dep) if (ppe + dep) > 0 else 0
+            depi_prev = dep / (ppe_prev + dep) if (ppe_prev + dep) > 0 else 0
+            depi = _safe_div(depi_prev, depi_cur) if depi_cur > 0 else 1.0
+            sgai = _safe_div(sga / yf_rev, sga_prev / yf_rev_prev) if yf_rev > 0 and yf_rev_prev > 0 and sga_prev > 0 else 1.0
+            lvgi_cur = (ltd + cl) / yf_bs_ta if yf_bs_ta > 0 else 0
+            lvgi_prev = (ltd_prev + cl_prev) / yf_bs_ta_prev if yf_bs_ta_prev > 0 else 0
+            lvgi = _safe_div(lvgi_cur, lvgi_prev) if lvgi_prev > 0 else 1.0
+            tata = (yf_ni_cur - ocf) / yf_bs_ta if yf_bs_ta > 0 and yf_ni_cur is not None and ocf is not None else 0
+
+            beneish = round(-4.84 + 0.920*dsri + 0.528*gmi + 0.404*aqi + 0.892*sgi + 0.115*depi - 0.172*sgai + 4.679*tata - 0.327*lvgi, 2)
+        except Exception:
+            beneish = None
 
     return StockFundamentals(
         symbol=symbol,
@@ -212,6 +319,10 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         interest_expense=interest_exp,
         payout_ratio=payout,
         total_assets=bs_total_assets,
+        total_assets_prior=yf_bs_ta_prev,
+        total_current_assets=yf_ca,
+        total_current_liabilities=yf_fin.get("bs_current_liabilities"),
+        total_liabilities=yf_tl,
         net_debt_ebitda=net_debt_ebitda,
         interest_coverage=interest_cov,
         altman_z_score=altman_z,
@@ -239,6 +350,22 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         eps_surprise_trend=eps_surprise_trend,
         five_year_avg_div_yield=five_yr_avg_dy,
         trailing_pe=trailing_pe,
+        gp_to_assets=gp_to_assets,
+        gross_profit=yf_gp,
+        ev_gross_profit=ev_gp,
+        ffo=ffo_val,
+        p_ffo=p_ffo,
+        beneish_m_score=beneish,
+        asset_growth=asset_growth_val,
+        held_pct_institutions=held_inst,
+        depreciation_amortization=yf_deprec,
+        current_long_term_debt=yf_current_debt,
+        total_long_term_debt=yf_ltd,
+        ncav=ncav_val,
+        ncav_per_share=ncav_ps,
+        shares_outstanding=yf_shares,
+        shareholder_yield=sh_yield,
+        debt_maturity_ratio=debt_mat_ratio,
         sector=profile.get("sector", ""),
         industry=profile.get("industry", ""),
         country=profile.get("country", ""),
@@ -640,6 +767,23 @@ def merge_quote_and_fundamentals(
         s.eps_surprise_trend = fundamentals.eps_surprise_trend
         s.five_year_avg_div_yield = fundamentals.five_year_avg_div_yield
         s.trailing_pe = fundamentals.trailing_pe
+        s.gp_to_assets = fundamentals.gp_to_assets
+        s.gross_profit = fundamentals.gross_profit
+        s.ev_gross_profit = fundamentals.ev_gross_profit
+        s.ffo = fundamentals.ffo
+        s.p_ffo = fundamentals.p_ffo
+        s.beneish_m_score = fundamentals.beneish_m_score
+        s.asset_growth = fundamentals.asset_growth
+        s.held_pct_institutions = fundamentals.held_pct_institutions
+        s.total_assets_prior = fundamentals.total_assets_prior
+        s.depreciation_amortization = fundamentals.depreciation_amortization
+        s.current_long_term_debt = fundamentals.current_long_term_debt
+        s.total_long_term_debt = fundamentals.total_long_term_debt
+        s.ncav = fundamentals.ncav
+        s.ncav_per_share = fundamentals.ncav_per_share
+        s.shares_outstanding = fundamentals.shares_outstanding
+        s.shareholder_yield = fundamentals.shareholder_yield
+        s.debt_maturity_ratio = fundamentals.debt_maturity_ratio
         s.debt_to_equity = fundamentals.debt_to_equity
         s.ev_to_revenue = fundamentals.ev_to_revenue
         s.revenue_growth = fundamentals.revenue_growth
