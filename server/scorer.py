@@ -359,8 +359,11 @@ def _score_reit_fpe(stock: ScoredStock, avg: Optional[SectorAverages]) -> tuple[
 
 
 def _score_china_adr(stock: ScoredStock) -> tuple[int, list[str]]:
+    from server.config import CHINA_ADR_PENALTY
     if (stock.country or "") in _CHINA_COUNTRIES:
-        return -20, ["China ADR — delisting/regulatory risk"]
+        if CHINA_ADR_PENALTY == 0:
+            return 0, []
+        return CHINA_ADR_PENALTY, [f"China ADR regulatory discount ({CHINA_ADR_PENALTY} pts)"]
     return 0, []
 
 

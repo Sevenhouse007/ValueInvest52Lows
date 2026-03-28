@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HOST, PORT
-from server.database import get_latest_scan, get_latest_scan_averages, get_scan_by_date, get_scan_history, init_db, save_scan
+from server.database import get_latest_scan, get_latest_scan_averages, get_scan_by_date, get_scan_history, get_stock_history, init_db, save_performance_tracking, save_scan
 from server.models import ScanResult, ScanSummary
 from server.pipeline import merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
 from server.scorer import compute_quality_score, compute_score
@@ -40,6 +40,37 @@ async def scheduled_refresh():
     await _do_refresh()
 
 
+async def premarket_refresh():
+    """Lightweight 7 AM ET job — update prices only, no fundamentals."""
+    global _yahoo_client
+    logger.info("Pre-market price refresh starting...")
+    try:
+        if _yahoo_client is None:
+            _yahoo_client = YahooClient()
+        latest = get_latest_scan()
+        if not latest or not latest.stocks:
+            logger.info("No scan data for pre-market refresh")
+            return
+        import yfinance as yf
+        symbols = [s.symbol for s in latest.stocks[:50]]  # top 50 by score
+        logger.info(f"Fetching pre-market prices for {len(symbols)} stocks...")
+        tickers = yf.Tickers(" ".join(symbols))
+        updated = 0
+        for sym in symbols:
+            try:
+                info = tickers.tickers[sym].info
+                price = info.get("regularMarketPrice") or info.get("currentPrice")
+                low = info.get("fiftyTwoWeekLow")
+                if price and low and price > low * 1.15:
+                    logger.info(f"  {sym}: ${price:.2f} — 15%+ above 52W low, possible exit")
+                updated += 1
+            except Exception:
+                pass
+        logger.info(f"Pre-market refresh complete: {updated} stocks checked")
+    except Exception as e:
+        logger.error(f"Pre-market refresh failed: {e}")
+
+
 async def _do_refresh() -> Optional[ScanResult]:
     global _is_refreshing, _yahoo_client
     async with _refresh_lock:
@@ -49,7 +80,18 @@ async def _do_refresh() -> Optional[ScanResult]:
                 _yahoo_client = YahooClient()
             result = await run_pipeline(_yahoo_client)
             save_scan(result)
+            save_performance_tracking(result.scan_date, result.stocks)
             logger.info(f"Scan saved: {result.scan_date} — {result.total_stocks} stocks")
+            # Send notifications
+            try:
+                from server.notifications import send_daily_digest
+                prev_scan = get_scan_by_date(
+                    (datetime.now(timezone.utc) - __import__('datetime').timedelta(days=1)).strftime("%Y-%m-%d")
+                )
+                prev_symbols = {s.symbol for s in prev_scan.stocks} if prev_scan else set()
+                send_daily_digest(result.scan_date, result.stocks, prev_symbols)
+            except Exception as e:
+                logger.warning(f"Notification failed: {e}")
             return result
         except Exception:
             logger.exception("Pipeline refresh failed")
@@ -70,6 +112,17 @@ async def lifespan(app: FastAPI):
             timezone="US/Eastern",
         ),
         id="daily_scan",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        premarket_refresh,
+        CronTrigger(
+            hour=7,
+            minute=0,
+            day_of_week="mon-fri",
+            timezone="US/Eastern",
+        ),
+        id="premarket_refresh",
         replace_existing=True,
     )
     scheduler.start()
@@ -153,6 +206,41 @@ async def get_spark(symbol: str):
     return data
 
 
+@app.get("/api/settings")
+async def get_settings():
+    """Return current configurable settings."""
+    from server import config
+    return {
+        "china_adr_penalty": config.CHINA_ADR_PENALTY,
+        "use_damodaran_blend": config.USE_DAMODARAN_BLEND,
+        "notify_enabled": config.NOTIFY_ENABLED,
+        "notify_top_n": config.NOTIFY_TOP_N,
+    }
+
+
+@app.post("/api/settings")
+async def update_settings(body: dict):
+    """Update configurable settings at runtime."""
+    from server import config
+    if "china_adr_penalty" in body:
+        val = int(body["china_adr_penalty"])
+        config.CHINA_ADR_PENALTY = max(-25, min(0, val))
+    if "use_damodaran_blend" in body:
+        config.USE_DAMODARAN_BLEND = bool(body["use_damodaran_blend"])
+    if "notify_enabled" in body:
+        config.NOTIFY_ENABLED = bool(body["notify_enabled"])
+    return await get_settings()
+
+
+@app.get("/api/stock/{symbol}/history")
+async def stock_history(symbol: str):
+    """Return score history for a single stock across all scan dates."""
+    history = get_stock_history(symbol)
+    if not history:
+        raise HTTPException(404, f"No history for {symbol}")
+    return history
+
+
 @app.get("/api/lookup/{symbol}")
 async def lookup_stock(symbol: str):
     """Fetch, score, and return a single stock by symbol."""
@@ -228,12 +316,28 @@ def _build_response(result: ScanResult) -> dict:
         top_sector=top_sector,
         top_sector_count=top_count,
     )
+    # Compute rolling averages and days_in_scan from historical data
+    stock_dicts = []
+    for s in stocks:
+        d = s.model_dump()
+        hist = get_stock_history(s.symbol)
+        if len(hist) >= 2:
+            recent = hist[:5]  # last 5 scans
+            d["rolling_value_score"] = round(sum(h["value_score"] for h in recent) / len(recent))
+            d["rolling_quality_score"] = round(sum(h["quality_score"] for h in recent) / len(recent))
+            d["days_in_scan"] = len(hist)
+        else:
+            d["rolling_value_score"] = s.value_score
+            d["rolling_quality_score"] = s.quality_score
+            d["days_in_scan"] = 1
+        stock_dicts.append(d)
+
     return {
         "scan_date": result.scan_date,
         "scanned_at": result.scanned_at,
         "summary": summary.model_dump(),
         "quality_buy_count": len(quality_buys),
-        "stocks": [s.model_dump() for s in stocks],
+        "stocks": stock_dicts,
         "sector_averages": {k: v.model_dump() for k, v in result.sector_averages.items()},
     }
 

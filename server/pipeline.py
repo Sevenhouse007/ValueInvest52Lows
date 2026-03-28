@@ -12,7 +12,9 @@ from server.config import (
     OUTLIER_FPE_MAX,
     OUTLIER_PB_MAX,
     SECTOR_BENCHMARK_TICKERS,
+    USE_DAMODARAN_BLEND,
 )
+from server.damodaran_benchmarks import blend_with_damodaran
 from server.models import ScanResult, ScoredStock, SectorAverages, StockFundamentals, StockQuote
 from server.scorer import compute_quality_score, compute_score
 from server.yahoo_client import YahooClient
@@ -699,6 +701,15 @@ async def run_pipeline(client: Optional[YahooClient] = None) -> ScanResult:
         # Step 5b: Fetch market-level sector benchmarks from blue chips
         logger.info("Step 5b: Fetching market benchmark averages...")
         market_averages = await compute_market_sector_averages(client)
+
+        # Blend with Damodaran medians if enabled
+        if USE_DAMODARAN_BLEND:
+            logger.info("Blending market averages with Damodaran sector medians (60/40)...")
+            for sector, avg in market_averages.items():
+                blended = blend_with_damodaran(sector, avg.model_dump())
+                for k, v in blended.items():
+                    if v is not None:
+                        setattr(avg, k, v)
 
         # Attach all averages to each stock
         for s in stocks:

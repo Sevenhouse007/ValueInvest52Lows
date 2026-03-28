@@ -93,14 +93,26 @@ class YahooClient:
         self._crumb = None
         self._ensure_session()
 
-    def _sync_get(self, url: str, params: Optional[dict] = None) -> dict:
-        """Sync GET using the yfinance session, with 401 retry."""
+    def _sync_get(self, url: str, params: Optional[dict] = None, max_retries: int = 3) -> dict:
+        """Sync GET with exponential backoff on 429/5xx and crumb refresh on 401."""
+        import time as _time
         self._ensure_session()
-        resp = self._session.get(url, params=params)
-        if resp.status_code == 401:
-            logger.warning("Got 401, refreshing session...")
-            self._refresh_session()
+        for attempt in range(max_retries + 1):
             resp = self._session.get(url, params=params)
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code == 401:
+                logger.warning(f"401 on attempt {attempt+1}, refreshing session...")
+                self._refresh_session()
+                if params and "crumb" in params:
+                    params["crumb"] = self._crumb
+                continue
+            if resp.status_code == 429 or resp.status_code >= 500:
+                wait = 2 ** (attempt + 1)  # 2, 4, 8 seconds
+                logger.warning(f"HTTP {resp.status_code} on {url[:60]}, retry {attempt+1}/{max_retries} in {wait}s")
+                _time.sleep(wait)
+                continue
+            resp.raise_for_status()
         resp.raise_for_status()
         return resp.json()
 
@@ -132,30 +144,41 @@ class YahooClient:
         loop = asyncio.get_event_loop()
 
         def _fetch():
+            import time as _time
             self._ensure_session()
             url = YAHOO_QUOTE_SUMMARY_URL.format(symbol=symbol)
             params = {
                 "modules": "defaultKeyStatistics,financialData,summaryDetail,assetProfile,insiderTransactions,incomeStatementHistory,price,earningsHistory",
                 "crumb": self._crumb,
             }
-            try:
-                resp = self._session.get(url, params=params)
-                if resp.status_code == 401:
-                    self._refresh_session()
-                    params["crumb"] = self._crumb
+            for attempt in range(3):
+                try:
                     resp = self._session.get(url, params=params)
-                if resp.status_code != 200:
-                    logger.warning(f"quoteSummary {symbol}: HTTP {resp.status_code}")
-                    return None
-                data = resp.json()
-                result = data.get("quoteSummary", {}).get("result", [])
-                if not result:
-                    logger.warning(f"No quoteSummary result for {symbol}")
-                    return None
-                return result[0]
-            except Exception as e:
-                logger.error(f"Error fetching {symbol}: {e}")
-                return None
+                    if resp.status_code == 401:
+                        logger.warning(f"401 for {symbol}, refreshing session (attempt {attempt+1})")
+                        self._refresh_session()
+                        params["crumb"] = self._crumb
+                        continue
+                    if resp.status_code == 429 or resp.status_code >= 500:
+                        wait = 2 ** (attempt + 1)
+                        logger.warning(f"HTTP {resp.status_code} for {symbol}, retry in {wait}s")
+                        _time.sleep(wait)
+                        continue
+                    if resp.status_code != 200:
+                        logger.warning(f"quoteSummary {symbol}: HTTP {resp.status_code}")
+                        return None
+                    data = resp.json()
+                    result = data.get("quoteSummary", {}).get("result", [])
+                    if not result:
+                        logger.warning(f"No quoteSummary result for {symbol}")
+                        return None
+                    return result[0]
+                except Exception as e:
+                    logger.error(f"Error fetching {symbol} (attempt {attempt+1}): {e}")
+                    if attempt < 2:
+                        _time.sleep(2 ** (attempt + 1))
+            logger.error(f"All retries exhausted for {symbol}")
+            return None
 
         async with self._semaphore:
             result = await loop.run_in_executor(_executor, _fetch)

@@ -62,6 +62,26 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_scan_stocks_score
             ON scan_stocks(value_score DESC)
         """)
+        # Performance tracking table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scan_performance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                scan_date TEXT NOT NULL,
+                price_at_scan REAL,
+                price_30d REAL,
+                price_90d REAL,
+                price_180d REAL,
+                return_30d REAL,
+                return_90d REAL,
+                return_180d REAL,
+                value_score INTEGER,
+                quality_score INTEGER,
+                UNIQUE(scan_date, symbol)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_perf_symbol ON scan_performance(symbol)")
+
         # Migration: add market_sector_averages_json if not present
         try:
             conn.execute("SELECT market_sector_averages_json FROM scans LIMIT 1")
@@ -136,6 +156,41 @@ def get_latest_scan_averages() -> tuple[dict, dict]:
         sec = {k: SectorAverages(**v) for k, v in json.loads(row["sector_averages_json"] or "{}").items()}
         mkt = {k: SectorAverages(**v) for k, v in json.loads(row["market_sector_averages_json"] or "{}").items()}
         return sec, mkt
+
+
+def get_stock_history(symbol: str) -> list[dict]:
+    """Get score history for a single stock across all scan dates."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT scan_date, data_json, value_score FROM scan_stocks WHERE symbol = ? ORDER BY scan_date DESC",
+            (symbol.upper(),),
+        ).fetchall()
+        results = []
+        for r in rows:
+            data = json.loads(r["data_json"])
+            results.append({
+                "scan_date": r["scan_date"],
+                "value_score": r["value_score"],
+                "quality_score": data.get("quality_score", 0),
+                "price": data.get("price", 0),
+                "score_tier": data.get("score_tier", ""),
+                "quality_tier": data.get("quality_tier", ""),
+                "score_reasons": data.get("score_reasons", []),
+            })
+        return results
+
+
+def save_performance_tracking(scan_date: str, stocks: list):
+    """Save performance tracking rows for future return calculation."""
+    with get_db() as conn:
+        for s in stocks:
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO scan_performance (symbol, scan_date, price_at_scan, value_score, quality_score) VALUES (?, ?, ?, ?, ?)",
+                    (s.symbol, scan_date, s.price, s.value_score, s.quality_score),
+                )
+            except Exception:
+                pass
 
 
 def get_scan_history() -> list[ScanHistoryEntry]:

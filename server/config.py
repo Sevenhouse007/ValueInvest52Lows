@@ -54,6 +54,23 @@ SECTOR_BENCHMARK_TICKERS = {
     "Real Estate": ["PLD", "AMT", "EQIX", "SPG", "O"],
 }
 
+# Damodaran blend
+USE_DAMODARAN_BLEND = os.getenv("USE_DAMODARAN_BLEND", "true").lower() == "true"
+
+# China ADR configurable penalty
+CHINA_ADR_PENALTY = int(os.getenv("CHINA_ADR_PENALTY", "-20"))
+
+# Notifications
+NOTIFY_ENABLED = os.getenv("NOTIFY_ENABLED", "false").lower() == "true"
+NOTIFY_TOP_N = int(os.getenv("NOTIFY_TOP_N", "10"))
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+NOTIFY_FROM = os.getenv("NOTIFY_FROM", "")
+NOTIFY_TO = os.getenv("NOTIFY_TO", "")
+
 # Scoring thresholds
 OUTLIER_FPE_MAX = 100
 OUTLIER_PB_MAX = 20
