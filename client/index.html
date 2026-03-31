@@ -514,6 +514,7 @@ function detailPanel(s) {
 
   const metrics = showInd ? [
     ['Forward P/E', fmtN(s.forward_pe,1), fmtN(s.market_avg_fpe,1), fmtN(s.industry_avg_fpe,1)],
+    ['Trailing P/E', fmtN(s.trailing_pe,1), '—', '—'],
     ['Price/Book', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2), fmtN(s.industry_avg_pb,2)],
     ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1), fmtN(s.industry_avg_ev_ebitda,1)],
     ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe), fmtROE(s.industry_avg_roe)],
@@ -529,6 +530,7 @@ function detailPanel(s) {
     ['Insider Activity', fmtInsider(s.insider_buy_count, s.insider_sell_count), '—', '—'],
   ] : [
     ['Forward P/E', fmtN(s.forward_pe,1), fmtN(s.market_avg_fpe,1)],
+    ['Trailing P/E', fmtN(s.trailing_pe,1), '—'],
     ['Price/Book', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2)],
     ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1)],
     ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe)],
@@ -957,6 +959,7 @@ function renderLookupResult(s) {
   // Key metrics grid
   const metrics = [
     ['Fwd P/E', fmtN(s.forward_pe,1), fmtN(s.market_avg_fpe,1)],
+    ['Trailing P/E', fmtN(s.trailing_pe,1), '—'],
     ['P/B', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2)],
     ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1)],
     ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe)],
