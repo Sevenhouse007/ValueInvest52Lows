@@ -91,7 +91,7 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .metric-item .lbl { color:var(--text2); }
 .reasons-list { list-style:none; }
 .reasons-list li { padding:3px 0; font-size:12px; }
-.reasons-list li::before { content:"\\2713 "; color:var(--green); font-weight:bold; }
+.reasons-list li::before { content:"\2713  "; color:var(--green); font-weight:bold; }
 .sparkline-container { height:120px; }
 .sparkline-container canvas { width:100%; height:100%; }
 
@@ -552,8 +552,9 @@ function detailPanel(s) {
   metricsHtml += `<div style="${hdrStyle}">Mkt Avg</div>`;
   if (showInd) metricsHtml += `<div style="${hdrStyle}">Ind (${s.industry_peer_count})</div>`;
   metrics.forEach(row => {
+    const isNeg = typeof row[1] === 'string' && row[1] !== '—' && parseFloat(row[1]) < 0;
     metricsHtml += `<div style="${cellStyle};color:var(--text2)">${row[0]}</div>`;
-    metricsHtml += `<div style="${cellStyle}">${row[1]}</div>`;
+    metricsHtml += `<div style="${cellStyle};${isNeg?'color:var(--red)':''}">${row[1]}</div>`;
     metricsHtml += `<div style="${cellStyle};color:var(--blue)">${row[2]}</div>`;
     if (showInd) metricsHtml += `<div style="${cellStyle};color:var(--amber)">${row[3]}</div>`;
   });
@@ -564,7 +565,7 @@ function detailPanel(s) {
   const activeLabel = _isQ ? 'Quality Reasons' : 'Value Reasons';
   let reasonsHtml = `<h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">${activeLabel}</h4>`;
   reasonsHtml += '<ul class="reasons-list">';
-  activeReasons.forEach(r => { reasonsHtml += `<li>${r}</li>`; });
+  activeReasons.forEach(r => { reasonsHtml += `<li>${highlightNeg(r)}</li>`; });
   reasonsHtml += '</ul>';
   // Show the other score for context
   if (_isQ) {
@@ -575,7 +576,7 @@ function detailPanel(s) {
   if (s.piotroski_details && s.piotroski_details.length > 0) {
     reasonsHtml += `<h4 style="margin-top:12px;margin-bottom:6px;color:var(--text2);font-size:11px;text-transform:uppercase;">Piotroski Tests (${s.piotroski_f_score}/9)</h4>`;
     reasonsHtml += '<ul class="reasons-list">';
-    s.piotroski_details.forEach(d => { reasonsHtml += `<li>${d}</li>`; });
+    s.piotroski_details.forEach(d => { reasonsHtml += `<li>${highlightNeg(d)}</li>`; });
     reasonsHtml += '</ul>';
   }
   // Risk flags section
@@ -852,6 +853,7 @@ function fmtDelta(d, daysInScan) {
 }
 
 // ────────── Formatting helpers ──────────
+function highlightNeg(text) { return text.replace(/-[\d.]+%?/g, m => `<span style="color:var(--red)">${m}</span>`); }
 function fmt(v, d) { return v != null ? Number(v).toFixed(d) : '—'; }
 function fmtN(v, d, suffix) { return v != null ? Number(v).toFixed(d) + (suffix||'') : '—'; }
 function r2(v) { return v != null ? Number(v).toFixed(2) : ''; }
@@ -985,8 +987,10 @@ function renderLookupResult(s) {
   html += `<div style="color:var(--text2);font-weight:600;padding-bottom:4px;border-bottom:1px solid var(--border)">Value</div>`;
   html += `<div style="color:var(--text2);font-weight:600;padding-bottom:4px;border-bottom:1px solid var(--border)">Mkt Avg</div>`;
   metrics.forEach(([lbl, val, avg]) => {
+    const isNeg = typeof val === 'string' && val !== '—' && parseFloat(val) < 0;
+    const valColor = isNeg ? 'color:var(--red)' : '';
     html += `<div style="padding:3px 0;border-bottom:1px solid var(--border);color:var(--text2)">${lbl}</div>`;
-    html += `<div style="padding:3px 0;border-bottom:1px solid var(--border)">${val}</div>`;
+    html += `<div style="padding:3px 0;border-bottom:1px solid var(--border);${valColor}">${val}</div>`;
     html += `<div style="padding:3px 0;border-bottom:1px solid var(--border);color:var(--blue)">${avg}</div>`;
   });
   html += `</div></div>`;
@@ -995,16 +999,16 @@ function renderLookupResult(s) {
   html += `<div>`;
   html += `<h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;">Value Score Reasons</h4>`;
   html += `<ul class="reasons-list">`;
-  (s.score_reasons||[]).forEach(r => { html += '<li>'+r+'</li>'; });
+  (s.score_reasons||[]).forEach(r => { html += '<li>'+highlightNeg(r)+'</li>'; });
   html += `</ul>`;
   html += `<h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin:12px 0 8px;">Quality Score Reasons</h4>`;
   html += `<ul class="reasons-list">`;
-  (s.quality_reasons||[]).forEach(r => { html += '<li>'+r+'</li>'; });
+  (s.quality_reasons||[]).forEach(r => { html += '<li>'+highlightNeg(r)+'</li>'; });
   html += `</ul>`;
   if (s.piotroski_details && s.piotroski_details.length > 0) {
     html += `<h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin:12px 0 6px;">Piotroski Tests (${s.piotroski_f_score}/9)</h4>`;
     html += `<ul class="reasons-list">`;
-    s.piotroski_details.forEach(d => { html += '<li>'+d+'</li>'; });
+    s.piotroski_details.forEach(d => { html += '<li>'+highlightNeg(d)+'</li>'; });
     html += `</ul>`;
   }
   // Risk flags for lookup
