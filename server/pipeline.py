@@ -92,15 +92,18 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
     # Buyback yield (share count change)
     bb_yield = _compute_buyback_yield(stats)
 
+    # ── yfinance enrichment (complete income statement + cash flow + quarterly TTM) ──
+    yf_fin = data.get("_yf_financials") or {}
+
     # Enterprise value and ROIC
     ev = _safe_raw(stats, "enterpriseValue")
     ocf = _safe_raw(fin, "operatingCashflow")
+    if ocf is None:
+        # Cashflow-statement fallback (yfinance ticker.cashflow)
+        ocf = yf_fin.get("cf_operating")
     roic = None
     if ev and ev > 0 and ocf is not None:
         roic = round(max(-5.0, min(5.0, ocf / ev)), 4)  # clamp to prevent infinity
-
-    # ── New fields from yfinance financials (complete income statement) ──
-    yf_fin = data.get("_yf_financials", {})
     total_debt = _safe_raw(fin, "totalDebt")
     total_cash = _safe_raw(fin, "totalCash")
     total_rev_fin = _safe_raw(fin, "totalRevenue")
@@ -308,7 +311,7 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         ev_to_ebitda=_safe_raw(stats, "enterpriseToEbitda"),
         ev_to_revenue=_safe_raw(stats, "enterpriseToRevenue"),
         debt_to_equity=_safe_raw(fin, "debtToEquity"),
-        free_cash_flow=_safe_raw(fin, "freeCashflow"),
+        free_cash_flow=_safe_raw(fin, "freeCashflow") or yf_fin.get("cf_free"),
         operating_cashflow=ocf,
         enterprise_value=ev,
         roic=roic,
