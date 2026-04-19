@@ -92,6 +92,7 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .reasons-list { list-style:none; }
 .reasons-list li { padding:3px 0; font-size:12px; }
 .reasons-list li::before { content:"\2713  "; color:var(--green); font-weight:bold; }
+.reasons-list li.neg::before { content:"\2717  "; color:var(--red); }
 .sparkline-container { height:120px; }
 .sparkline-container canvas { width:100%; height:100%; }
 
@@ -603,7 +604,7 @@ function detailPanel(s) {
   const activeLabel = _isQ ? 'Quality Reasons' : 'Value Reasons';
   let reasonsHtml = `<h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">${activeLabel}</h4>`;
   reasonsHtml += '<ul class="reasons-list">';
-  activeReasons.forEach(r => { reasonsHtml += `<li>${highlightNeg(r)}</li>`; });
+  activeReasons.forEach(r => { reasonsHtml += reasonLi(r); });
   reasonsHtml += '</ul>';
   // Show the other score for context
   if (_isQ) {
@@ -614,7 +615,7 @@ function detailPanel(s) {
   if (s.piotroski_details && s.piotroski_details.length > 0) {
     reasonsHtml += `<h4 style="margin-top:12px;margin-bottom:6px;color:var(--text2);font-size:11px;text-transform:uppercase;">Piotroski Tests (${s.piotroski_f_score}/9)</h4>`;
     reasonsHtml += '<ul class="reasons-list">';
-    s.piotroski_details.forEach(d => { reasonsHtml += `<li>${highlightNeg(d)}</li>`; });
+    s.piotroski_details.forEach(d => { reasonsHtml += reasonLi(d); });
     reasonsHtml += '</ul>';
   }
   // Risk flags section
@@ -892,6 +893,19 @@ function fmtDelta(d, daysInScan) {
 
 // ────────── Formatting helpers ──────────
 function highlightNeg(text) { return text.replace(/-[\d.]+%?/g, m => `<span style="color:var(--red)">${m}</span>`); }
+
+// Detect reason strings that describe a negative characteristic — used to
+// flip the bullet from green ✓ to red ✗ in the reasons lists.
+const NEG_REASON_RE = /^(negative|weak|heavy|burning|extreme|elevated|thin|below-average|underperforming|very high|high (leverage|short|asset|near-term)|earnings (collapsing|plunging|declining|contracting|expected to decline)|revenue (collapsing|declining)|ebit does not cover|dividend likely|dividend payout ratio above|payout ratio stretched|significant earnings deterioration|forward p\/e above trailing|yield well below|acquisition-driven asset growth|goodwill-heavy|rapid asset growth|still high|gaap earnings decline|eps surprises deteriorating|eps surprise trend weakening|consistent eps misses|multiple severe red flags|compounding red flags|ncav discounted|maturity risk|leverage \d|forward p\/e \(normalized\) (very )?expensive)/i;
+const NEG_CONTAINS_RE = /(value trap|trap risk|destroying|operating losses|cash burn|at risk of cut|credibility concern|cuts? likely|refinancing risk|crowded short|distress risk)/i;
+function isNegativeReason(text) {
+  if (!text) return false;
+  return NEG_REASON_RE.test(text.trim()) || NEG_CONTAINS_RE.test(text);
+}
+function reasonLi(text) {
+  const cls = isNegativeReason(text) ? ' class="neg"' : '';
+  return `<li${cls}>${highlightNeg(text)}</li>`;
+}
 function fmt(v, d) { return v != null ? Number(v).toFixed(d) : '—'; }
 function fmtN(v, d, suffix) { return v != null ? Number(v).toFixed(d) + (suffix||'') : '—'; }
 function r2(v) { return v != null ? Number(v).toFixed(2) : ''; }
@@ -1037,16 +1051,16 @@ function renderLookupResult(s) {
   html += `<div>`;
   html += `<h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;">Value Score Reasons</h4>`;
   html += `<ul class="reasons-list">`;
-  (s.score_reasons||[]).forEach(r => { html += '<li>'+highlightNeg(r)+'</li>'; });
+  (s.score_reasons||[]).forEach(r => { html += reasonLi(r); });
   html += `</ul>`;
   html += `<h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin:12px 0 8px;">Quality Score Reasons</h4>`;
   html += `<ul class="reasons-list">`;
-  (s.quality_reasons||[]).forEach(r => { html += '<li>'+highlightNeg(r)+'</li>'; });
+  (s.quality_reasons||[]).forEach(r => { html += reasonLi(r); });
   html += `</ul>`;
   if (s.piotroski_details && s.piotroski_details.length > 0) {
     html += `<h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin:12px 0 6px;">Piotroski Tests (${s.piotroski_f_score}/9)</h4>`;
     html += `<ul class="reasons-list">`;
-    s.piotroski_details.forEach(d => { html += '<li>'+highlightNeg(d)+'</li>'; });
+    s.piotroski_details.forEach(d => { html += reasonLi(d); });
     html += `</ul>`;
   }
   // Risk flags for lookup
