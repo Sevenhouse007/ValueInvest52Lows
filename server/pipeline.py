@@ -929,6 +929,10 @@ def merge_quote_and_fundamentals(
         s.interest_expense = fundamentals.interest_expense
         s.payout_ratio = fundamentals.payout_ratio
         s.total_assets = fundamentals.total_assets
+        s.total_current_assets = fundamentals.total_current_assets
+        s.total_current_liabilities = fundamentals.total_current_liabilities
+        s.total_liabilities = fundamentals.total_liabilities
+        s.retained_earnings = fundamentals.retained_earnings
         s.net_debt_ebitda = fundamentals.net_debt_ebitda
         s.interest_coverage = fundamentals.interest_coverage
         s.altman_z_score = fundamentals.altman_z_score
