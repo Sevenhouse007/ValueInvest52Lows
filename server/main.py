@@ -330,6 +330,22 @@ async def lookup_stock(symbol: str):
 
     # 1. Fetch quoteSummary
     raw = await _yahoo_client.fetch_quote_summary(symbol)
+
+    # Yahoo uses "BRK-B" for class shares but the standard ticker is "BRK.B".
+    # If the dotted form returned only summaryDetail (no fundamentals), retry
+    # with hyphens. Skip for foreign exchange suffixes like ".L"/".PA"/".T"
+    # which legitimately use a dot.
+    _EXCHANGE_SUFFIXES = (".L", ".PA", ".T", ".HK", ".TO", ".AX", ".DE", ".SW", ".AS", ".MI", ".MX")
+    if (
+        "." in symbol
+        and not symbol.endswith(_EXCHANGE_SUFFIXES)
+        and (not raw or "assetProfile" not in raw)
+    ):
+        retry = symbol.replace(".", "-")
+        retry_raw = await _yahoo_client.fetch_quote_summary(retry)
+        if retry_raw and "assetProfile" in retry_raw:
+            symbol = retry
+            raw = retry_raw
     if not raw:
         raise HTTPException(404, f"No data found for {symbol}")
 
