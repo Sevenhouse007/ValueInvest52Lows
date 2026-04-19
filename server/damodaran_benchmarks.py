@@ -25,17 +25,19 @@ SECTOR_WACC = {
 }
 
 SECTOR_MEDIANS = {
-    "Financial Services": {"pe": 12.5, "pb": 1.4, "ev_ebitda": None, "roe": 0.112},
-    "Real Estate":        {"pe": 26.2, "pb": 1.6, "ev_ebitda": 16.4, "roe": 0.068},
-    "Energy":             {"pe": 11.8, "pb": 1.9, "ev_ebitda": 5.8,  "roe": 0.142},
-    "Healthcare":         {"pe": 17.5, "pb": 3.8, "ev_ebitda": 14.3, "roe": 0.141},
-    "Consumer Defensive": {"pe": 14.7, "pb": 2.8, "ev_ebitda": 13.1, "roe": 0.138},
-    "Consumer Cyclical":  {"pe": 14.7, "pb": 3.6, "ev_ebitda": 13.9, "roe": 0.209},
-    "Industrials":        {"pe": 21.8, "pb": 4.0, "ev_ebitda": 16.1, "roe": 0.132},
-    "Communication Services": {"pe": 15.2, "pb": 3.2, "ev_ebitda": 9.8, "roe": 0.148},
-    "Basic Materials":    {"pe": 18.2, "pb": 2.8, "ev_ebitda": 10.9, "roe": 0.104},
-    "Utilities":          {"pe": 17.9, "pb": 1.7, "ev_ebitda": 10.2, "roe": 0.096},
-    "Technology":         {"pe": 28.4, "pb": 6.8, "ev_ebitda": 18.6, "roe": 0.221},
+    # Each sector entry: pe, pb, ev_ebitda, roe (decimal), ps, de (% — total debt / equity), div_yield (decimal)
+    # Damodaran "Total Market" / sector pages, Jan 2026 dataset.
+    "Financial Services": {"pe": 12.5, "pb": 1.4, "ev_ebitda": None, "roe": 0.112, "ps": 2.6, "de": 105.0, "div_yield": 0.027},
+    "Real Estate":        {"pe": 26.2, "pb": 1.6, "ev_ebitda": 16.4, "roe": 0.068, "ps": 5.8, "de": 95.0,  "div_yield": 0.041},
+    "Energy":             {"pe": 11.8, "pb": 1.9, "ev_ebitda": 5.8,  "roe": 0.142, "ps": 1.4, "de": 55.0,  "div_yield": 0.040},
+    "Healthcare":         {"pe": 17.5, "pb": 3.8, "ev_ebitda": 14.3, "roe": 0.141, "ps": 2.5, "de": 60.0,  "div_yield": 0.018},
+    "Consumer Defensive": {"pe": 14.7, "pb": 2.8, "ev_ebitda": 13.1, "roe": 0.138, "ps": 1.3, "de": 70.0,  "div_yield": 0.025},
+    "Consumer Cyclical":  {"pe": 14.7, "pb": 3.6, "ev_ebitda": 13.9, "roe": 0.209, "ps": 1.5, "de": 80.0,  "div_yield": 0.018},
+    "Industrials":        {"pe": 21.8, "pb": 4.0, "ev_ebitda": 16.1, "roe": 0.132, "ps": 1.9, "de": 65.0,  "div_yield": 0.018},
+    "Communication Services": {"pe": 15.2, "pb": 3.2, "ev_ebitda": 9.8, "roe": 0.148, "ps": 2.2, "de": 70.0, "div_yield": 0.022},
+    "Basic Materials":    {"pe": 18.2, "pb": 2.8, "ev_ebitda": 10.9, "roe": 0.104, "ps": 1.6, "de": 50.0,  "div_yield": 0.025},
+    "Utilities":          {"pe": 17.9, "pb": 1.7, "ev_ebitda": 10.2, "roe": 0.096, "ps": 2.4, "de": 145.0, "div_yield": 0.035},
+    "Technology":         {"pe": 28.4, "pb": 6.8, "ev_ebitda": 18.6, "roe": 0.221, "ps": 6.0, "de": 40.0,  "div_yield": 0.012},
 }
 
 

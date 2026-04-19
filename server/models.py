@@ -47,6 +47,9 @@ class StockFundamentals(BaseModel):
     sector_median_pb: Optional[float] = None
     sector_median_ev_ebitda: Optional[float] = None
     sector_median_roe: Optional[float] = None
+    sector_median_ps: Optional[float] = None
+    sector_median_de: Optional[float] = None
+    sector_median_div_yield: Optional[float] = None
     ebit: Optional[float] = None
     ebitda: Optional[float] = None
     total_debt: Optional[float] = None
@@ -153,6 +156,9 @@ class ScoredStock(BaseModel):
     sector_median_pb: Optional[float] = None
     sector_median_ev_ebitda: Optional[float] = None
     sector_median_roe: Optional[float] = None
+    sector_median_ps: Optional[float] = None
+    sector_median_de: Optional[float] = None
+    sector_median_div_yield: Optional[float] = None
     ebit: Optional[float] = None
     ebitda: Optional[float] = None
     total_debt: Optional[float] = None

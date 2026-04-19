@@ -22,6 +22,49 @@ from server.yahoo_client import YahooClient
 logger = logging.getLogger(__name__)
 
 
+def _compute_roic(
+    ebit: Optional[float],
+    total_debt: Optional[float],
+    total_assets: Optional[float],
+    total_liabilities: Optional[float],
+    total_cash: Optional[float],
+    ocf: Optional[float],
+    ev: Optional[float],
+    tax_rate: float = 0.21,
+) -> Optional[float]:
+    """Return ROIC as a decimal (0.18 = 18%).
+
+    Preferred path — NOPAT / Invested Capital:
+      NOPAT          = EBIT × (1 − tax_rate)
+      Invested Cap.  = Total Debt + Book Equity − Cash
+      Book Equity    = Total Assets − Total Liabilities
+
+    This captures true return on capital and avoids penalizing cash-rich,
+    asset-light businesses (CHKP, AAPL) the way OCF/EV does, since EV
+    nets out cash in a way that inflates the denominator for those names.
+
+    Falls back to the OCF/EV proxy when balance-sheet inputs are missing.
+    Clamped to [-5.0, 5.0] to suppress noise from near-zero invested capital.
+    """
+    if (
+        ebit is not None
+        and total_debt is not None
+        and total_assets is not None
+        and total_liabilities is not None
+    ):
+        book_equity = total_assets - total_liabilities
+        invested_capital = total_debt + book_equity - (total_cash or 0.0)
+        if invested_capital > 0:
+            nopat = ebit * (1 - tax_rate)
+            return round(max(-5.0, min(5.0, nopat / invested_capital)), 4)
+
+    # Fallback: OCF / EV proxy (cheap-and-cheerful, but understates for cash-rich firms)
+    if ev and ev > 0 and ocf is not None:
+        return round(max(-5.0, min(5.0, ocf / ev)), 4)
+
+    return None
+
+
 def _safe_raw(obj: Optional[dict], key: str) -> Optional[float]:
     """Extract .raw value from Yahoo's {raw, fmt} wrappers."""
     if obj is None:
@@ -95,15 +138,12 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
     # ── yfinance enrichment (complete income statement + cash flow + quarterly TTM) ──
     yf_fin = data.get("_yf_financials") or {}
 
-    # Enterprise value and ROIC
+    # Enterprise value (ROIC is computed below once balance-sheet inputs are loaded)
     ev = _safe_raw(stats, "enterpriseValue")
     ocf = _safe_raw(fin, "operatingCashflow")
     if ocf is None:
         # Cashflow-statement fallback (yfinance ticker.cashflow)
         ocf = yf_fin.get("cf_operating")
-    roic = None
-    if ev and ev > 0 and ocf is not None:
-        roic = round(max(-5.0, min(5.0, ocf / ev)), 4)  # clamp to prevent infinity
     total_debt = _safe_raw(fin, "totalDebt")
     total_cash = _safe_raw(fin, "totalCash")
     total_rev_fin = _safe_raw(fin, "totalRevenue")
@@ -304,6 +344,18 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         except Exception:
             beneish = None
 
+    # ROIC — compute now that EBIT, total assets, total liabilities, debt and cash are all loaded.
+    # Prefers NOPAT / Invested Capital, falls back to OCF / EV when balance sheet data is missing.
+    roic = _compute_roic(
+        ebit=ebit_val,
+        total_debt=total_debt,
+        total_assets=bs_total_assets,
+        total_liabilities=yf_tl,
+        total_cash=total_cash,
+        ocf=ocf,
+        ev=ev,
+    )
+
     return StockFundamentals(
         symbol=symbol,
         forward_pe=_safe_raw(stats, "forwardPE"),
@@ -381,6 +433,9 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         sector_median_pb=(SECTOR_MEDIANS.get(profile.get("sector", ""), {}) or {}).get("pb"),
         sector_median_ev_ebitda=(SECTOR_MEDIANS.get(profile.get("sector", ""), {}) or {}).get("ev_ebitda"),
         sector_median_roe=(SECTOR_MEDIANS.get(profile.get("sector", ""), {}) or {}).get("roe"),
+        sector_median_ps=(SECTOR_MEDIANS.get(profile.get("sector", ""), {}) or {}).get("ps"),
+        sector_median_de=(SECTOR_MEDIANS.get(profile.get("sector", ""), {}) or {}).get("de"),
+        sector_median_div_yield=(SECTOR_MEDIANS.get(profile.get("sector", ""), {}) or {}).get("div_yield"),
     )
 
 
@@ -843,6 +898,9 @@ def merge_quote_and_fundamentals(
         s.sector_median_pb = fundamentals.sector_median_pb
         s.sector_median_ev_ebitda = fundamentals.sector_median_ev_ebitda
         s.sector_median_roe = fundamentals.sector_median_roe
+        s.sector_median_ps = fundamentals.sector_median_ps
+        s.sector_median_de = fundamentals.sector_median_de
+        s.sector_median_div_yield = fundamentals.sector_median_div_yield
         s.ebit = fundamentals.ebit
         s.ebitda = fundamentals.ebitda
         s.total_debt = fundamentals.total_debt

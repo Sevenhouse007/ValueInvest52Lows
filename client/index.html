@@ -517,10 +517,10 @@ function renderTable() {
       <td class="num">$${fmt(s.price,2)}</td>
       <td class="num ${s.change_percent>=0?'c-green':'c-red'}">${fmt(s.change_percent,1)}%</td>
       <td class="num">${fmtCap(s.market_cap)}</td>
-      <td class="num ${cmpClass(s.forward_pe, mktAvg, true)}" title="Mkt avg: ${fmtN(s.market_avg_fpe,1)} | Ind avg: ${fmtN(s.industry_avg_fpe,1)}">${fmtN(s.forward_pe,1)}</td>
-      <td class="num ${cmpClass(s.price_to_book, mktPb, true)}" title="Mkt avg: ${fmtN(s.market_avg_pb,1)} | Ind avg: ${fmtN(s.industry_avg_pb,1)}">${fmtN(s.price_to_book,1)}</td>
-      <td class="num ${cmpClass(s.ev_to_ebitda, mktEv, true)}" title="Mkt avg: ${fmtN(s.market_avg_ev_ebitda,1)} | Ind avg: ${fmtN(s.industry_avg_ev_ebitda,1)}">${fmtN(s.ev_to_ebitda,1)}</td>
-      <td class="num ${cmpClass(s.return_on_equity, mktRoe, false)}" title="Mkt avg: ${fmtROE(s.market_avg_roe)} | Ind avg: ${fmtROE(s.industry_avg_roe)}">${fmtROE(s.return_on_equity)}</td>
+      <td class="num ${verdictClass(verdictFor('fpe', s.forward_pe, s.sector_median_pe))}" title="${sectorTitle('Fwd P/E', s.sector_median_pe, s.market_avg_fpe, s.industry_avg_fpe)}">${verdictPrefix(verdictFor('fpe', s.forward_pe, s.sector_median_pe))}${fmtN(s.forward_pe,1)}</td>
+      <td class="num ${verdictClass(verdictFor('pb', s.price_to_book, s.sector_median_pb))}" title="${sectorTitle('P/B', s.sector_median_pb, s.market_avg_pb, s.industry_avg_pb)}">${verdictPrefix(verdictFor('pb', s.price_to_book, s.sector_median_pb))}${fmtN(s.price_to_book,1)}</td>
+      <td class="num ${verdictClass(verdictFor('ev', s.ev_to_ebitda, s.sector_median_ev_ebitda))}" title="${sectorTitle('EV/EBITDA', s.sector_median_ev_ebitda, s.market_avg_ev_ebitda, s.industry_avg_ev_ebitda)}">${verdictPrefix(verdictFor('ev', s.ev_to_ebitda, s.sector_median_ev_ebitda))}${fmtN(s.ev_to_ebitda,1)}</td>
+      <td class="num ${verdictClass(verdictFor('roe', s.return_on_equity, s.sector_median_roe))}" title="${sectorTitle('ROE', s.sector_median_roe, s.market_avg_roe, s.industry_avg_roe, fmtROE)}">${verdictPrefix(verdictFor('roe', s.return_on_equity, s.sector_median_roe))}${fmtROE(s.return_on_equity)}</td>
       <td class="num ${roicClass(s.roic, s.sector_wacc)}" title="${roicTitle(s.roic, s.sector_wacc, s.sector)}">${fmtROIC(s.roic)}</td>
       <td class="num ${s.free_cash_flow>0?'c-green':s.free_cash_flow<0?'c-red':''}">${fmtFCF(s.free_cash_flow)}</td>
       <td class="num">${fmtAnalyst(s.recommendation_mean)}</td>
@@ -560,9 +560,9 @@ function detailPanel(s) {
     {l:'EV/EBITDA',       v:fmtN(s.ev_to_ebitda,1),                                                            m:fmtN(s.market_avg_ev_ebitda,1),                                                                 i:fmtN(s.industry_avg_ev_ebitda,1), k:'ev',     raw:s.ev_to_ebitda,     b:s.sector_median_ev_ebitda},
     {l:'ROE %',           v:fmtROE(s.return_on_equity),                                                        m:fmtROE(s.market_avg_roe),                                                                       i:fmtROE(s.industry_avg_roe),       k:'roe',    raw:s.return_on_equity, b:s.sector_median_roe},
     {l:'ROIC vs WACC',    v:fmtROIC(s.roic),                                                                   m:s.sector_wacc!=null?fmtROIC(s.sector_wacc)+' (WACC)':'—',                                       i:'—',                              k:'roic',   raw:s.roic,             b:s.sector_wacc},
-    {l:'P/S',             v:fmtN(s.price_to_sales,2),                                                          m:fmtN(s.market_avg_ps,2),                                                                        i:'—',                              k:'ps',     raw:s.price_to_sales,   b:null},
-    {l:'Debt/Equity',     v:fmtN(s.debt_to_equity,0),                                                          m:fmtN(s.market_avg_debt_equity,0),                                                               i:'—',                              k:'de',     raw:s.debt_to_equity,   b:null},
-    {l:'Div Yield',       v:s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—',                       m:s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—',                        i:'—',                              k:'divy',   raw:s.dividend_yield,   b:null},
+    {l:'P/S',             v:fmtN(s.price_to_sales,2),                                                          m:fmtN(s.market_avg_ps,2),                                                                        i:'—',                              k:'ps',     raw:s.price_to_sales,   b:s.sector_median_ps},
+    {l:'Debt/Equity',     v:fmtN(s.debt_to_equity,0),                                                          m:fmtN(s.market_avg_debt_equity,0),                                                               i:'—',                              k:'de',     raw:s.debt_to_equity,   b:s.sector_median_de},
+    {l:'Div Yield',       v:s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—',                       m:s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—',                        i:'—',                              k:'divy',   raw:s.dividend_yield,   b:s.sector_median_div_yield},
     {l:'Rev Growth',      v:fmtN(s.revenue_growth!=null?s.revenue_growth*100:null,1,'%'),                      m:'—',                                                                                            i:'—',                              k:'growth', raw:s.revenue_growth,   b:null},
     {l:'Earnings Growth', v:fmtN(s.earnings_growth!=null?s.earnings_growth*100:null,1,'%'),                    m:'—',                                                                                            i:'—',                              k:'growth', raw:s.earnings_growth,  b:null},
     {l:'FCF',             v:fmtFCF(s.free_cash_flow),                                                          m:'—',                                                                                            i:'—',                              k:'fcf',    raw:s.free_cash_flow,   b:null},
@@ -1001,15 +1001,20 @@ function verdictFor(key, val, bench) {
       if (val > 0.15) return 'bad';
       break;
   }
-  // Sector median fallback for the middle range (P/E, P/B, EV/EBITDA, ROE only)
+  // Sector median fallback (Damodaran). Threshold: ±15% from sector median.
   if (bench != null && bench !== 0) {
     const ratio = val / bench;
-    if (key === 'fpe' || key === 'tpe' || key === 'pb' || key === 'ev') {
+    // Lower-is-better metrics
+    if (key === 'fpe' || key === 'tpe' || key === 'pb' || key === 'ev' || key === 'ps' || key === 'de') {
       if (ratio < 0.85) return 'good';
       if (ratio > 1.15) return 'bad';
+    // Higher-is-better metrics
     } else if (key === 'roe') {
       if (ratio > 1.15) return 'good';
       if (ratio < 0.85) return 'bad';
+    } else if (key === 'divy') {
+      // Higher-is-better, but never penalize a low/zero div (growth stocks).
+      if (val > 0 && ratio > 1.15) return 'good';
     }
   }
   return null;
@@ -1024,6 +1029,21 @@ function verdictColor(v) {
   if (v === 'good') return 'color:var(--green)';
   if (v === 'bad')  return 'color:var(--red)';
   return '';
+}
+// CSS class for a verdict — used by main table cells (which already use class-based coloring).
+function verdictClass(v) {
+  if (v === 'good') return 'c-green';
+  if (v === 'bad')  return 'c-red';
+  return '';
+}
+// Compact title showing sector median (Damodaran) plus market & industry context.
+function sectorTitle(label, sectorMed, mktAvg, indAvg, fmt) {
+  const f = fmt || ((x) => fmtN(x, 1));
+  const parts = [];
+  if (sectorMed != null) parts.push('Sector median: ' + f(sectorMed));
+  if (mktAvg != null)    parts.push('Mkt avg: ' + f(mktAvg));
+  if (indAvg != null)    parts.push('Ind avg: ' + f(indAvg));
+  return parts.length ? parts.join(' | ') : label;
 }
 
 function fmtAnalyst(v) {
@@ -1115,9 +1135,9 @@ function renderLookupResult(s) {
     {l:'EV/EBITDA',        v:fmtN(s.ev_to_ebitda,1),                                                            m:fmtN(s.market_avg_ev_ebitda,1),                                                       k:'ev',     raw:s.ev_to_ebitda,      b:s.sector_median_ev_ebitda},
     {l:'ROE %',            v:fmtROE(s.return_on_equity),                                                        m:fmtROE(s.market_avg_roe),                                                             k:'roe',    raw:s.return_on_equity,  b:s.sector_median_roe},
     {l:'ROIC vs WACC',     v:fmtROIC(s.roic),                                                                   m:s.sector_wacc!=null?fmtROIC(s.sector_wacc)+' (WACC)':'—',                             k:'roic',   raw:s.roic,              b:s.sector_wacc},
-    {l:'P/S',              v:fmtN(s.price_to_sales,2),                                                          m:fmtN(s.market_avg_ps,2),                                                              k:'ps',     raw:s.price_to_sales,    b:null},
-    {l:'Debt/Equity',      v:fmtN(s.debt_to_equity,0),                                                          m:fmtN(s.market_avg_debt_equity,0),                                                     k:'de',     raw:s.debt_to_equity,    b:null},
-    {l:'Div Yield',        v:s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—',                       m:s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—',              k:'divy',   raw:s.dividend_yield,    b:null},
+    {l:'P/S',              v:fmtN(s.price_to_sales,2),                                                          m:fmtN(s.market_avg_ps,2),                                                              k:'ps',     raw:s.price_to_sales,    b:s.sector_median_ps},
+    {l:'Debt/Equity',      v:fmtN(s.debt_to_equity,0),                                                          m:fmtN(s.market_avg_debt_equity,0),                                                     k:'de',     raw:s.debt_to_equity,    b:s.sector_median_de},
+    {l:'Div Yield',        v:s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—',                       m:s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—',              k:'divy',   raw:s.dividend_yield,    b:s.sector_median_div_yield},
     {l:'Short % Float',    v:fmtShort(s.short_percent_of_float),                                                m:'—',                                                                                  k:'short',  raw:s.short_percent_of_float, b:null},
     {l:'Insider Activity', v:fmtInsider(s.insider_buy_count, s.insider_sell_count),                             m:'—'},
     {l:'Rev Growth',       v:fmtN(s.revenue_growth!=null?s.revenue_growth*100:null,1,'%'),                      m:'—',                                                                                  k:'growth', raw:s.revenue_growth,    b:null},
