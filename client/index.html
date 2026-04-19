@@ -553,40 +553,23 @@ function detailPanel(s) {
   const cols = showInd ? 4 : 3;
   const gridCols = showInd ? '1.2fr 1fr 1fr 1fr' : '1.2fr 1fr 1fr';
 
-  const metrics = showInd ? [
-    ['Forward P/E', fmtN(s.forward_pe,1), fmtN(s.market_avg_fpe,1), fmtN(s.industry_avg_fpe,1)],
-    ['Trailing P/E', fmtN(s.trailing_pe,1), '—', '—'],
-    ['Price/Book', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2), fmtN(s.industry_avg_pb,2)],
-    ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1), fmtN(s.industry_avg_ev_ebitda,1)],
-    ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe), fmtROE(s.industry_avg_roe)],
-    ['ROIC vs WACC', fmtROIC(s.roic), s.sector_wacc!=null?fmtROIC(s.sector_wacc)+' (WACC)':'—', '—'],
-    ['P/S', fmtN(s.price_to_sales,2), fmtN(s.market_avg_ps,2), '—'],
-    ['Debt/Equity', fmtN(s.debt_to_equity,0), fmtN(s.market_avg_debt_equity,0), '—'],
-    ['Div Yield', s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—', s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—', '—'],
-    ['Rev Growth', fmtN(s.revenue_growth!=null?s.revenue_growth*100:null,1,'%'), '—', '—'],
-    ['Earnings Growth', fmtN(s.earnings_growth!=null?s.earnings_growth*100:null,1,'%'), '—', '—'],
-    ['FCF', fmtFCF(s.free_cash_flow), '—', '—'],
-    ['52W Range', `$${fmt(s.fifty_two_week_low,2)} — $${fmt(s.fifty_two_week_high,2)}`, '—', '—'],
-    ['Piotroski F-Score', fmtFScore(s.piotroski_f_score), '—', '—'],
-    ['Short % Float', fmtShort(s.short_percent_of_float), '—', '—'],
-    ['Insider Activity', fmtInsider(s.insider_buy_count, s.insider_sell_count), '—', '—'],
-  ] : [
-    ['Forward P/E', fmtN(s.forward_pe,1), fmtN(s.market_avg_fpe,1)],
-    ['Trailing P/E', fmtN(s.trailing_pe,1), '—'],
-    ['Price/Book', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2)],
-    ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1)],
-    ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe)],
-    ['ROIC vs WACC', fmtROIC(s.roic), s.sector_wacc!=null?fmtROIC(s.sector_wacc)+' (WACC)':'—'],
-    ['P/S', fmtN(s.price_to_sales,2), fmtN(s.market_avg_ps,2)],
-    ['Debt/Equity', fmtN(s.debt_to_equity,0), fmtN(s.market_avg_debt_equity,0)],
-    ['Div Yield', s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—', s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—'],
-    ['Rev Growth', fmtN(s.revenue_growth!=null?s.revenue_growth*100:null,1,'%'), '—'],
-    ['Earnings Growth', fmtN(s.earnings_growth!=null?s.earnings_growth*100:null,1,'%'), '—'],
-    ['FCF', fmtFCF(s.free_cash_flow), '—'],
-    ['52W Range', `$${fmt(s.fifty_two_week_low,2)} — $${fmt(s.fifty_two_week_high,2)}`, '—'],
-    ['Piotroski F-Score', fmtFScore(s.piotroski_f_score), '—'],
-    ['Short % Float', fmtShort(s.short_percent_of_float), '—'],
-    ['Insider Activity', fmtInsider(s.insider_buy_count, s.insider_sell_count), '—'],
+  const baseMetrics = [
+    {l:'Forward P/E',     v:fmtN(s.forward_pe,1),                                                              m:fmtN(s.market_avg_fpe,1),                                                                       i:fmtN(s.industry_avg_fpe,1),       k:'fpe',    raw:s.forward_pe,       b:s.sector_median_pe},
+    {l:'Trailing P/E',    v:fmtN(s.trailing_pe,1),                                                             m:'—',                                                                                            i:'—',                              k:'tpe',    raw:s.trailing_pe,      b:s.sector_median_pe},
+    {l:'Price/Book',      v:fmtN(s.price_to_book,2),                                                           m:fmtN(s.market_avg_pb,2),                                                                        i:fmtN(s.industry_avg_pb,2),        k:'pb',     raw:s.price_to_book,    b:s.sector_median_pb},
+    {l:'EV/EBITDA',       v:fmtN(s.ev_to_ebitda,1),                                                            m:fmtN(s.market_avg_ev_ebitda,1),                                                                 i:fmtN(s.industry_avg_ev_ebitda,1), k:'ev',     raw:s.ev_to_ebitda,     b:s.sector_median_ev_ebitda},
+    {l:'ROE %',           v:fmtROE(s.return_on_equity),                                                        m:fmtROE(s.market_avg_roe),                                                                       i:fmtROE(s.industry_avg_roe),       k:'roe',    raw:s.return_on_equity, b:s.sector_median_roe},
+    {l:'ROIC vs WACC',    v:fmtROIC(s.roic),                                                                   m:s.sector_wacc!=null?fmtROIC(s.sector_wacc)+' (WACC)':'—',                                       i:'—',                              k:'roic',   raw:s.roic,             b:s.sector_wacc},
+    {l:'P/S',             v:fmtN(s.price_to_sales,2),                                                          m:fmtN(s.market_avg_ps,2),                                                                        i:'—',                              k:'ps',     raw:s.price_to_sales,   b:null},
+    {l:'Debt/Equity',     v:fmtN(s.debt_to_equity,0),                                                          m:fmtN(s.market_avg_debt_equity,0),                                                               i:'—',                              k:'de',     raw:s.debt_to_equity,   b:null},
+    {l:'Div Yield',       v:s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—',                       m:s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—',                        i:'—',                              k:'divy',   raw:s.dividend_yield,   b:null},
+    {l:'Rev Growth',      v:fmtN(s.revenue_growth!=null?s.revenue_growth*100:null,1,'%'),                      m:'—',                                                                                            i:'—',                              k:'growth', raw:s.revenue_growth,   b:null},
+    {l:'Earnings Growth', v:fmtN(s.earnings_growth!=null?s.earnings_growth*100:null,1,'%'),                    m:'—',                                                                                            i:'—',                              k:'growth', raw:s.earnings_growth,  b:null},
+    {l:'FCF',             v:fmtFCF(s.free_cash_flow),                                                          m:'—',                                                                                            i:'—',                              k:'fcf',    raw:s.free_cash_flow,   b:null},
+    {l:'52W Range',       v:`$${fmt(s.fifty_two_week_low,2)} — $${fmt(s.fifty_two_week_high,2)}`,              m:'—',                                                                                            i:'—'},
+    {l:'Piotroski F-Score', v:fmtFScore(s.piotroski_f_score),                                                  m:'—',                                                                                            i:'—',                              k:'fscore', raw:s.piotroski_f_score, b:null},
+    {l:'Short % Float',   v:fmtShort(s.short_percent_of_float),                                                m:'—',                                                                                            i:'—',                              k:'short',  raw:s.short_percent_of_float, b:null},
+    {l:'Insider Activity', v:fmtInsider(s.insider_buy_count, s.insider_sell_count),                            m:'—',                                                                                            i:'—'},
   ];
   const hdrStyle = 'color:var(--text2);font-weight:600;padding-bottom:4px;border-bottom:1px solid var(--border)';
   const cellStyle = 'padding:3px 0;border-bottom:1px solid var(--border)';
@@ -594,12 +577,12 @@ function detailPanel(s) {
   metricsHtml += `<div style="${hdrStyle}">Metric</div><div style="${hdrStyle}">Value</div>`;
   metricsHtml += `<div style="${hdrStyle}">Mkt Avg</div>`;
   if (showInd) metricsHtml += `<div style="${hdrStyle}">Ind (${s.industry_peer_count})</div>`;
-  metrics.forEach(row => {
-    const isNeg = typeof row[1] === 'string' && row[1] !== '—' && parseFloat(row[1]) < 0;
-    metricsHtml += `<div style="${cellStyle};color:var(--text2)">${row[0]}</div>`;
-    metricsHtml += `<div style="${cellStyle};${isNeg?'color:var(--red)':''}">${row[1]}</div>`;
-    metricsHtml += `<div style="${cellStyle};color:var(--blue)">${row[2]}</div>`;
-    if (showInd) metricsHtml += `<div style="${cellStyle};color:var(--amber)">${row[3]}</div>`;
+  baseMetrics.forEach(row => {
+    const verdict = row.k ? verdictFor(row.k, row.raw, row.b) : null;
+    metricsHtml += `<div style="${cellStyle};color:var(--text2)">${row.l}</div>`;
+    metricsHtml += `<div style="${cellStyle};${verdictColor(verdict)}">${verdictPrefix(verdict)}${row.v}</div>`;
+    metricsHtml += `<div style="${cellStyle};color:var(--blue)">${row.m}</div>`;
+    if (showInd) metricsHtml += `<div style="${cellStyle};color:var(--amber)">${row.i}</div>`;
   });
   metricsHtml += '</div>';
 
@@ -956,6 +939,93 @@ function roicTitle(roic, wacc, sector) {
   return `ROIC ${(roic*100).toFixed(1)}% vs ${sector||'sector'} WACC ${(wacc*100).toFixed(1)}% (spread ${sign}${spread.toFixed(1)} pts) — ROIC = OCF/EV (understates true ROIC for cash-rich, low-asset firms)`;
 }
 
+// Returns 'good' | 'bad' | null per metric.
+// Logic: absolute floor first (objectively excellent/awful regardless of sector),
+// then sector median for the middle range. ROIC compares vs sector WACC.
+function verdictFor(key, val, bench) {
+  if (val == null) return null;
+  switch (key) {
+    case 'fpe':
+    case 'tpe':
+      if (val > 0 && val < 12) return 'good';
+      if (val > 35) return 'bad';
+      break;
+    case 'pb':
+      if (val > 0 && val < 1.5) return 'good';
+      if (val > 8) return 'bad';
+      break;
+    case 'ev':
+      if (val > 0 && val < 8) return 'good';
+      if (val > 25) return 'bad';
+      break;
+    case 'ps':
+      if (val > 0 && val < 1.5) return 'good';
+      if (val > 10) return 'bad';
+      break;
+    case 'roe':
+      // Decimal (0.20 = 20%)
+      if (val >= 0.20) return 'good';
+      if (val < 0.05 && val > -10) return 'bad';
+      break;
+    case 'roic':
+      // val = ROIC, bench = sector WACC
+      if (bench != null) {
+        if (val > bench) return 'good';
+        if (val < bench) return 'bad';
+      }
+      return null;
+    case 'de':
+      // yfinance returns scaled (70 = 70%)
+      if (val < 50) return 'good';
+      if (val > 200) return 'bad';
+      break;
+    case 'divy':
+      // Decimal (0.04 = 4%). Don't penalize zero/missing dividend (growth stocks).
+      if (val >= 0.04) return 'good';
+      break;
+    case 'growth':
+      if (val > 0.05) return 'good';
+      if (val < 0) return 'bad';
+      break;
+    case 'fcf':
+      if (val > 0) return 'good';
+      if (val < 0) return 'bad';
+      break;
+    case 'fscore':
+      if (val >= 7) return 'good';
+      if (val <= 3) return 'bad';
+      break;
+    case 'short':
+      // Decimal (0.15 = 15%)
+      if (val < 0.03) return 'good';
+      if (val > 0.15) return 'bad';
+      break;
+  }
+  // Sector median fallback for the middle range (P/E, P/B, EV/EBITDA, ROE only)
+  if (bench != null && bench !== 0) {
+    const ratio = val / bench;
+    if (key === 'fpe' || key === 'tpe' || key === 'pb' || key === 'ev') {
+      if (ratio < 0.85) return 'good';
+      if (ratio > 1.15) return 'bad';
+    } else if (key === 'roe') {
+      if (ratio > 1.15) return 'good';
+      if (ratio < 0.85) return 'bad';
+    }
+  }
+  return null;
+}
+
+function verdictPrefix(v) {
+  if (v === 'good') return '<span style="color:var(--green);font-weight:600">✓</span> ';
+  if (v === 'bad')  return '<span style="color:var(--red);font-weight:600">✗</span> ';
+  return '';
+}
+function verdictColor(v) {
+  if (v === 'good') return 'color:var(--green)';
+  if (v === 'bad')  return 'color:var(--red)';
+  return '';
+}
+
 function fmtAnalyst(v) {
   if (v == null) return '—';
   let stars = '';
@@ -1039,23 +1109,23 @@ function renderLookupResult(s) {
 
   // Key metrics grid
   const metrics = [
-    ['Fwd P/E', fmtN(s.forward_pe,1), fmtN(s.market_avg_fpe,1)],
-    ['Trailing P/E', fmtN(s.trailing_pe,1), '—'],
-    ['P/B', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2)],
-    ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1)],
-    ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe)],
-    ['ROIC vs WACC', fmtROIC(s.roic), s.sector_wacc!=null?fmtROIC(s.sector_wacc)+' (WACC)':'—'],
-    ['P/S', fmtN(s.price_to_sales,2), fmtN(s.market_avg_ps,2)],
-    ['Debt/Equity', fmtN(s.debt_to_equity,0), fmtN(s.market_avg_debt_equity,0)],
-    ['Div Yield', s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—', s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—'],
-    ['Short % Float', fmtShort(s.short_percent_of_float), '—'],
-    ['Insider Activity', fmtInsider(s.insider_buy_count, s.insider_sell_count), '—'],
-    ['Rev Growth', fmtN(s.revenue_growth!=null?s.revenue_growth*100:null,1,'%'), '—'],
-    ['Earnings Growth', fmtN(s.earnings_growth!=null?s.earnings_growth*100:null,1,'%'), '—'],
-    ['Current Ratio', fmtN(s.current_ratio,2), '—'],
-    ['52W Range', '$'+fmt(s.fifty_two_week_low,2)+' — $'+fmt(s.fifty_two_week_high,2), '—'],
-    ['Analyst Rec', fmtAnalyst(s.recommendation_mean), '—'],
-    ['Target Upside', fmtN(s.upside_percent,1,'%'), '—'],
+    {l:'Fwd P/E',          v:fmtN(s.forward_pe,1),                                                              m:fmtN(s.market_avg_fpe,1),                                                            k:'fpe',    raw:s.forward_pe,        b:s.sector_median_pe},
+    {l:'Trailing P/E',     v:fmtN(s.trailing_pe,1),                                                             m:'—',                                                                                  k:'tpe',    raw:s.trailing_pe,       b:s.sector_median_pe},
+    {l:'P/B',              v:fmtN(s.price_to_book,2),                                                           m:fmtN(s.market_avg_pb,2),                                                              k:'pb',     raw:s.price_to_book,     b:s.sector_median_pb},
+    {l:'EV/EBITDA',        v:fmtN(s.ev_to_ebitda,1),                                                            m:fmtN(s.market_avg_ev_ebitda,1),                                                       k:'ev',     raw:s.ev_to_ebitda,      b:s.sector_median_ev_ebitda},
+    {l:'ROE %',            v:fmtROE(s.return_on_equity),                                                        m:fmtROE(s.market_avg_roe),                                                             k:'roe',    raw:s.return_on_equity,  b:s.sector_median_roe},
+    {l:'ROIC vs WACC',     v:fmtROIC(s.roic),                                                                   m:s.sector_wacc!=null?fmtROIC(s.sector_wacc)+' (WACC)':'—',                             k:'roic',   raw:s.roic,              b:s.sector_wacc},
+    {l:'P/S',              v:fmtN(s.price_to_sales,2),                                                          m:fmtN(s.market_avg_ps,2),                                                              k:'ps',     raw:s.price_to_sales,    b:null},
+    {l:'Debt/Equity',      v:fmtN(s.debt_to_equity,0),                                                          m:fmtN(s.market_avg_debt_equity,0),                                                     k:'de',     raw:s.debt_to_equity,    b:null},
+    {l:'Div Yield',        v:s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—',                       m:s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—',              k:'divy',   raw:s.dividend_yield,    b:null},
+    {l:'Short % Float',    v:fmtShort(s.short_percent_of_float),                                                m:'—',                                                                                  k:'short',  raw:s.short_percent_of_float, b:null},
+    {l:'Insider Activity', v:fmtInsider(s.insider_buy_count, s.insider_sell_count),                             m:'—'},
+    {l:'Rev Growth',       v:fmtN(s.revenue_growth!=null?s.revenue_growth*100:null,1,'%'),                      m:'—',                                                                                  k:'growth', raw:s.revenue_growth,    b:null},
+    {l:'Earnings Growth',  v:fmtN(s.earnings_growth!=null?s.earnings_growth*100:null,1,'%'),                    m:'—',                                                                                  k:'growth', raw:s.earnings_growth,   b:null},
+    {l:'Current Ratio',    v:fmtN(s.current_ratio,2),                                                           m:'—'},
+    {l:'52W Range',        v:'$'+fmt(s.fifty_two_week_low,2)+' — $'+fmt(s.fifty_two_week_high,2),               m:'—'},
+    {l:'Analyst Rec',      v:fmtAnalyst(s.recommendation_mean),                                                 m:'—'},
+    {l:'Target Upside',    v:fmtN(s.upside_percent,1,'%'),                                                      m:'—'},
   ];
 
   html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">`;
@@ -1066,12 +1136,11 @@ function renderLookupResult(s) {
   html += `<div style="color:var(--text2);font-weight:600;padding-bottom:4px;border-bottom:1px solid var(--border)">Metric</div>`;
   html += `<div style="color:var(--text2);font-weight:600;padding-bottom:4px;border-bottom:1px solid var(--border)">Value</div>`;
   html += `<div style="color:var(--text2);font-weight:600;padding-bottom:4px;border-bottom:1px solid var(--border)">Mkt Avg</div>`;
-  metrics.forEach(([lbl, val, avg]) => {
-    const isNeg = typeof val === 'string' && val !== '—' && parseFloat(val) < 0;
-    const valColor = isNeg ? 'color:var(--red)' : '';
-    html += `<div style="padding:3px 0;border-bottom:1px solid var(--border);color:var(--text2)">${lbl}</div>`;
-    html += `<div style="padding:3px 0;border-bottom:1px solid var(--border);${valColor}">${val}</div>`;
-    html += `<div style="padding:3px 0;border-bottom:1px solid var(--border);color:var(--blue)">${avg}</div>`;
+  metrics.forEach(row => {
+    const verdict = row.k ? verdictFor(row.k, row.raw, row.b) : null;
+    html += `<div style="padding:3px 0;border-bottom:1px solid var(--border);color:var(--text2)">${row.l}</div>`;
+    html += `<div style="padding:3px 0;border-bottom:1px solid var(--border);${verdictColor(verdict)}">${verdictPrefix(verdict)}${row.v}</div>`;
+    html += `<div style="padding:3px 0;border-bottom:1px solid var(--border);color:var(--blue)">${row.m}</div>`;
   });
   html += `</div></div>`;
 

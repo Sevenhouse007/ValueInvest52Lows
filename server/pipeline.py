@@ -14,7 +14,7 @@ from server.config import (
     SECTOR_BENCHMARK_TICKERS,
     USE_DAMODARAN_BLEND,
 )
-from server.damodaran_benchmarks import SECTOR_WACC, blend_with_damodaran
+from server.damodaran_benchmarks import SECTOR_MEDIANS, SECTOR_WACC, blend_with_damodaran
 from server.models import ScanResult, ScoredStock, SectorAverages, StockFundamentals, StockQuote
 from server.scorer import compute_quality_score, compute_score
 from server.yahoo_client import YahooClient
@@ -377,6 +377,10 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         industry=profile.get("industry", ""),
         country=profile.get("country", ""),
         sector_wacc=SECTOR_WACC.get(profile.get("sector", ""), 0.085),
+        sector_median_pe=(SECTOR_MEDIANS.get(profile.get("sector", ""), {}) or {}).get("pe"),
+        sector_median_pb=(SECTOR_MEDIANS.get(profile.get("sector", ""), {}) or {}).get("pb"),
+        sector_median_ev_ebitda=(SECTOR_MEDIANS.get(profile.get("sector", ""), {}) or {}).get("ev_ebitda"),
+        sector_median_roe=(SECTOR_MEDIANS.get(profile.get("sector", ""), {}) or {}).get("roe"),
     )
 
 
@@ -835,6 +839,10 @@ def merge_quote_and_fundamentals(
         s.enterprise_value = fundamentals.enterprise_value
         s.roic = fundamentals.roic
         s.sector_wacc = fundamentals.sector_wacc
+        s.sector_median_pe = fundamentals.sector_median_pe
+        s.sector_median_pb = fundamentals.sector_median_pb
+        s.sector_median_ev_ebitda = fundamentals.sector_median_ev_ebitda
+        s.sector_median_roe = fundamentals.sector_median_roe
         s.ebit = fundamentals.ebit
         s.ebitda = fundamentals.ebitda
         s.total_debt = fundamentals.total_debt

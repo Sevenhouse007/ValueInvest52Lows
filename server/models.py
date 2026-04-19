@@ -42,6 +42,11 @@ class StockFundamentals(BaseModel):
     enterprise_value: Optional[float] = None
     roic: Optional[float] = None
     sector_wacc: Optional[float] = None  # Damodaran sector WACC for ROIC vs WACC comparison
+    # Damodaran full-universe sector medians for verdict comparisons (more representative than mega-cap-weighted market avg)
+    sector_median_pe: Optional[float] = None
+    sector_median_pb: Optional[float] = None
+    sector_median_ev_ebitda: Optional[float] = None
+    sector_median_roe: Optional[float] = None
     ebit: Optional[float] = None
     ebitda: Optional[float] = None
     total_debt: Optional[float] = None
@@ -143,6 +148,11 @@ class ScoredStock(BaseModel):
     enterprise_value: Optional[float] = None
     roic: Optional[float] = None
     sector_wacc: Optional[float] = None  # Damodaran sector WACC for ROIC vs WACC comparison
+    # Damodaran full-universe sector medians for verdict comparisons (more representative than mega-cap-weighted market avg)
+    sector_median_pe: Optional[float] = None
+    sector_median_pb: Optional[float] = None
+    sector_median_ev_ebitda: Optional[float] = None
+    sector_median_roe: Optional[float] = None
     ebit: Optional[float] = None
     ebitda: Optional[float] = None
     total_debt: Optional[float] = None
