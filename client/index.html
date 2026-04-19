@@ -1045,7 +1045,7 @@ function verdictClass(v) {
 function sectorTitle(label, sectorMed, mktAvg, indAvg, fmt) {
   const f = fmt || ((x) => fmtN(x, 1));
   const parts = [];
-  if (sectorMed != null) parts.push('Sector median: ' + f(sectorMed));
+  if (sectorMed != null) parts.push('Sector median (Damodaran): ' + f(sectorMed));
   if (mktAvg != null)    parts.push('Mkt avg: ' + f(mktAvg));
   if (indAvg != null)    parts.push('Ind avg: ' + f(indAvg));
   return parts.length ? parts.join(' | ') : label;
