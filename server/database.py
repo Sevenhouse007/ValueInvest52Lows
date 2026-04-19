@@ -98,6 +98,27 @@ def init_db():
             conn.execute("ALTER TABLE scan_performance ADD COLUMN price_15d REAL")
             conn.execute("ALTER TABLE scan_performance ADD COLUMN return_15d REAL")
 
+        # Migration: enforce UNIQUE(scan_date, symbol) on scan_performance.
+        # The constraint is in the CREATE TABLE for new deploys, but older
+        # deploys created the table without it, so INSERT OR IGNORE never
+        # actually deduplicated and a manual refresh could double-insert
+        # rows for a given (symbol, scan_date). Dedup first (keep the
+        # earliest row per pair, matching the "first scan wins" semantics
+        # of INSERT OR IGNORE going forward), then add a unique index —
+        # SQLite can't add a constraint via ALTER TABLE, but a unique
+        # index is enforced identically by INSERT OR IGNORE.
+        conn.execute("""
+            DELETE FROM scan_performance
+            WHERE id NOT IN (
+                SELECT MIN(id) FROM scan_performance
+                GROUP BY symbol, scan_date
+            )
+        """)
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_perf_symbol_date
+            ON scan_performance(symbol, scan_date)
+        """)
+
 
 def save_scan(result: ScanResult):
     """Persist a scan result, replacing any existing data for that date."""
