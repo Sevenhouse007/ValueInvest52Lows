@@ -292,10 +292,9 @@ async def get_settings():
 
 
 @app.post("/api/settings")
-async def update_settings(body: dict, request: "Request" = None):
+async def update_settings(body: dict):
     """Update configurable settings at runtime. Protected by API key if set."""
     from server import config
-    from fastapi import Request as _Req
     # Auth check: if SETTINGS_API_KEY is configured, require it
     if config.SETTINGS_API_KEY:
         key = body.pop("api_key", "") or ""
