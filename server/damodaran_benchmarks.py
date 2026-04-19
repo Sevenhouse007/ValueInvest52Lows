@@ -7,7 +7,38 @@ Used to blend with live blue-chip benchmarks:
   blended = 60% blue-chip (current market) + 40% Damodaran (broad sector median)
 """
 
+from __future__ import annotations
+
+import logging
+from datetime import date
+
+logger = logging.getLogger(__name__)
+
 LAST_UPDATED = "2026-01-15"
+
+# Threshold for emitting a staleness warning. The Damodaran dataset refreshes
+# every January; 400 days gives roughly a one-month grace period after the
+# expected refresh window before we start nagging.
+_STALENESS_THRESHOLD_DAYS = 400
+
+
+def _check_staleness() -> None:
+    """Emit a warning if SECTOR_MEDIANS / SECTOR_WACC are overdue for refresh."""
+    try:
+        last = date.fromisoformat(LAST_UPDATED)
+    except ValueError:
+        logger.warning("Damodaran LAST_UPDATED=%r is not ISO-8601; cannot check staleness", LAST_UPDATED)
+        return
+    age_days = (date.today() - last).days
+    if age_days > _STALENESS_THRESHOLD_DAYS:
+        logger.warning(
+            "Damodaran sector data is %d days old (last updated %s). "
+            "Refresh server/damodaran_benchmarks.py from pages.stern.nyu.edu/~adamodar/.",
+            age_days, LAST_UPDATED,
+        )
+
+
+_check_staleness()
 
 # Sector WACC estimates (Damodaran Jan 2026)
 SECTOR_WACC = {
