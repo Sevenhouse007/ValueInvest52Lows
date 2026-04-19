@@ -25,7 +25,13 @@ _executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS)
 
 
 def _fetch_yf_financials(symbol: str) -> Optional[dict]:
-    """Fetch complete income statement + balance sheet via yfinance."""
+    """Fetch complete income statement + balance sheet + cash flow via yfinance.
+
+    Also pulls quarterly financials (TTM fallback when annual prior-year is
+    missing) and yfinance's insider_transactions endpoint (different source
+    than Yahoo's quoteSummary insiderTransactions module — useful when that
+    module is empty).
+    """
     try:
         ticker = yf.Ticker(symbol)
 
@@ -36,6 +42,21 @@ def _fetch_yf_financials(symbol: str) -> Optional[dict]:
             if val is not None and not (isinstance(val, float) and val != val):
                 return float(val)
             return None
+
+        def _sum_q(df, field: str, cols: list) -> Optional[float]:
+            """Sum a quarterly row across the given columns (TTM helper)."""
+            if df is None or df.empty or field not in df.index:
+                return None
+            total = 0.0
+            seen = 0
+            for c in cols:
+                v = df[c].get(field)
+                if v is None or (isinstance(v, float) and v != v):
+                    continue
+                total += float(v)
+                seen += 1
+            # Require at least 3 of 4 quarters to consider TTM meaningful.
+            return total if seen >= 3 else None
 
         fin = ticker.financials
         bs = ticker.balance_sheet
@@ -82,6 +103,63 @@ def _fetch_yf_financials(symbol: str) -> Optional[dict]:
             "bs_intangibles": _get(bs, "Other Intangible Assets"),
         }
 
+        # ── Cash flow statement (fallback for OCF/FCF when financialData lacks them) ──
+        try:
+            cf = ticker.cashflow
+            result["cf_operating"] = (
+                _get(cf, "Operating Cash Flow")
+                or _get(cf, "Cash Flow From Continuing Operating Activities")
+            )
+            result["cf_free"] = _get(cf, "Free Cash Flow")
+            result["cf_capex"] = _get(cf, "Capital Expenditure")
+        except Exception as e:
+            logger.debug(f"cashflow fetch failed for {symbol}: {e}")
+
+        # ── Quarterly fundamentals (TTM fallback when annual prior-year is missing) ──
+        try:
+            qfin = ticker.quarterly_financials
+            if qfin is not None and not qfin.empty:
+                cols = list(qfin.columns)
+                if len(cols) >= 4:
+                    ttm = cols[:4]
+                    result["q_ttm_revenue"] = _sum_q(qfin, "Total Revenue", ttm)
+                    result["q_ttm_net_income"] = _sum_q(qfin, "Net Income", ttm)
+                    result["q_ttm_gross_profit"] = _sum_q(qfin, "Gross Profit", ttm)
+                if len(cols) >= 8:
+                    prev = cols[4:8]
+                    result["q_prev_revenue"] = _sum_q(qfin, "Total Revenue", prev)
+                    result["q_prev_net_income"] = _sum_q(qfin, "Net Income", prev)
+                    result["q_prev_gross_profit"] = _sum_q(qfin, "Gross Profit", prev)
+        except Exception as e:
+            logger.debug(f"quarterly_financials fetch failed for {symbol}: {e}")
+
+        # ── yfinance insider_transactions (different endpoint than Yahoo module) ──
+        try:
+            ins = ticker.insider_transactions
+            if ins is not None and not ins.empty:
+                # Normalize to a list of {transaction_text, shares, start_date_ts}
+                import datetime
+                rows = []
+                for _, row in ins.iterrows():
+                    sd = row.get("Start Date")
+                    if isinstance(sd, datetime.datetime):
+                        ts = int(sd.timestamp())
+                    elif isinstance(sd, datetime.date):
+                        ts = int(datetime.datetime(sd.year, sd.month, sd.day).timestamp())
+                    else:
+                        ts = 0
+                    # `Text` is the descriptive field ("Purchase at price...",
+                    # "Sale at price...", "Stock Award..."). `Transaction` is
+                    # often empty in this endpoint.
+                    rows.append({
+                        "text": str(row.get("Text") or row.get("Transaction") or "").lower(),
+                        "shares": int(row.get("Shares") or 0),
+                        "ts": ts,
+                    })
+                result["insider_yf"] = rows
+        except Exception as e:
+            logger.debug(f"insider_transactions fetch failed for {symbol}: {e}")
+
         # Priority 5: Earnings date + Priority 6: shares short
         try:
             cal = ticker.calendar
@@ -106,6 +184,24 @@ def _fetch_yf_financials(symbol: str) -> Optional[dict]:
         return result
     except Exception as e:
         logger.error(f"Error fetching yf financials for {symbol}: {e}")
+        return None
+
+
+def _fetch_sec_insider(symbol: str) -> Optional[dict]:
+    """SEC EDGAR Form-4 insider activity (last 180d) — fallback for foreign listings.
+
+    Returns a dict with normalized buy/sell counts, or None if SEC has no data
+    or the fetch failed. Cached per-day inside server.sec_edgar.
+    """
+    try:
+        from server import sec_edgar
+        result = sec_edgar.get_insider_activity(symbol, days=180)
+        if result is None:
+            return None
+        buys, sells, net_shares = result
+        return {"buys": buys, "sells": sells, "net_shares": net_shares}
+    except Exception as e:
+        logger.debug(f"SEC insider fetch failed for {symbol}: {e}")
         return None
 
 
@@ -246,11 +342,23 @@ class YahooClient:
     async def _fetch_one(self, symbol: str, results: dict):
         data = await self.fetch_quote_summary(symbol)
         if data:
-            # Enrich with yfinance financials (complete income statement)
+            # Enrich with yfinance financials (complete income statement +
+            # cash flow + quarterly TTM + yfinance insider fallback).
             loop = asyncio.get_event_loop()
             fin_data = await loop.run_in_executor(_executor, _fetch_yf_financials, symbol)
             if fin_data:
                 data["_yf_financials"] = fin_data
+
+            # SEC EDGAR insider fallback — only if BOTH Yahoo paths are empty.
+            # Foreign listings / ADRs often have empty insiderTransactions but
+            # do file Form 4s with the SEC.
+            yahoo_txns = (data.get("insiderTransactions") or {}).get("transactions", [])
+            yf_txns = (fin_data or {}).get("insider_yf") or []
+            if not yahoo_txns and not yf_txns:
+                sec_data = await loop.run_in_executor(_executor, _fetch_sec_insider, symbol)
+                if sec_data:
+                    data["_sec_insider"] = sec_data
+
             results[symbol] = data
 
     async def fetch_spark(self, symbol: str) -> Optional[list[dict]]:

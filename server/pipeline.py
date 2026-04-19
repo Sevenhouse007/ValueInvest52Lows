@@ -377,32 +377,64 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
 
 
 def _parse_insider_transactions(data: dict) -> tuple[int, int, Optional[int]]:
-    """Parse insider transactions from last 6 months. Returns (buys, sells, net_shares)."""
-    txns = data.get("insiderTransactions", {}).get("transactions", [])
-    if not txns:
-        return 0, 0, None
+    """Parse insider transactions from last 6 months.
 
+    Tries three sources in order so foreign listings still get a signal:
+      1. Yahoo `insiderTransactions` quoteSummary module (default for US listings)
+      2. yfinance `ticker.insider_transactions` (different Yahoo endpoint)
+      3. SEC EDGAR Form 4 filings (populated by yahoo_client when both above are empty)
+
+    Returns (buy_count, sell_count, net_shares).
+    """
     import time
     six_months_ago = time.time() - (180 * 86400)
 
-    buy_count = 0
-    sell_count = 0
-    net_shares = 0
-    for tx in txns:
-        start = tx.get("startDate", {})
-        ts = start.get("raw", 0) if isinstance(start, dict) else 0
-        if ts < six_months_ago:
-            continue
-        text = (tx.get("transactionText") or "").lower()
-        shares = _safe_raw(tx, "shares") or 0
-        if "purchase" in text or "buy" in text:
-            buy_count += 1
-            net_shares += int(shares)
-        elif "sale" in text or "sell" in text:
-            sell_count += 1
-            net_shares -= int(shares)
+    # ── Source 1: Yahoo quoteSummary module ──
+    txns = data.get("insiderTransactions", {}).get("transactions", [])
+    if txns:
+        buy_count = sell_count = 0
+        net_shares = 0
+        for tx in txns:
+            start = tx.get("startDate", {})
+            ts = start.get("raw", 0) if isinstance(start, dict) else 0
+            if ts < six_months_ago:
+                continue
+            text = (tx.get("transactionText") or "").lower()
+            shares = _safe_raw(tx, "shares") or 0
+            if "purchase" in text or "buy" in text:
+                buy_count += 1
+                net_shares += int(shares)
+            elif "sale" in text or "sell" in text:
+                sell_count += 1
+                net_shares -= int(shares)
+        if buy_count + sell_count > 0:
+            return buy_count, sell_count, net_shares
 
-    return buy_count, sell_count, net_shares if (buy_count + sell_count) > 0 else None
+    # ── Source 2: yfinance insider_transactions endpoint ──
+    yf_rows = (data.get("_yf_financials") or {}).get("insider_yf") or []
+    if yf_rows:
+        buy_count = sell_count = 0
+        net_shares = 0
+        for row in yf_rows:
+            if row.get("ts", 0) and row["ts"] < six_months_ago:
+                continue
+            text = row.get("text", "")
+            shares = int(row.get("shares") or 0)
+            if "purchase" in text or "buy" in text:
+                buy_count += 1
+                net_shares += shares
+            elif "sale" in text or "sell" in text:
+                sell_count += 1
+                net_shares -= shares
+        if buy_count + sell_count > 0:
+            return buy_count, sell_count, net_shares
+
+    # ── Source 3: SEC EDGAR Form 4 (foreign listings / ADRs) ──
+    sec = data.get("_sec_insider")
+    if sec and (sec.get("buys", 0) + sec.get("sells", 0)) > 0:
+        return sec["buys"], sec["sells"], sec.get("net_shares")
+
+    return 0, 0, None
 
 
 def _compute_gross_margin_change(data: dict) -> Optional[float]:
@@ -469,16 +501,27 @@ def _compute_piotroski(data: dict, fin: dict) -> tuple[Optional[int], list[str]]
     Uses income statement history for YoY comparisons and current-period
     financialData for the rest. Yahoo's balance sheet history no longer
     returns detailed fields, so we approximate tests 5-7 from available data.
+
+    Fallbacks:
+      * Cash flow statement (yfinance ticker.cashflow) backs OCF/FCF when
+        financialData omits them.
+      * Quarterly TTM (4Q sum vs prior 4Q) backs the YoY earnings/revenue/
+        margin tests when annual incomeStatementHistory has only 1 year.
     """
     inc_hist = data.get("incomeStatementHistory", {}).get("incomeStatementHistory", [])
     stats = data.get("defaultKeyStatistics", {})
+    yf_fin = data.get("_yf_financials") or {}
 
     cur_ocf = _safe_raw(fin, "operatingCashflow")
+    if cur_ocf is None:
+        cur_ocf = yf_fin.get("cf_operating")
     cur_roa = _safe_raw(fin, "returnOnAssets")
     cur_roe = _safe_raw(fin, "returnOnEquity")
     cur_cr = _safe_raw(fin, "currentRatio")
     cur_de = _safe_raw(fin, "debtToEquity")
     cur_fcf = _safe_raw(fin, "freeCashflow")
+    if cur_fcf is None:
+        cur_fcf = yf_fin.get("cf_free")
 
     score = 0
     details: list[str] = []
@@ -512,16 +555,23 @@ def _compute_piotroski(data: dict, fin: dict) -> tuple[Optional[int], list[str]]
             details.append("Negative OCF")
 
     # 4. CFO > Net Income (quality of earnings)
+    test4_ni = None
     if len(inc_hist) >= 1:
-        cur_ni = g(inc_hist[0], "netIncome")
-        if cur_ocf is not None and cur_ni is not None:
-            max_tests += 1
-            if cur_ocf > cur_ni:
-                score += 1; details.append("CFO > Net Income")
-            else:
-                details.append("Weak earnings quality (CFO < Net Income)")
+        test4_ni = g(inc_hist[0], "netIncome")
+    if test4_ni is None:
+        # Fallback: yfinance annual net income, then TTM net income.
+        test4_ni = yf_fin.get("net_income") or yf_fin.get("q_ttm_net_income")
+    if cur_ocf is not None and test4_ni is not None:
+        max_tests += 1
+        if cur_ocf > test4_ni:
+            score += 1; details.append("CFO > Net Income")
+        else:
+            details.append("Weak earnings quality (CFO < Net Income)")
 
     # --- Tests from income statement YoY comparison ---
+    # Prefer annual statements when available; fall back to TTM (quarterly sum
+    # vs prior 4 quarters) when only 1 year of annuals is returned.
+    cur_ni = prev_ni = cur_rev = prev_rev = cur_gp = prev_gp = None
     if len(inc_hist) >= 2:
         inc_cur, inc_prev = inc_hist[0], inc_hist[1]
         cur_ni = g(inc_cur, "netIncome")
@@ -531,29 +581,37 @@ def _compute_piotroski(data: dict, fin: dict) -> tuple[Optional[int], list[str]]
         cur_gp = g(inc_cur, "grossProfit")
         prev_gp = g(inc_prev, "grossProfit")
 
-        # 3. ROA improving (approximate: net income growing)
-        if cur_ni is not None and prev_ni is not None:
-            max_tests += 1
-            if cur_ni > prev_ni:
-                score += 1; details.append("Earnings improving")
-            else:
-                details.append("Earnings declining YoY")
+    # Quarterly TTM fallback (filled by yahoo_client._fetch_yf_financials).
+    if cur_ni is None: cur_ni = yf_fin.get("q_ttm_net_income")
+    if prev_ni is None: prev_ni = yf_fin.get("q_prev_net_income")
+    if cur_rev is None: cur_rev = yf_fin.get("q_ttm_revenue")
+    if prev_rev is None: prev_rev = yf_fin.get("q_prev_revenue")
+    if cur_gp is None: cur_gp = yf_fin.get("q_ttm_gross_profit")
+    if prev_gp is None: prev_gp = yf_fin.get("q_prev_gross_profit")
 
-        # 8. Gross margin improving
-        if cur_gp and cur_rev and prev_gp and prev_rev and cur_rev > 0 and prev_rev > 0:
-            max_tests += 1
-            if (cur_gp / cur_rev) > (prev_gp / prev_rev):
-                score += 1; details.append("Margins improving")
-            else:
-                details.append("Margins contracting YoY")
+    # 3. ROA improving (approximate: net income growing)
+    if cur_ni is not None and prev_ni is not None:
+        max_tests += 1
+        if cur_ni > prev_ni:
+            score += 1; details.append("Earnings improving")
+        else:
+            details.append("Earnings declining YoY")
 
-        # 9. Asset turnover improving (approximate: revenue growth > 0)
-        if cur_rev and prev_rev and prev_rev > 0:
-            max_tests += 1
-            if cur_rev > prev_rev:
-                score += 1; details.append("Revenue growing YoY")
-            else:
-                details.append("Revenue declining YoY")
+    # 8. Gross margin improving
+    if cur_gp and cur_rev and prev_gp and prev_rev and cur_rev > 0 and prev_rev > 0:
+        max_tests += 1
+        if (cur_gp / cur_rev) > (prev_gp / prev_rev):
+            score += 1; details.append("Margins improving")
+        else:
+            details.append("Margins contracting YoY")
+
+    # 9. Asset turnover improving (approximate: revenue growth > 0)
+    if cur_rev and prev_rev and prev_rev > 0:
+        max_tests += 1
+        if cur_rev > prev_rev:
+            score += 1; details.append("Revenue growing YoY")
+        else:
+            details.append("Revenue declining YoY")
 
     # --- Tests approximated from current data ---
 
