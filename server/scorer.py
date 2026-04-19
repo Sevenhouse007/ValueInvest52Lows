@@ -942,7 +942,13 @@ def _score_gp_to_assets(stock: ScoredStock, sector_type: str) -> tuple[int, list
 
 
 def _score_roic_vs_wacc(stock: ScoredStock, sector_type: str) -> tuple[int, list[str]]:
-    """ROIC vs sector WACC spread."""
+    """ROIC vs sector WACC spread.
+
+    Calibrated for the NOPAT / Invested Capital ROIC formula (where typical
+    quality firms run 15–30%, not 5–10% as the OCF/EV proxy implied). The
+    "exceptional" tier now requires 3× WACC; 2× WACC is reclassified as
+    "strong" to keep the top-tier label scarce and meaningful.
+    """
     if sector_type in ("financial", "reit"):
         return 0, []
     roic = stock.roic
@@ -950,12 +956,14 @@ def _score_roic_vs_wacc(stock: ScoredStock, sector_type: str) -> tuple[int, list
         return 0, []
     from server.damodaran_benchmarks import SECTOR_WACC
     wacc = SECTOR_WACC.get(stock.sector, 0.085)
+    if roic > wacc * 3:
+        return 8, [f"ROIC {roic*100:.0f}% > 3x WACC ({wacc*100:.0f}%) — exceptional value creation"]
     if roic > wacc * 2:
-        return 8, [f"ROIC {roic*100:.0f}% > 2x WACC ({wacc*100:.0f}%) — exceptional value creation"]
+        return 6, [f"ROIC {roic*100:.0f}% > 2x WACC — strong value creation"]
     if roic > wacc * 1.5:
-        return 6, [f"ROIC {roic*100:.0f}% > 1.5x WACC"]
+        return 4, [f"ROIC {roic*100:.0f}% > 1.5x WACC"]
     if roic > wacc:
-        return 3, [f"ROIC above sector WACC"]
+        return 2, [f"ROIC above sector WACC"]
     if roic > 0:
         return -2, ["ROIC below sector WACC"]
     return -6, ["Negative ROIC — destroying value"]
@@ -1424,16 +1432,19 @@ def compute_quality_score(
             pts -= 10; reasons.append(f"Weak fundamentals (F-Score {fs}/9)")
 
     # ── Change 4: ROIC (15 pts max — leverage-neutral, skip financial/reit) ──
+    # Thresholds calibrated for NOPAT/IC formula (typical quality firm
+    # 15–30%, not 5–10% as OCF/EV implied). Old bands (>25% "exceptional",
+    # >15% "strong") fired for nearly every Big Tech name post-refactor.
     roic = stock.roic
     st = detect_sector_type(stock.sector, stock.industry)
     if roic is not None and st not in ("financial", "reit"):
-        if roic > 0.25:
+        if roic > 0.40:
             pts += 10; reasons.append(f"Exceptional ROIC {roic*100:.0f}%")
-        elif roic > 0.15:
+        elif roic > 0.25:
             pts += 7; reasons.append(f"Strong ROIC {roic*100:.0f}%")
-        elif roic > 0.08:
+        elif roic > 0.15:
             pts += 4
-        elif roic > 0:
+        elif roic > 0.05:
             pts += 2
         elif roic < 0:
             pts -= 6; reasons.append("Negative ROIC — destroying capital")
