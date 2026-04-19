@@ -14,7 +14,7 @@ from server.config import (
     SECTOR_BENCHMARK_TICKERS,
     USE_DAMODARAN_BLEND,
 )
-from server.damodaran_benchmarks import blend_with_damodaran
+from server.damodaran_benchmarks import SECTOR_WACC, blend_with_damodaran
 from server.models import ScanResult, ScoredStock, SectorAverages, StockFundamentals, StockQuote
 from server.scorer import compute_quality_score, compute_score
 from server.yahoo_client import YahooClient
@@ -376,6 +376,7 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         sector=profile.get("sector", ""),
         industry=profile.get("industry", ""),
         country=profile.get("country", ""),
+        sector_wacc=SECTOR_WACC.get(profile.get("sector", ""), 0.085),
     )
 
 
@@ -833,6 +834,7 @@ def merge_quote_and_fundamentals(
         s.operating_cashflow = fundamentals.operating_cashflow
         s.enterprise_value = fundamentals.enterprise_value
         s.roic = fundamentals.roic
+        s.sector_wacc = fundamentals.sector_wacc
         s.ebit = fundamentals.ebit
         s.ebitda = fundamentals.ebitda
         s.total_debt = fundamentals.total_debt

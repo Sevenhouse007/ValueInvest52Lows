@@ -254,6 +254,7 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
         <th data-key="price_to_book" class="num">P/B <span class="arrow"></span></th>
         <th data-key="ev_to_ebitda" class="num">EV/EBITDA <span class="arrow"></span></th>
         <th data-key="return_on_equity" class="num">ROE % <span class="arrow"></span></th>
+        <th data-key="roic" class="num">ROIC % <span class="arrow"></span></th>
         <th data-key="free_cash_flow" class="num">FCF $B <span class="arrow"></span></th>
         <th data-key="recommendation_mean" class="num">Analyst <span class="arrow"></span></th>
         <th data-key="upside_percent" class="num">Upside % <span class="arrow"></span></th>
@@ -520,6 +521,7 @@ function renderTable() {
       <td class="num ${cmpClass(s.price_to_book, mktPb, true)}" title="Mkt avg: ${fmtN(s.market_avg_pb,1)} | Ind avg: ${fmtN(s.industry_avg_pb,1)}">${fmtN(s.price_to_book,1)}</td>
       <td class="num ${cmpClass(s.ev_to_ebitda, mktEv, true)}" title="Mkt avg: ${fmtN(s.market_avg_ev_ebitda,1)} | Ind avg: ${fmtN(s.industry_avg_ev_ebitda,1)}">${fmtN(s.ev_to_ebitda,1)}</td>
       <td class="num ${cmpClass(s.return_on_equity, mktRoe, false)}" title="Mkt avg: ${fmtROE(s.market_avg_roe)} | Ind avg: ${fmtROE(s.industry_avg_roe)}">${fmtROE(s.return_on_equity)}</td>
+      <td class="num ${roicClass(s.roic, s.sector_wacc)}" title="${roicTitle(s.roic, s.sector_wacc, s.sector)}">${fmtROIC(s.roic)}</td>
       <td class="num ${s.free_cash_flow>0?'c-green':s.free_cash_flow<0?'c-red':''}">${fmtFCF(s.free_cash_flow)}</td>
       <td class="num">${fmtAnalyst(s.recommendation_mean)}</td>
       <td class="num ${s.upside_percent>30?'c-bold-green':s.upside_percent>0?'c-green':''}">${fmtN(s.upside_percent,1,'%')}</td>
@@ -528,7 +530,7 @@ function renderTable() {
       <td class="num">${fmtInsider(s.insider_buy_count, s.insider_sell_count)}</td>
     </tr>`;
     if (expandedSymbol === s.symbol) {
-      html += `<tr class="detail-row"><td colspan="20">${detailPanel(s)}</td></tr>`;
+      html += `<tr class="detail-row"><td colspan="21">${detailPanel(s)}</td></tr>`;
     }
   });
   tbody.innerHTML = html;
@@ -557,6 +559,7 @@ function detailPanel(s) {
     ['Price/Book', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2), fmtN(s.industry_avg_pb,2)],
     ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1), fmtN(s.industry_avg_ev_ebitda,1)],
     ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe), fmtROE(s.industry_avg_roe)],
+    ['ROIC vs WACC', fmtROIC(s.roic), s.sector_wacc!=null?fmtROIC(s.sector_wacc)+' (WACC)':'—', '—'],
     ['P/S', fmtN(s.price_to_sales,2), fmtN(s.market_avg_ps,2), '—'],
     ['Debt/Equity', fmtN(s.debt_to_equity,0), fmtN(s.market_avg_debt_equity,0), '—'],
     ['Div Yield', s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—', s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—', '—'],
@@ -573,6 +576,7 @@ function detailPanel(s) {
     ['Price/Book', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2)],
     ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1)],
     ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe)],
+    ['ROIC vs WACC', fmtROIC(s.roic), s.sector_wacc!=null?fmtROIC(s.sector_wacc)+' (WACC)':'—'],
     ['P/S', fmtN(s.price_to_sales,2), fmtN(s.market_avg_ps,2)],
     ['Debt/Equity', fmtN(s.debt_to_equity,0), fmtN(s.market_avg_debt_equity,0)],
     ['Div Yield', s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—', s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—'],
@@ -815,7 +819,7 @@ function populateSectorFilter() {
 // ────────── CSV Export ──────────
 function exportCSV() {
   const stocks = getFiltered();
-  const headers = ['Symbol','Company','Sector','Industry','Model','Score','Delta','Tier','Price','1Y%','MktCap','FwdPE','MktAvgPE','P/B','MktAvgPB','EV/EBITDA','MktAvgEV','ROE%','MktAvgROE','FCF','DivYield%','Analyst','Upside%'];
+  const headers = ['Symbol','Company','Sector','Industry','Model','Score','Delta','Tier','Price','1Y%','MktCap','FwdPE','MktAvgPE','P/B','MktAvgPB','EV/EBITDA','MktAvgEV','ROE%','MktAvgROE','ROIC%','SectorWACC%','FCF','DivYield%','Analyst','Upside%'];
   const rows = stocks.map(s => {
     const prev = prevScores[s.symbol];
     const delta = prev !== undefined ? s.value_score - prev : '';
@@ -825,6 +829,7 @@ function exportCSV() {
       s.price, r2(s.change_percent), s.market_cap, r2(s.forward_pe), r2(s.market_avg_fpe),
       r2(s.price_to_book), r2(s.market_avg_pb), r2(s.ev_to_ebitda), r2(s.market_avg_ev_ebitda),
       s.return_on_equity!=null?r2(s.return_on_equity*100):'', r2(s.market_avg_roe!=null?s.market_avg_roe*100:null),
+      s.roic!=null?r2(s.roic*100):'', s.sector_wacc!=null?r2(s.sector_wacc*100):'',
       s.free_cash_flow, s.dividend_yield!=null?r2(s.dividend_yield*100):'', r2(s.recommendation_mean), r2(s.upside_percent)
     ];
   });
@@ -929,6 +934,28 @@ function fmtROE(v) {
   return pct.toFixed(1) + '%';
 }
 
+// ROIC is OCF/EV (decimal). Compare to sector WACC (also decimal).
+// > WACC = green (creating value), < WACC = red (destroying value).
+function fmtROIC(v) {
+  if (v == null) return '—';
+  return (v * 100).toFixed(1) + '%';
+}
+function roicClass(roic, wacc) {
+  if (roic == null || wacc == null) return '';
+  if (roic > wacc * 1.5) return 'better';   // 1.5× WACC — strong value creation
+  if (roic > wacc) return 'c-green';        // above WACC — creating value
+  if (roic < wacc * 0.7) return 'worse';    // well below — destroying value
+  if (roic < wacc) return 'c-red';          // below WACC
+  return '';
+}
+function roicTitle(roic, wacc, sector) {
+  if (roic == null) return 'ROIC unavailable';
+  if (wacc == null) return `ROIC ${(roic*100).toFixed(1)}% — OCF/EV proxy (no WACC benchmark)`;
+  const spread = (roic - wacc) * 100;
+  const sign = spread >= 0 ? '+' : '';
+  return `ROIC ${(roic*100).toFixed(1)}% vs ${sector||'sector'} WACC ${(wacc*100).toFixed(1)}% (spread ${sign}${spread.toFixed(1)} pts) — ROIC = OCF/EV (understates true ROIC for cash-rich, low-asset firms)`;
+}
+
 function fmtAnalyst(v) {
   if (v == null) return '—';
   let stars = '';
@@ -1017,6 +1044,7 @@ function renderLookupResult(s) {
     ['P/B', fmtN(s.price_to_book,2), fmtN(s.market_avg_pb,2)],
     ['EV/EBITDA', fmtN(s.ev_to_ebitda,1), fmtN(s.market_avg_ev_ebitda,1)],
     ['ROE %', fmtROE(s.return_on_equity), fmtROE(s.market_avg_roe)],
+    ['ROIC vs WACC', fmtROIC(s.roic), s.sector_wacc!=null?fmtROIC(s.sector_wacc)+' (WACC)':'—'],
     ['P/S', fmtN(s.price_to_sales,2), fmtN(s.market_avg_ps,2)],
     ['Debt/Equity', fmtN(s.debt_to_equity,0), fmtN(s.market_avg_debt_equity,0)],
     ['Div Yield', s.dividend_yield!=null?fmtN(s.dividend_yield*100,2,'%'):'—', s.market_avg_div_yield!=null?fmtN(s.market_avg_div_yield*100,2,'%'):'—'],

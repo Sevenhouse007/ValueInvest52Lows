@@ -41,6 +41,7 @@ class StockFundamentals(BaseModel):
     operating_cashflow: Optional[float] = None
     enterprise_value: Optional[float] = None
     roic: Optional[float] = None
+    sector_wacc: Optional[float] = None  # Damodaran sector WACC for ROIC vs WACC comparison
     ebit: Optional[float] = None
     ebitda: Optional[float] = None
     total_debt: Optional[float] = None
@@ -141,6 +142,7 @@ class ScoredStock(BaseModel):
     operating_cashflow: Optional[float] = None
     enterprise_value: Optional[float] = None
     roic: Optional[float] = None
+    sector_wacc: Optional[float] = None  # Damodaran sector WACC for ROIC vs WACC comparison
     ebit: Optional[float] = None
     ebitda: Optional[float] = None
     total_debt: Optional[float] = None
