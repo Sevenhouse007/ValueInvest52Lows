@@ -25,7 +25,7 @@ from server.database import (
 from server.models import ScanResult, ScanSummary
 from server.pipeline import merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
 from server.scorer import compute_quality_score, compute_score
-from server.yahoo_client import YahooClient
+from server.yahoo_client import YahooClient, _executor, _fetch_yf_financials
 
 logging.basicConfig(
     level=logging.INFO,
@@ -333,6 +333,15 @@ async def lookup_stock(symbol: str):
     raw = await _yahoo_client.fetch_quote_summary(symbol)
     if not raw:
         raise HTTPException(404, f"No data found for {symbol}")
+
+    # 1b. Enrich with yfinance financials so balance-sheet driven metrics
+    # (NOPAT-based ROIC, accruals, F-Score, asset growth, etc.) match what
+    # the scanner produces. Without this, lookup falls back to OCF/EV ROIC
+    # while the scan shows NOPAT ROIC — a confusing inconsistency.
+    loop = asyncio.get_event_loop()
+    fin_data = await loop.run_in_executor(_executor, _fetch_yf_financials, symbol)
+    if fin_data:
+        raw["_yf_financials"] = fin_data
 
     # 2. Parse quote + fundamentals
     quote = parse_quote_from_summary(symbol, raw)

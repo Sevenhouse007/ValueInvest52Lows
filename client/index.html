@@ -932,11 +932,16 @@ function roicClass(roic, wacc) {
   return '';
 }
 function roicTitle(roic, wacc, sector) {
-  if (roic == null) return 'ROIC unavailable';
-  if (wacc == null) return `ROIC ${(roic*100).toFixed(1)}% — OCF/EV proxy (no WACC benchmark)`;
+  if (roic == null) {
+    if (sector === 'Financial Services' || sector === 'Real Estate') {
+      return `ROIC not meaningful for ${sector} (use FFO/Yield-on-equity instead)`;
+    }
+    return 'ROIC unavailable';
+  }
+  if (wacc == null) return `ROIC ${(roic*100).toFixed(1)}% (no WACC benchmark)`;
   const spread = (roic - wacc) * 100;
   const sign = spread >= 0 ? '+' : '';
-  return `ROIC ${(roic*100).toFixed(1)}% vs ${sector||'sector'} WACC ${(wacc*100).toFixed(1)}% (spread ${sign}${spread.toFixed(1)} pts) — ROIC = OCF/EV (understates true ROIC for cash-rich, low-asset firms)`;
+  return `ROIC ${(roic*100).toFixed(1)}% vs ${sector||'sector'} WACC ${(wacc*100).toFixed(1)}% (spread ${sign}${spread.toFixed(1)} pts)`;
 }
 
 // Returns 'good' | 'bad' | null per metric.

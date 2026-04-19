@@ -22,6 +22,16 @@ from server.yahoo_client import YahooClient
 logger = logging.getLogger(__name__)
 
 
+# Sectors where the NOPAT / Invested Capital formula breaks down.
+# - Financial Services: deposits show up as "liabilities" but are operational
+#   funding, not invested capital; EBIT is distorted by interest expense
+#   being operational rather than financial. Damodaran excludes financials
+#   from invested-capital analyses entirely.
+# - Real Estate: REIT book equity is dominated by depreciated property values
+#   that don't reflect economic capital; FFO/Price is the standard alternative.
+_NOPAT_ROIC_INELIGIBLE_SECTORS = {"Financial Services", "Real Estate"}
+
+
 def _compute_roic(
     ebit: Optional[float],
     total_debt: Optional[float],
@@ -30,6 +40,7 @@ def _compute_roic(
     total_cash: Optional[float],
     ocf: Optional[float],
     ev: Optional[float],
+    sector: str = "",
     tax_rate: float = 0.21,
 ) -> Optional[float]:
     """Return ROIC as a decimal (0.18 = 18%).
@@ -43,9 +54,17 @@ def _compute_roic(
     asset-light businesses (CHKP, AAPL) the way OCF/EV does, since EV
     nets out cash in a way that inflates the denominator for those names.
 
-    Falls back to the OCF/EV proxy when balance-sheet inputs are missing.
-    Clamped to [-5.0, 5.0] to suppress noise from near-zero invested capital.
+    For Financial Services and Real Estate we return None — neither the NOPAT
+    formula nor the OCF/EV proxy is meaningful for these sectors. (Bank OCF
+    is dominated by deposit-flow changes; REITs use FFO instead.)
+
+    Falls back to OCF/EV when balance-sheet inputs are missing for an
+    eligible sector. Clamped to [-5.0, 5.0] to suppress noise from
+    near-zero invested capital.
     """
+    if sector in _NOPAT_ROIC_INELIGIBLE_SECTORS:
+        return None
+
     if (
         ebit is not None
         and total_debt is not None
@@ -345,7 +364,8 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
             beneish = None
 
     # ROIC — compute now that EBIT, total assets, total liabilities, debt and cash are all loaded.
-    # Prefers NOPAT / Invested Capital, falls back to OCF / EV when balance sheet data is missing.
+    # Prefers NOPAT / Invested Capital, falls back to OCF / EV for financials, REITs, or
+    # when balance-sheet inputs are missing.
     roic = _compute_roic(
         ebit=ebit_val,
         total_debt=total_debt,
@@ -354,6 +374,7 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         total_cash=total_cash,
         ocf=ocf,
         ev=ev,
+        sector=profile.get("sector", ""),
     )
 
     return StockFundamentals(
