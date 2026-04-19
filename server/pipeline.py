@@ -487,24 +487,39 @@ def _compute_piotroski(data: dict, fin: dict) -> tuple[Optional[int], list[str]]
     def g(stmt: dict, key: str) -> Optional[float]:
         return _safe_raw(stmt, key)
 
+    # Each test appends a detail string regardless of pass/fail so the UI can
+    # show which tests failed (red ✗) alongside which passed (green ✓).
+    # Failure phrasings are chosen so the frontend negative-reason regex
+    # picks them up automatically (Negative…, Weak…, High leverage…,
+    # Earnings/Revenue/Margins declining/contracting…, Share dilution…).
+
     # --- Tests from current-period financialData (always available) ---
 
     # 1. ROA > 0
-    max_tests += 1
-    if cur_roa is not None and cur_roa > 0:
-        score += 1; details.append("ROA positive")
+    if cur_roa is not None:
+        max_tests += 1
+        if cur_roa > 0:
+            score += 1; details.append("ROA positive")
+        else:
+            details.append("Negative ROA")
 
     # 2. Operating cash flow > 0
-    max_tests += 1
-    if cur_ocf is not None and cur_ocf > 0:
-        score += 1; details.append("OCF positive")
+    if cur_ocf is not None:
+        max_tests += 1
+        if cur_ocf > 0:
+            score += 1; details.append("OCF positive")
+        else:
+            details.append("Negative OCF")
 
     # 4. CFO > Net Income (quality of earnings)
     if len(inc_hist) >= 1:
         cur_ni = g(inc_hist[0], "netIncome")
-        max_tests += 1
-        if cur_ocf is not None and cur_ni is not None and cur_ocf > cur_ni:
-            score += 1; details.append("CFO > Net Income")
+        if cur_ocf is not None and cur_ni is not None:
+            max_tests += 1
+            if cur_ocf > cur_ni:
+                score += 1; details.append("CFO > Net Income")
+            else:
+                details.append("Weak earnings quality (CFO < Net Income)")
 
     # --- Tests from income statement YoY comparison ---
     if len(inc_hist) >= 2:
@@ -516,34 +531,47 @@ def _compute_piotroski(data: dict, fin: dict) -> tuple[Optional[int], list[str]]
         cur_gp = g(inc_cur, "grossProfit")
         prev_gp = g(inc_prev, "grossProfit")
 
-        # 3. ROA improving (approximate: net income growing and positive)
-        max_tests += 1
-        if cur_ni and prev_ni and cur_ni > prev_ni:
-            score += 1; details.append("Earnings improving")
+        # 3. ROA improving (approximate: net income growing)
+        if cur_ni is not None and prev_ni is not None:
+            max_tests += 1
+            if cur_ni > prev_ni:
+                score += 1; details.append("Earnings improving")
+            else:
+                details.append("Earnings declining YoY")
 
         # 8. Gross margin improving
         if cur_gp and cur_rev and prev_gp and prev_rev and cur_rev > 0 and prev_rev > 0:
             max_tests += 1
             if (cur_gp / cur_rev) > (prev_gp / prev_rev):
                 score += 1; details.append("Margins improving")
+            else:
+                details.append("Margins contracting YoY")
 
         # 9. Asset turnover improving (approximate: revenue growth > 0)
         if cur_rev and prev_rev and prev_rev > 0:
             max_tests += 1
             if cur_rev > prev_rev:
                 score += 1; details.append("Revenue growing YoY")
+            else:
+                details.append("Revenue declining YoY")
 
     # --- Tests approximated from current data ---
 
-    # 5. Leverage: debt/equity reasonable or decreasing
-    max_tests += 1
-    if cur_de is not None and cur_de < 100:
-        score += 1; details.append("Low leverage")
+    # 5. Leverage: debt/equity reasonable
+    if cur_de is not None:
+        max_tests += 1
+        if cur_de < 100:
+            score += 1; details.append("Low leverage")
+        else:
+            details.append(f"High leverage (D/E {cur_de:.0f})")
 
     # 6. Current ratio > 1 (liquidity adequate)
-    max_tests += 1
-    if cur_cr is not None and cur_cr > 1.0:
-        score += 1; details.append("Adequate liquidity")
+    if cur_cr is not None:
+        max_tests += 1
+        if cur_cr > 1.0:
+            score += 1; details.append("Adequate liquidity")
+        else:
+            details.append(f"Weak liquidity (CR {cur_cr:.2f})")
 
     # 7. No dilution (use sharesOutstanding from defaultKeyStatistics)
     cur_shares = _safe_raw(stats, "sharesOutstanding")
@@ -553,6 +581,8 @@ def _compute_piotroski(data: dict, fin: dict) -> tuple[Optional[int], list[str]]
         # If float is close to outstanding, no significant dilution
         if float_shares / cur_shares > 0.85:
             score += 1; details.append("Minimal dilution")
+        else:
+            details.append("Share dilution")
 
     if max_tests < 5:
         return None, []  # insufficient data
