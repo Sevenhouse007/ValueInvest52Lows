@@ -1242,8 +1242,8 @@ function renderBacktest(summary, details) {
   if (!summary.has_data) {
     html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;text-align:center;">`;
     html += `<h3 style="margin-bottom:8px;">No Forward Returns Yet</h3>`;
-    html += `<p style="color:var(--text2);">Forward returns are computed 30, 90, and 180 days after each scan.</p>`;
-    html += `<p style="color:var(--text2);">Your earliest scan needs to be at least 30 days old for data to appear.</p>`;
+    html += `<p style="color:var(--text2);">Forward returns are computed 15, 30, 90, and 180 days after each scan.</p>`;
+    html += `<p style="color:var(--text2);">Your earliest scan needs to be at least 15 days old for data to appear.</p>`;
     html += `<p style="color:var(--text2);margin-top:12px;">Click "Fill Forward Returns" to manually trigger the computation, or wait for the nightly 12:30 AM ET job.</p>`;
     html += `</div>`;
 
@@ -1294,6 +1294,7 @@ function renderTierTable(tiers, type) {
   html += `<tr style="border-bottom:1px solid var(--border);">`;
   html += `<th style="text-align:left;padding:6px;color:var(--text2);">Tier</th>`;
   html += `<th style="text-align:right;padding:6px;color:var(--text2);">Count</th>`;
+  html += `<th style="text-align:right;padding:6px;color:var(--text2);">15D Avg</th>`;
   html += `<th style="text-align:right;padding:6px;color:var(--text2);">30D Avg</th>`;
   html += `<th style="text-align:right;padding:6px;color:var(--text2);">90D Avg</th>`;
   html += `<th style="text-align:right;padding:6px;color:var(--text2);">180D Avg</th>`;
@@ -1305,6 +1306,7 @@ function renderTierTable(tiers, type) {
     html += `<tr style="border-bottom:1px solid var(--border);">`;
     html += `<td style="padding:6px;color:${colors[i]};font-weight:600;">${tier}</td>`;
     html += `<td style="text-align:right;padding:6px;">${t.count}</td>`;
+    html += `<td style="text-align:right;padding:6px;">${fmtRet(t.avg_return_15d)}</td>`;
     html += `<td style="text-align:right;padding:6px;">${fmtRet(t.avg_return_30d)}</td>`;
     html += `<td style="text-align:right;padding:6px;">${fmtRet(t.avg_return_90d)}</td>`;
     html += `<td style="text-align:right;padding:6px;">${fmtRet(t.avg_return_180d)}</td>`;
@@ -1324,6 +1326,7 @@ function renderTrackingTable(details) {
   html += `<th style="text-align:right;padding:6px;">Price</th>`;
   html += `<th style="text-align:right;padding:6px;">V</th>`;
   html += `<th style="text-align:right;padding:6px;">Q</th>`;
+  html += `<th style="text-align:right;padding:6px;">15D</th>`;
   html += `<th style="text-align:right;padding:6px;">30D</th>`;
   html += `<th style="text-align:right;padding:6px;">90D</th>`;
   html += `<th style="text-align:right;padding:6px;">180D</th>`;
@@ -1343,6 +1346,7 @@ function renderTrackingTable(details) {
     html += `<td style="text-align:right;padding:4px 6px;">$${d.price_at_scan ? d.price_at_scan.toFixed(2) : '—'}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;" class="${vCls}">${d.value_score || '—'}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">${d.quality_score || '—'}</td>`;
+    html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_15d)}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_30d)}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_90d)}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_180d)}</td>`;

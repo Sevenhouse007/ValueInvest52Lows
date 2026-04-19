@@ -518,8 +518,8 @@ To reduce noise from single-day data fluctuations:
 | Full scan | 4:30 PM ET daily | Fetch all 52W-low stocks, enrich, score, save |
 | Pre-market refresh | 7:00 AM ET Mon-Fri | Update prices only, flag stocks exiting 52W low range |
 | Notifications | After full scan | Email/Slack digest of top 10 new/improved picks |
-| Performance tracking | After full scan | Save price + scores for 30/90/180 day return validation |
-| Forward return fill | 12:30 AM ET daily | Fill in 30/90/180 day forward prices for backtesting |
+| Performance tracking | After full scan | Save price + scores for 15/30/90/180 day return validation |
+| Forward return fill | 12:30 AM ET daily | Fill in 15/30/90/180 day forward prices for backtesting |
 
 ---
 
@@ -551,4 +551,4 @@ To reduce noise from single-day data fluctuations:
 | 45-64 | Quality Watch | Good business, worth monitoring |
 | 0-44 | Not Quality | Not a quality compounder, or deteriorating |
 
-The best opportunities are stocks that rank highly on **both** scores — cheap AND high quality. These get a purple **V+Q** badge (Value ≥ 70 AND Quality ≥ 65) and are ranked by their **Composite Score** (0-100) which normalizes and combines both scores. The Backtest tab tracks whether these picks actually outperform over 30, 90, and 180 days.
+The best opportunities are stocks that rank highly on **both** scores — cheap AND high quality. These get a purple **V+Q** badge (Value ≥ 70 AND Quality ≥ 65) and are ranked by their **Composite Score** (0-100) which normalizes and combines both scores. The Backtest tab tracks whether these picks actually outperform over 15, 30, 90, and 180 days.

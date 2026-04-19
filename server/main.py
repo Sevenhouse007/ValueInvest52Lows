@@ -46,7 +46,7 @@ async def scheduled_refresh():
 
 
 async def fill_forward_returns():
-    """Nightly job: fill in 30/90/180 day forward prices for performance tracking."""
+    """Nightly job: fill in 15/30/90/180 day forward prices for performance tracking."""
     logger.info("Forward return fill job starting...")
     try:
         import yfinance as yf
@@ -68,6 +68,9 @@ async def fill_forward_returns():
                 price = info.get("regularMarketPrice") or info.get("currentPrice")
                 if not price:
                     continue
+                if days_elapsed >= 15 and r["price_15d"] is None:
+                    update_forward_price(r["id"], 15, price)
+                    filled += 1
                 if days_elapsed >= 30 and r["price_30d"] is None:
                     update_forward_price(r["id"], 30, price)
                     filled += 1

@@ -69,9 +69,11 @@ def init_db():
                 symbol TEXT NOT NULL,
                 scan_date TEXT NOT NULL,
                 price_at_scan REAL,
+                price_15d REAL,
                 price_30d REAL,
                 price_90d REAL,
                 price_180d REAL,
+                return_15d REAL,
                 return_30d REAL,
                 return_90d REAL,
                 return_180d REAL,
@@ -87,6 +89,14 @@ def init_db():
             conn.execute("SELECT market_sector_averages_json FROM scans LIMIT 1")
         except sqlite3.OperationalError:
             conn.execute("ALTER TABLE scans ADD COLUMN market_sector_averages_json TEXT DEFAULT '{}'")
+
+        # Migration: add 15-day forward-return columns to scan_performance.
+        # Older deploys created the table before this window existed.
+        try:
+            conn.execute("SELECT price_15d FROM scan_performance LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE scan_performance ADD COLUMN price_15d REAL")
+            conn.execute("ALTER TABLE scan_performance ADD COLUMN return_15d REAL")
 
 
 def save_scan(result: ScanResult):
@@ -159,10 +169,11 @@ def get_performance_rows_needing_update() -> list[dict]:
     with get_db() as conn:
         rows = conn.execute("""
             SELECT id, symbol, scan_date, price_at_scan,
-                   price_30d, price_90d, price_180d,
+                   price_15d, price_30d, price_90d, price_180d,
                    value_score, quality_score
             FROM scan_performance
-            WHERE (price_30d IS NULL AND julianday('now') - julianday(scan_date) >= 30)
+            WHERE (price_15d IS NULL AND julianday('now') - julianday(scan_date) >= 15)
+               OR (price_30d IS NULL AND julianday('now') - julianday(scan_date) >= 30)
                OR (price_90d IS NULL AND julianday('now') - julianday(scan_date) >= 90)
                OR (price_180d IS NULL AND julianday('now') - julianday(scan_date) >= 180)
         """).fetchall()
@@ -176,7 +187,9 @@ def update_forward_price(row_id: int, days: int, price: float):
         if not row or not row["price_at_scan"] or row["price_at_scan"] <= 0:
             return
         ret = round((price - row["price_at_scan"]) / row["price_at_scan"], 4)
-        if days == 30:
+        if days == 15:
+            conn.execute("UPDATE scan_performance SET price_15d = ?, return_15d = ? WHERE id = ?", (price, ret, row_id))
+        elif days == 30:
             conn.execute("UPDATE scan_performance SET price_30d = ?, return_30d = ? WHERE id = ?", (price, ret, row_id))
         elif days == 90:
             conn.execute("UPDATE scan_performance SET price_90d = ?, return_90d = ? WHERE id = ?", (price, ret, row_id))
@@ -189,14 +202,18 @@ def get_backtest_summary() -> dict:
     with get_db() as conn:
         # Get all rows with at least one forward return
         rows = conn.execute("""
-            SELECT value_score, quality_score, return_30d, return_90d, return_180d,
+            SELECT value_score, quality_score,
+                   return_15d, return_30d, return_90d, return_180d,
                    scan_date, symbol, price_at_scan
             FROM scan_performance
-            WHERE return_30d IS NOT NULL OR return_90d IS NOT NULL OR return_180d IS NOT NULL
+            WHERE return_15d IS NOT NULL
+               OR return_30d IS NOT NULL
+               OR return_90d IS NOT NULL
+               OR return_180d IS NOT NULL
         """).fetchall()
 
         if not rows:
-            return {"has_data": False, "message": "No forward returns computed yet. Returns are filled in 30/90/180 days after each scan."}
+            return {"has_data": False, "message": "No forward returns computed yet. Returns are filled in 15/30/90/180 days after each scan."}
 
         # Group by value tier
         tiers = {"Strong Value": [], "Moderate Value": [], "Limited Signal": []}
@@ -213,6 +230,7 @@ def get_backtest_summary() -> dict:
         for tier, stocks in tiers.items():
             summary["tiers"][tier] = {
                 "count": len(stocks),
+                "avg_return_15d": _avg([s["return_15d"] for s in stocks]),
                 "avg_return_30d": _avg([s["return_30d"] for s in stocks]),
                 "avg_return_90d": _avg([s["return_90d"] for s in stocks]),
                 "avg_return_180d": _avg([s["return_180d"] for s in stocks]),
@@ -229,6 +247,7 @@ def get_backtest_summary() -> dict:
         for tier, stocks in q_tiers.items():
             summary["quality_tiers"][tier] = {
                 "count": len(stocks),
+                "avg_return_15d": _avg([s["return_15d"] for s in stocks]),
                 "avg_return_30d": _avg([s["return_30d"] for s in stocks]),
                 "avg_return_90d": _avg([s["return_90d"] for s in stocks]),
                 "avg_return_180d": _avg([s["return_180d"] for s in stocks]),
@@ -242,8 +261,8 @@ def get_backtest_details() -> list[dict]:
     with get_db() as conn:
         rows = conn.execute("""
             SELECT symbol, scan_date, price_at_scan,
-                   price_30d, price_90d, price_180d,
-                   return_30d, return_90d, return_180d,
+                   price_15d, price_30d, price_90d, price_180d,
+                   return_15d, return_30d, return_90d, return_180d,
                    value_score, quality_score
             FROM scan_performance
             ORDER BY scan_date DESC, value_score DESC
