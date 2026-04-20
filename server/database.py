@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -73,16 +73,29 @@ def init_db():
                 price_30d REAL,
                 price_90d REAL,
                 price_180d REAL,
+                price_365d REAL,
                 return_15d REAL,
                 return_30d REAL,
                 return_90d REAL,
                 return_180d REAL,
+                return_365d REAL,
                 value_score INTEGER,
                 quality_score INTEGER,
                 UNIQUE(scan_date, symbol)
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_perf_symbol ON scan_performance(symbol)")
+
+        # Latest known price per symbol — used by bounce-back detection.
+        # Updated by both the daily scan (for symbols still at 52W low) and
+        # the nightly fill job (for symbols still in our 365-day window).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS symbol_latest_price (
+                symbol TEXT PRIMARY KEY,
+                price REAL NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
 
         # Migration: add market_sector_averages_json if not present
         try:
@@ -97,6 +110,14 @@ def init_db():
         except sqlite3.OperationalError:
             conn.execute("ALTER TABLE scan_performance ADD COLUMN price_15d REAL")
             conn.execute("ALTER TABLE scan_performance ADD COLUMN return_15d REAL")
+
+        # Migration: add 365-day forward-return columns to scan_performance.
+        # 1-year window captures full value-thesis horizons.
+        try:
+            conn.execute("SELECT price_365d FROM scan_performance LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE scan_performance ADD COLUMN price_365d REAL")
+            conn.execute("ALTER TABLE scan_performance ADD COLUMN return_365d REAL")
 
         # Migration: enforce UNIQUE(scan_date, symbol) on scan_performance.
         # The constraint is in the CREATE TABLE for new deploys, but older
@@ -190,13 +211,14 @@ def get_performance_rows_needing_update() -> list[dict]:
     with get_db() as conn:
         rows = conn.execute("""
             SELECT id, symbol, scan_date, price_at_scan,
-                   price_15d, price_30d, price_90d, price_180d,
+                   price_15d, price_30d, price_90d, price_180d, price_365d,
                    value_score, quality_score
             FROM scan_performance
             WHERE (price_15d IS NULL AND julianday('now') - julianday(scan_date) >= 15)
                OR (price_30d IS NULL AND julianday('now') - julianday(scan_date) >= 30)
                OR (price_90d IS NULL AND julianday('now') - julianday(scan_date) >= 90)
                OR (price_180d IS NULL AND julianday('now') - julianday(scan_date) >= 180)
+               OR (price_365d IS NULL AND julianday('now') - julianday(scan_date) >= 365)
         """).fetchall()
         return [dict(r) for r in rows]
 
@@ -216,6 +238,8 @@ def update_forward_price(row_id: int, days: int, price: float):
             conn.execute("UPDATE scan_performance SET price_90d = ?, return_90d = ? WHERE id = ?", (price, ret, row_id))
         elif days == 180:
             conn.execute("UPDATE scan_performance SET price_180d = ?, return_180d = ? WHERE id = ?", (price, ret, row_id))
+        elif days == 365:
+            conn.execute("UPDATE scan_performance SET price_365d = ?, return_365d = ? WHERE id = ?", (price, ret, row_id))
 
 
 def get_backtest_summary() -> dict:
@@ -224,17 +248,18 @@ def get_backtest_summary() -> dict:
         # Get all rows with at least one forward return
         rows = conn.execute("""
             SELECT value_score, quality_score,
-                   return_15d, return_30d, return_90d, return_180d,
+                   return_15d, return_30d, return_90d, return_180d, return_365d,
                    scan_date, symbol, price_at_scan
             FROM scan_performance
             WHERE return_15d IS NOT NULL
                OR return_30d IS NOT NULL
                OR return_90d IS NOT NULL
                OR return_180d IS NOT NULL
+               OR return_365d IS NOT NULL
         """).fetchall()
 
         if not rows:
-            return {"has_data": False, "message": "No forward returns computed yet. Returns are filled in 15/30/90/180 days after each scan."}
+            return {"has_data": False, "message": "No forward returns computed yet. Returns are filled in 15/30/90/180/365 days after each scan."}
 
         # Group by value tier
         tiers = {"Strong Value": [], "Moderate Value": [], "Limited Signal": []}
@@ -255,6 +280,7 @@ def get_backtest_summary() -> dict:
                 "avg_return_30d": _avg([s["return_30d"] for s in stocks]),
                 "avg_return_90d": _avg([s["return_90d"] for s in stocks]),
                 "avg_return_180d": _avg([s["return_180d"] for s in stocks]),
+                "avg_return_365d": _avg([s["return_365d"] for s in stocks]),
             }
 
         # Also group by quality tier
@@ -272,6 +298,7 @@ def get_backtest_summary() -> dict:
                 "avg_return_30d": _avg([s["return_30d"] for s in stocks]),
                 "avg_return_90d": _avg([s["return_90d"] for s in stocks]),
                 "avg_return_180d": _avg([s["return_180d"] for s in stocks]),
+                "avg_return_365d": _avg([s["return_365d"] for s in stocks]),
             }
 
         return summary
@@ -282,13 +309,87 @@ def get_backtest_details() -> list[dict]:
     with get_db() as conn:
         rows = conn.execute("""
             SELECT symbol, scan_date, price_at_scan,
-                   price_15d, price_30d, price_90d, price_180d,
-                   return_15d, return_30d, return_90d, return_180d,
+                   price_15d, price_30d, price_90d, price_180d, price_365d,
+                   return_15d, return_30d, return_90d, return_180d, return_365d,
                    value_score, quality_score
             FROM scan_performance
             ORDER BY scan_date DESC, value_score DESC
         """).fetchall()
         return [dict(r) for r in rows]
+
+
+def upsert_latest_price(symbol: str, price: float, updated_at: Optional[str] = None):
+    """Record the latest known price for a symbol (UPSERT)."""
+    if not symbol or price is None or price <= 0:
+        return
+    if updated_at is None:
+        updated_at = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO symbol_latest_price (symbol, price, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET price = excluded.price, updated_at = excluded.updated_at
+        """, (symbol, price, updated_at))
+
+
+def get_recent_tracked_symbols(lookback_days: int = 365) -> list[str]:
+    """Return distinct symbols seen in scan_performance within the last N days.
+
+    Used by the nightly fill job to refresh latest prices for symbols
+    that may no longer be at 52W lows but are still being tracked.
+    """
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT DISTINCT symbol FROM scan_performance
+            WHERE julianday('now') - julianday(scan_date) <= {int(lookback_days)}
+        """).fetchall()
+        return [r["symbol"] for r in rows]
+
+
+def get_bounce_back_candidates(threshold_pct: float = 0.05, lookback_days: int = 90) -> list[dict]:
+    """Find stocks that hit a 52W low within `lookback_days` and have since
+    rebounded by at least `threshold_pct`.
+
+    For each symbol, the "captured low" is the lowest price_at_scan we
+    recorded within the lookback window — this represents the deepest dip
+    we caught for that symbol. The current price comes from
+    symbol_latest_price (refreshed by the fill job and daily scan).
+
+    Returns a list sorted by gain percentage descending.
+    """
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            WITH lows AS (
+                SELECT symbol, MIN(price_at_scan) AS captured_low
+                FROM scan_performance
+                WHERE price_at_scan > 0
+                  AND julianday('now') - julianday(scan_date) <= {int(lookback_days)}
+                GROUP BY symbol
+            )
+            SELECT
+                sp.symbol,
+                sp.scan_date AS low_date,
+                sp.price_at_scan AS captured_low,
+                sp.value_score,
+                sp.quality_score,
+                lp.price AS current_price,
+                lp.updated_at AS current_price_at,
+                CAST((julianday('now') - julianday(sp.scan_date)) AS INTEGER) AS days_since_low
+            FROM scan_performance sp
+            JOIN lows ON lows.symbol = sp.symbol AND lows.captured_low = sp.price_at_scan
+            JOIN symbol_latest_price lp ON lp.symbol = sp.symbol
+            WHERE lp.price >= sp.price_at_scan * (1.0 + ?)
+            GROUP BY sp.symbol
+            ORDER BY (lp.price - sp.price_at_scan) / sp.price_at_scan DESC
+        """, (threshold_pct,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            low = d["captured_low"]
+            cur = d["current_price"]
+            d["gain_pct"] = round((cur - low) / low, 4) if low else None
+            out.append(d)
+        return out
 
 
 def get_rolling_scores_batch(symbols: list[str]) -> dict:
@@ -351,7 +452,13 @@ def get_stock_history(symbol: str) -> list[dict]:
 
 
 def save_performance_tracking(scan_date: str, stocks: list):
-    """Save performance tracking rows for future return calculation."""
+    """Save performance tracking rows for future return calculation.
+
+    Also seeds symbol_latest_price for every stock in the scan — they're
+    at a 52W low today, but tomorrow if they bounce we want a fresh
+    baseline price to compare against.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         for s in stocks:
             try:
@@ -359,6 +466,12 @@ def save_performance_tracking(scan_date: str, stocks: list):
                     "INSERT OR IGNORE INTO scan_performance (symbol, scan_date, price_at_scan, value_score, quality_score) VALUES (?, ?, ?, ?, ?)",
                     (s.symbol, scan_date, s.price, s.value_score, s.quality_score),
                 )
+                if s.price and s.price > 0:
+                    conn.execute("""
+                        INSERT INTO symbol_latest_price (symbol, price, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(symbol) DO UPDATE SET price = excluded.price, updated_at = excluded.updated_at
+                    """, (s.symbol, float(s.price), now_iso))
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning(f"Performance tracking insert failed for {s.symbol}: {e}")

@@ -209,6 +209,7 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
   <div class="tab" data-tab="quality" onclick="switchTab('quality')">Quality on Sale <span class="badge badge-blue" id="tabQualityCount">0</span></div>
   <div class="tab" data-tab="lookup" onclick="switchTab('lookup')">Stock Lookup</div>
   <div class="tab" data-tab="backtest" onclick="switchTab('backtest')">Backtest</div>
+  <div class="tab" data-tab="bounceback" onclick="switchTab('bounceback')">Bounce Back <span class="badge badge-amber" id="tabBounceCount" style="display:none;">0</span></div>
   <span id="tabDualCount" class="badge" style="display:none;margin-left:auto;background:rgba(167,139,250,.15);color:#a78bfa;font-size:11px;padding:3px 8px;align-self:center;">0 V+Q</span>
 </div>
 
@@ -301,6 +302,37 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
   </div>
   <div id="backtestContent">
     <p style="color:var(--text2);">Loading backtest data...</p>
+  </div>
+</div>
+
+<div id="bouncebackSection" style="display:none;padding:0 24px 24px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;padding:20px 0 12px;gap:16px;flex-wrap:wrap;">
+    <div>
+      <h3 style="font-size:16px;">Bounce Back Detection — Stocks Recovering From 52W Lows</h3>
+      <p style="color:var(--text2);font-size:12px;margin-top:4px;">Stocks we caught at a 52W low that have since started moving up. Sorted by gain since the captured low.</p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;font-size:12px;color:var(--text2);">
+      <label>Min gain:
+        <select id="bounceThreshold" onchange="loadBounceBack()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px;">
+          <option value="0.03">3%</option>
+          <option value="0.05" selected>5%</option>
+          <option value="0.10">10%</option>
+          <option value="0.20">20%</option>
+        </select>
+      </label>
+      <label>Lookback:
+        <select id="bounceLookback" onchange="loadBounceBack()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px;">
+          <option value="30">30D</option>
+          <option value="60">60D</option>
+          <option value="90" selected>90D</option>
+          <option value="180">180D</option>
+          <option value="365">365D</option>
+        </select>
+      </label>
+    </div>
+  </div>
+  <div id="bouncebackContent">
+    <p style="color:var(--text2);">Loading bounce-back candidates...</p>
   </div>
 </div>
 
@@ -736,7 +768,8 @@ function switchTab(tab) {
 
   const isLookup = tab === 'lookup';
   const isBacktest = tab === 'backtest';
-  const isSpecial = isLookup || isBacktest;
+  const isBounceback = tab === 'bounceback';
+  const isSpecial = isLookup || isBacktest || isBounceback;
   // Show/hide sections
   document.querySelector('.controls').style.display = isSpecial ? 'none' : '';
   document.querySelector('.score-legend').style.display = isSpecial ? 'none' : '';
@@ -744,9 +777,14 @@ function switchTab(tab) {
   document.getElementById('emptyState').style.display = 'none';
   document.getElementById('lookupSection').style.display = isLookup ? 'block' : 'none';
   document.getElementById('backtestSection').style.display = isBacktest ? 'block' : 'none';
+  document.getElementById('bouncebackSection').style.display = isBounceback ? 'block' : 'none';
 
   if (isBacktest) {
     loadBacktest();
+    return;
+  }
+  if (isBounceback) {
+    loadBounceBack();
     return;
   }
   if (isLookup) {
@@ -1235,6 +1273,86 @@ async function triggerFill() {
   alert('Forward return fill started. Check back in a few minutes.');
 }
 
+// ────────── Bounce Back ──────────
+async function loadBounceBack() {
+  const container = document.getElementById('bouncebackContent');
+  container.innerHTML = '<p style="color:var(--text2);">Loading bounce-back candidates...</p>';
+  const threshold = document.getElementById('bounceThreshold').value;
+  const lookback = document.getElementById('bounceLookback').value;
+  try {
+    const r = await fetch(`/api/bounce-back?threshold=${threshold}&lookback_days=${lookback}`);
+    const data = await r.json();
+    renderBounceBack(data);
+  } catch (e) {
+    container.innerHTML = '<p style="color:var(--red);">Failed to load bounce-back data.</p>';
+  }
+}
+
+function renderBounceBack(data) {
+  const c = document.getElementById('bouncebackContent');
+  const badge = document.getElementById('tabBounceCount');
+  badge.textContent = data.count;
+  badge.style.display = data.count > 0 ? '' : 'none';
+
+  if (!data.bouncers || data.bouncers.length === 0) {
+    c.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;text-align:center;">
+        <h3 style="margin-bottom:8px;">No Bouncers Yet</h3>
+        <p style="color:var(--text2);">No stocks in our 52W-low history have rebounded by ${(data.threshold_pct*100).toFixed(0)}% within the last ${data.lookback_days} days.</p>
+        <p style="color:var(--text2);margin-top:12px;font-size:12px;">Try lowering the gain threshold or extending the lookback. Latest prices refresh nightly via the fill job.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const fmtRet = (v) => {
+    if (v == null) return '—';
+    const pct = (v * 100).toFixed(1);
+    return `<span class="${v >= 0 ? 'c-green' : 'c-red'}">${v >= 0 ? '+' : ''}${pct}%</span>`;
+  };
+  const fmtAge = (iso) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    const hours = Math.round((Date.now() - d.getTime()) / 36e5);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.round(hours/24)}d ago`;
+  };
+
+  let html = `<div style="margin-bottom:12px;color:var(--text2);font-size:13px;">${data.count} stock${data.count===1?'':'s'} bouncing — captured at 52W low within last ${data.lookback_days} days, now ≥${(data.threshold_pct*100).toFixed(0)}% above the low.</div>`;
+  html += `<div style="overflow-x:auto;">`;
+  html += `<table style="width:100%;font-size:13px;border-collapse:collapse;">`;
+  html += `<thead><tr style="border-bottom:2px solid var(--border);background:var(--surface2);">`;
+  html += `<th style="text-align:left;padding:8px;">Symbol</th>`;
+  html += `<th style="text-align:left;padding:8px;">Low Date</th>`;
+  html += `<th style="text-align:right;padding:8px;">Days Since</th>`;
+  html += `<th style="text-align:right;padding:8px;">Captured Low</th>`;
+  html += `<th style="text-align:right;padding:8px;">Current Price</th>`;
+  html += `<th style="text-align:right;padding:8px;">Gain</th>`;
+  html += `<th style="text-align:right;padding:8px;">V Score</th>`;
+  html += `<th style="text-align:right;padding:8px;">Q Score</th>`;
+  html += `<th style="text-align:right;padding:8px;">Price Updated</th>`;
+  html += `</tr></thead><tbody>`;
+
+  data.bouncers.forEach(b => {
+    const vCls = b.value_score >= 70 ? 'c-green' : b.value_score >= 45 ? '' : 'c-red';
+    const qCls = b.quality_score >= 65 ? 'c-blue' : '';
+    html += `<tr style="border-bottom:1px solid var(--border);">`;
+    html += `<td style="padding:6px 8px;font-weight:600;">${b.symbol}</td>`;
+    html += `<td style="padding:6px 8px;color:var(--text2);">${b.low_date}</td>`;
+    html += `<td style="text-align:right;padding:6px 8px;color:var(--text2);">${b.days_since_low}d</td>`;
+    html += `<td style="text-align:right;padding:6px 8px;">$${b.captured_low ? b.captured_low.toFixed(2) : '—'}</td>`;
+    html += `<td style="text-align:right;padding:6px 8px;font-weight:600;">$${b.current_price ? b.current_price.toFixed(2) : '—'}</td>`;
+    html += `<td style="text-align:right;padding:6px 8px;font-weight:600;">${fmtRet(b.gain_pct)}</td>`;
+    html += `<td style="text-align:right;padding:6px 8px;" class="${vCls}">${b.value_score || '—'}</td>`;
+    html += `<td style="text-align:right;padding:6px 8px;" class="${qCls}">${b.quality_score || '—'}</td>`;
+    html += `<td style="text-align:right;padding:6px 8px;color:var(--text2);font-size:11px;">${fmtAge(b.current_price_at)}</td>`;
+    html += `</tr>`;
+  });
+
+  html += `</tbody></table></div>`;
+  c.innerHTML = html;
+}
+
 function renderBacktest(summary, details) {
   const c = document.getElementById('backtestContent');
   let html = '';
@@ -1242,7 +1360,7 @@ function renderBacktest(summary, details) {
   if (!summary.has_data) {
     html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;text-align:center;">`;
     html += `<h3 style="margin-bottom:8px;">No Forward Returns Yet</h3>`;
-    html += `<p style="color:var(--text2);">Forward returns are computed 15, 30, 90, and 180 days after each scan.</p>`;
+    html += `<p style="color:var(--text2);">Forward returns are computed 15, 30, 90, 180, and 365 days after each scan.</p>`;
     html += `<p style="color:var(--text2);">Your earliest scan needs to be at least 15 days old for data to appear.</p>`;
     html += `<p style="color:var(--text2);margin-top:12px;">Click "Fill Forward Returns" to manually trigger the computation, or wait for the nightly 12:30 AM ET job.</p>`;
     html += `</div>`;
@@ -1298,6 +1416,7 @@ function renderTierTable(tiers, type) {
   html += `<th style="text-align:right;padding:6px;color:var(--text2);">30D Avg</th>`;
   html += `<th style="text-align:right;padding:6px;color:var(--text2);">90D Avg</th>`;
   html += `<th style="text-align:right;padding:6px;color:var(--text2);">180D Avg</th>`;
+  html += `<th style="text-align:right;padding:6px;color:var(--text2);">365D Avg</th>`;
   html += `</tr>`;
 
   tierOrder.forEach((tier, i) => {
@@ -1310,6 +1429,7 @@ function renderTierTable(tiers, type) {
     html += `<td style="text-align:right;padding:6px;">${fmtRet(t.avg_return_30d)}</td>`;
     html += `<td style="text-align:right;padding:6px;">${fmtRet(t.avg_return_90d)}</td>`;
     html += `<td style="text-align:right;padding:6px;">${fmtRet(t.avg_return_180d)}</td>`;
+    html += `<td style="text-align:right;padding:6px;">${fmtRet(t.avg_return_365d)}</td>`;
     html += `</tr>`;
   });
   html += `</table>`;
@@ -1330,6 +1450,7 @@ function renderTrackingTable(details) {
   html += `<th style="text-align:right;padding:6px;">30D</th>`;
   html += `<th style="text-align:right;padding:6px;">90D</th>`;
   html += `<th style="text-align:right;padding:6px;">180D</th>`;
+  html += `<th style="text-align:right;padding:6px;">365D</th>`;
   html += `</tr></thead><tbody>`;
 
   const fmtRet = (v) => {
@@ -1350,6 +1471,7 @@ function renderTrackingTable(details) {
     html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_30d)}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_90d)}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_180d)}</td>`;
+    html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_365d)}</td>`;
     html += `</tr>`;
   });
 

@@ -18,9 +18,10 @@ from fastapi.staticfiles import StaticFiles
 from server import config
 from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HOST, PORT
 from server.database import (
-    get_backtest_details, get_backtest_summary, get_latest_scan, get_latest_scan_averages,
-    get_performance_rows_needing_update, get_scan_by_date, get_scan_history,
-    get_stock_history, init_db, save_performance_tracking, save_scan, update_forward_price,
+    get_backtest_details, get_backtest_summary, get_bounce_back_candidates,
+    get_latest_scan, get_latest_scan_averages, get_performance_rows_needing_update,
+    get_recent_tracked_symbols, get_scan_by_date, get_scan_history, get_stock_history,
+    init_db, save_performance_tracking, save_scan, update_forward_price, upsert_latest_price,
 )
 from server.models import ScanResult, ScanSummary
 from server.pipeline import merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
@@ -46,43 +47,73 @@ async def scheduled_refresh():
 
 
 async def fill_forward_returns():
-    """Nightly job: fill in 15/30/90/180 day forward prices for performance tracking."""
+    """Nightly job: fill in 15/30/90/180/365 day forward prices for performance
+    tracking AND refresh latest known price for every symbol still in the
+    365-day tracking window (used by bounce-back detection).
+    """
     logger.info("Forward return fill job starting...")
     try:
         import yfinance as yf
+        from datetime import datetime
+        from collections import defaultdict
+
         rows = get_performance_rows_needing_update()
-        if not rows:
-            logger.info("No forward returns to fill")
+        # Group rows by symbol so we only fetch each symbol once
+        rows_by_symbol: dict[str, list] = defaultdict(list)
+        for r in rows:
+            rows_by_symbol[r["symbol"]].append(r)
+
+        # All symbols still tracked (whether or not they have rows needing update)
+        recent_symbols = set(get_recent_tracked_symbols(365))
+        all_symbols = recent_symbols | set(rows_by_symbol.keys())
+
+        if not all_symbols:
+            logger.info("No symbols to refresh")
             return
-        logger.info(f"Filling forward returns for {len(rows)} rows...")
-        from datetime import datetime, timedelta
+
+        logger.info(
+            f"Refreshing {len(all_symbols)} symbols "
+            f"({len(rows)} forward-return rows pending across {len(rows_by_symbol)} symbols)"
+        )
+
         today = datetime.now()
         filled = 0
-        for r in rows:
+        latest_updated = 0
+        for sym in all_symbols:
             try:
-                scan_date = datetime.strptime(r["scan_date"], "%Y-%m-%d")
-                days_elapsed = (today - scan_date).days
-                sym = r["symbol"]
                 ticker = yf.Ticker(sym)
                 info = ticker.info
                 price = info.get("regularMarketPrice") or info.get("currentPrice")
                 if not price:
                     continue
-                if days_elapsed >= 15 and r["price_15d"] is None:
-                    update_forward_price(r["id"], 15, price)
-                    filled += 1
-                if days_elapsed >= 30 and r["price_30d"] is None:
-                    update_forward_price(r["id"], 30, price)
-                    filled += 1
-                if days_elapsed >= 90 and r["price_90d"] is None:
-                    update_forward_price(r["id"], 90, price)
-                    filled += 1
-                if days_elapsed >= 180 and r["price_180d"] is None:
-                    update_forward_price(r["id"], 180, price)
-                    filled += 1
+                # Always upsert latest price for bounce-back detection
+                upsert_latest_price(sym, float(price))
+                latest_updated += 1
+                # Then update any forward-return windows that need it
+                for r in rows_by_symbol.get(sym, []):
+                    scan_date = datetime.strptime(r["scan_date"], "%Y-%m-%d")
+                    days_elapsed = (today - scan_date).days
+                    if days_elapsed >= 15 and r["price_15d"] is None:
+                        update_forward_price(r["id"], 15, price)
+                        filled += 1
+                    if days_elapsed >= 30 and r["price_30d"] is None:
+                        update_forward_price(r["id"], 30, price)
+                        filled += 1
+                    if days_elapsed >= 90 and r["price_90d"] is None:
+                        update_forward_price(r["id"], 90, price)
+                        filled += 1
+                    if days_elapsed >= 180 and r["price_180d"] is None:
+                        update_forward_price(r["id"], 180, price)
+                        filled += 1
+                    if days_elapsed >= 365 and r["price_365d"] is None:
+                        update_forward_price(r["id"], 365, price)
+                        filled += 1
             except Exception as e:
-                logger.warning(f"Forward return fill failed for {r['symbol']}: {e}")
-        logger.info(f"Forward return fill complete: {filled} prices updated")
+                logger.warning(f"Forward return fill failed for {sym}: {e}")
+        logger.info(
+            f"Forward return fill complete: {filled} forward prices updated, "
+            f"{latest_updated} latest prices refreshed"
+        )
     except Exception as e:
         logger.error(f"Forward return fill job failed: {e}")
 
@@ -280,6 +311,26 @@ async def trigger_forward_fill(background_tasks: BackgroundTasks):
     """Manually trigger the forward return fill job."""
     background_tasks.add_task(fill_forward_returns)
     return {"status": "started", "message": "Forward return fill started in background."}
+
+
+@app.get("/api/bounce-back")
+async def bounce_back(threshold: float = 0.05, lookback_days: int = 90):
+    """Return stocks that hit a 52W low within `lookback_days` and have
+    since rebounded by at least `threshold` (default 5%, 90-day window).
+
+    Each entry includes the captured low (deepest dip we caught), the
+    current price (refreshed daily by the fill job), the gain since the
+    low, and the original V/Q scores at the time we picked it.
+    """
+    threshold = max(0.0, min(1.0, threshold))
+    lookback_days = max(1, min(365, lookback_days))
+    candidates = get_bounce_back_candidates(threshold_pct=threshold, lookback_days=lookback_days)
+    return {
+        "threshold_pct": threshold,
+        "lookback_days": lookback_days,
+        "count": len(candidates),
+        "bouncers": candidates,
+    }
 
 
 @app.get("/api/settings")
