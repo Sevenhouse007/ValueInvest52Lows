@@ -313,6 +313,46 @@ async def trigger_forward_fill(background_tasks: BackgroundTasks):
     return {"status": "started", "message": "Forward return fill started in background."}
 
 
+@app.get("/api/diag/db")
+async def diag_db():
+    """Diagnostic: report DB_PATH, file existence, size, row counts, and write
+    capability. Used to verify the persistent disk is actually attached on
+    Render — if data vanishes across redeploys, this endpoint will show why.
+    """
+    import os, sqlite3
+    from server.config import DB_PATH
+    from pathlib import Path
+    p = Path(DB_PATH)
+    info = {
+        "db_path": str(p),
+        "db_path_env": os.getenv("DB_PATH"),
+        "parent_dir": str(p.parent),
+        "parent_exists": p.parent.exists(),
+        "parent_writable": os.access(str(p.parent), os.W_OK) if p.parent.exists() else False,
+        "file_exists": p.exists(),
+        "file_size_bytes": p.stat().st_size if p.exists() else None,
+    }
+    if p.exists():
+        try:
+            conn = sqlite3.connect(str(p))
+            conn.row_factory = sqlite3.Row
+            tables = [r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            )]
+            info["tables"] = tables
+            counts = {}
+            for t in tables:
+                try:
+                    counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                except Exception as e:
+                    counts[t] = f"err: {e}"
+            info["row_counts"] = counts
+            conn.close()
+        except Exception as e:
+            info["sqlite_error"] = str(e)
+    return info
+
+
 @app.get("/api/bounce-back")
 async def bounce_back(threshold: float = 0.05, lookback_days: int = 90):
     """Return stocks that hit a 52W low within `lookback_days` and have
