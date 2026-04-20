@@ -315,9 +315,33 @@ class YahooClient:
                         logger.warning(f"quoteSummary {symbol}: HTTP {resp.status_code}")
                         return None
                     data = resp.json()
-                    result = data.get("quoteSummary", {}).get("result", [])
+                    qs = data.get("quoteSummary", {}) or {}
+                    result = qs.get("result") or []
                     if not result:
-                        logger.warning(f"No quoteSummary result for {symbol}")
+                        # Yahoo's "soft block": HTTP 200 but the result is null,
+                        # often with an auth-flavored error envelope like
+                        # `{"description": "crumb not in cache", "code": "Bad Request"}`.
+                        # Datacenter IPs (Render, AWS) hit this constantly while
+                        # residential traffic sails through. Treat it like a 401
+                        # — refresh the session crumb and retry — instead of
+                        # returning None and silently dropping fundamentals for
+                        # every symbol in the scan.
+                        err = qs.get("error") or {}
+                        err_desc = (err.get("description") or "").lower()
+                        if attempt < 2:
+                            logger.warning(
+                                f"Empty quoteSummary for {symbol} "
+                                f"(err={err_desc!r}), refreshing session "
+                                f"(attempt {attempt+1})"
+                            )
+                            self._refresh_session()
+                            params["crumb"] = self._crumb
+                            _time.sleep(1)  # let the new session settle
+                            continue
+                        logger.warning(
+                            f"No quoteSummary result for {symbol} after retries "
+                            f"(last err: {err_desc!r})"
+                        )
                         return None
                     return result[0]
                 except Exception as e:
