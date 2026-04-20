@@ -354,6 +354,9 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
 <div id="lookupSection" style="display:none;padding:0 24px 24px;">
   <div style="display:flex;gap:10px;align-items:center;padding:20px 0;">
     <input type="text" id="lookupInput" placeholder="Enter stock symbol (e.g. AAPL, MSFT, TSLA)"
+           maxlength="15" autocomplete="off" spellcheck="false"
+           pattern="[A-Za-z0-9.\-^=]{1,15}"
+           title="Letters, digits, and . - ^ = (max 15 chars)"
            style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 16px;color:var(--text);font-size:15px;width:350px;outline:none;">
     <button class="btn" id="lookupBtn" style="padding:10px 24px;font-size:15px;">Look Up</button>
     <span id="lookupStatus" style="color:var(--text2);font-size:13px;"></span>
@@ -619,22 +622,28 @@ function renderTable() {
     const isSmall = s.market_cap != null && s.market_cap >= 50000000 && s.market_cap < 150000000;
     const hasEarn = s.days_to_earnings != null && s.days_to_earnings >= 0 && s.days_to_earnings <= 10;
     const rowClass = [expandedSymbol === s.symbol ? 'expanded' : '', isDual ? 'dual-signal' : ''].join(' ').trim();
-    html += `<tr data-sym="${s.symbol}" class="${rowClass}">
-      <td><span class="star ${isWL?'active':''}" onclick="toggleWL(event,'${s.symbol}')">★</span></td>
-      <td><strong>${s.symbol}</strong>${isDual?'<span class="dual-badge">V+Q</span>':''}${hasRisk?'<span class="risk-badge">RISK</span>':''}${hasAcct?'<span class="acct-badge">ACCT</span>':''}${isBiot?'<span class="biot-badge">BIOT</span>':''}${isMicro?'<span class="size-badge">MICRO</span>':''}${isSmall?'<span class="size-badge">SMALL</span>':''}${hasEarn?'<span class="earn-badge">EARN</span>':''}${isNew?'<span class="new-badge">NEW</span>':''}</td>
-      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${s.short_name||''}</td>
-      <td>${s.sector||'—'}</td>
+    // Yahoo-supplied free-text fields (short_name, sector, industry,
+    // country) flow into HTML — escape them. Symbol/score are
+    // server-validated to a strict regex but we escape anyway as
+    // defense-in-depth in case legacy cached data has bad values.
+    const sym = escapeHtml(s.symbol);
+    const symJs = String(s.symbol||'').replace(/[^A-Z0-9.\-^=]/gi, '');
+    html += `<tr data-sym="${sym}" class="${rowClass}">
+      <td><span class="star ${isWL?'active':''}" onclick="toggleWL(event,'${symJs}')">★</span></td>
+      <td><strong>${sym}</strong>${isDual?'<span class="dual-badge">V+Q</span>':''}${hasRisk?'<span class="risk-badge">RISK</span>':''}${hasAcct?'<span class="acct-badge">ACCT</span>':''}${isBiot?'<span class="biot-badge">BIOT</span>':''}${isMicro?'<span class="size-badge">MICRO</span>':''}${isSmall?'<span class="size-badge">SMALL</span>':''}${hasEarn?'<span class="earn-badge">EARN</span>':''}${isNew?'<span class="new-badge">NEW</span>':''}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(s.short_name||'')}</td>
+      <td>${escapeHtml(s.sector||'—')}</td>
       <td>${isQ ? fmtFScore(s.piotroski_f_score) : '<span class=\"model-tag\">'+fmtModel(s.sector_type)+'</span>'}</td>
       <td>${scorePill(score, tier)}</td>
       <td class="num" ${isQ?'style="display:none"':''}>${fmtDelta(delta, s.days_in_scan)}</td>
       <td class="num">$${fmt(s.price,2)}</td>
       <td class="num ${s.change_percent>=0?'c-green':'c-red'}">${fmt(s.change_percent,1)}%</td>
       <td class="num">${fmtCap(s.market_cap)}</td>
-      <td class="num ${verdictClass(verdictFor('fpe', s.forward_pe, s.sector_median_pe))}" title="${sectorTitle('Fwd P/E', s.sector_median_pe, s.market_avg_fpe, s.industry_avg_fpe)}">${verdictPrefix(verdictFor('fpe', s.forward_pe, s.sector_median_pe))}${fmtN(s.forward_pe,1)}</td>
-      <td class="num ${verdictClass(verdictFor('pb', s.price_to_book, s.sector_median_pb))}" title="${sectorTitle('P/B', s.sector_median_pb, s.market_avg_pb, s.industry_avg_pb)}">${verdictPrefix(verdictFor('pb', s.price_to_book, s.sector_median_pb))}${fmtN(s.price_to_book,1)}</td>
-      <td class="num ${verdictClass(verdictFor('ev', s.ev_to_ebitda, s.sector_median_ev_ebitda))}" title="${sectorTitle('EV/EBITDA', s.sector_median_ev_ebitda, s.market_avg_ev_ebitda, s.industry_avg_ev_ebitda)}">${verdictPrefix(verdictFor('ev', s.ev_to_ebitda, s.sector_median_ev_ebitda))}${fmtN(s.ev_to_ebitda,1)}</td>
-      <td class="num ${verdictClass(verdictFor('roe', s.return_on_equity, s.sector_median_roe))}" title="${sectorTitle('ROE', s.sector_median_roe, s.market_avg_roe, s.industry_avg_roe, fmtROE)}">${verdictPrefix(verdictFor('roe', s.return_on_equity, s.sector_median_roe))}${fmtROE(s.return_on_equity)}</td>
-      <td class="num ${roicClass(s.roic, s.sector_wacc)}" title="${roicTitle(s.roic, s.sector_wacc, s.sector)}">${fmtROIC(s.roic)}</td>
+      <td class="num ${verdictClass(verdictFor('fpe', s.forward_pe, s.sector_median_pe))}" title="${escapeHtml(sectorTitle('Fwd P/E', s.sector_median_pe, s.market_avg_fpe, s.industry_avg_fpe))}">${verdictPrefix(verdictFor('fpe', s.forward_pe, s.sector_median_pe))}${fmtN(s.forward_pe,1)}</td>
+      <td class="num ${verdictClass(verdictFor('pb', s.price_to_book, s.sector_median_pb))}" title="${escapeHtml(sectorTitle('P/B', s.sector_median_pb, s.market_avg_pb, s.industry_avg_pb))}">${verdictPrefix(verdictFor('pb', s.price_to_book, s.sector_median_pb))}${fmtN(s.price_to_book,1)}</td>
+      <td class="num ${verdictClass(verdictFor('ev', s.ev_to_ebitda, s.sector_median_ev_ebitda))}" title="${escapeHtml(sectorTitle('EV/EBITDA', s.sector_median_ev_ebitda, s.market_avg_ev_ebitda, s.industry_avg_ev_ebitda))}">${verdictPrefix(verdictFor('ev', s.ev_to_ebitda, s.sector_median_ev_ebitda))}${fmtN(s.ev_to_ebitda,1)}</td>
+      <td class="num ${verdictClass(verdictFor('roe', s.return_on_equity, s.sector_median_roe))}" title="${escapeHtml(sectorTitle('ROE', s.sector_median_roe, s.market_avg_roe, s.industry_avg_roe, fmtROE))}">${verdictPrefix(verdictFor('roe', s.return_on_equity, s.sector_median_roe))}${fmtROE(s.return_on_equity)}</td>
+      <td class="num ${roicClass(s.roic, s.sector_wacc)}" title="${escapeHtml(roicTitle(s.roic, s.sector_wacc, s.sector))}">${fmtROIC(s.roic)}</td>
       <td class="num ${s.free_cash_flow>0?'c-green':s.free_cash_flow<0?'c-red':''}">${fmtFCF(s.free_cash_flow)}</td>
       <td class="num">${fmtAnalyst(s.recommendation_mean)}</td>
       <td class="num ${s.upside_percent>30?'c-bold-green':s.upside_percent>0?'c-green':''}">${fmtN(s.upside_percent,1,'%')}</td>
@@ -762,16 +771,21 @@ function detailPanel(s) {
 
   const modelDesc = MODEL_DESCRIPTIONS[s.sector_type] || MODEL_DESCRIPTIONS['default'];
   const peerDesc = usesIndustry
-    ? `Peer comparison: ${s.industry} (${s.industry_peer_count} peers)`
+    ? `Peer comparison: ${escapeHtml(s.industry)} (${s.industry_peer_count} peers)`
     : s.market_avg_fpe
-    ? `Peer comparison: ${s.sector} market benchmarks (industry has <3 peers)`
-    : `Peer comparison: ${s.sector} scan avg (no market benchmark)`;
+    ? `Peer comparison: ${escapeHtml(s.sector)} market benchmarks (industry has <3 peers)`
+    : `Peer comparison: ${escapeHtml(s.sector)} scan avg (no market benchmark)`;
 
+  // Symbol is server-validated to a strict regex but escape anyway and
+  // strip to URL-safe chars for the Yahoo link href, in case legacy
+  // cached scans contain bad symbols saved before validation existed.
+  const sym = escapeHtml(s.symbol);
+  const symUrl = encodeURIComponent(String(s.symbol||''));
   return `<div class="detail-panel">
-    <h3>${s.symbol} — ${s.short_name} <a href="https://finance.yahoo.com/quote/${s.symbol}" target="_blank">Yahoo Finance ↗</a></h3>
+    <h3>${sym} — ${escapeHtml(s.short_name||'')} <a href="https://finance.yahoo.com/quote/${symUrl}" target="_blank" rel="noopener noreferrer">Yahoo Finance ↗</a></h3>
     <div>
       <div style="margin-bottom:10px;padding:6px 10px;background:rgba(59,130,246,.08);border-radius:6px;font-size:11px;color:var(--blue);">
-        ${modelDesc}<br><span style="opacity:.75">${peerDesc}</span>
+        ${escapeHtml(modelDesc)}<br><span style="opacity:.75">${peerDesc}</span>
       </div>
       <h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">Metrics</h4>
       ${metricsHtml}
@@ -782,7 +796,7 @@ function detailPanel(s) {
     </div>
     <div class="sparkline-container">
       <h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">12-Month Price</h4>
-      <canvas id="spark-${s.symbol}" width="280" height="100"></canvas>
+      <canvas id="spark-${sym}" width="280" height="100"></canvas>
     </div>
   </div>`;
 }
@@ -907,15 +921,19 @@ function updateLastUpdated(ts) {
 }
 
 function populateSectorFilter() {
+  // Sector/industry strings come from Yahoo's assetProfile module — we
+  // don't trust them as HTML. Build option elements with .textContent
+  // so any stray markup (or a Yahoo data-poisoning incident) renders
+  // as inert text instead of executing as script.
   const sectors = [...new Set(allStocks.map(s => s.sector).filter(Boolean))].sort();
   const sel = document.getElementById('sectorFilter');
-  sel.innerHTML = '<option value="">All Sectors</option>';
-  sectors.forEach(s => { sel.innerHTML += `<option value="${s}">${s}</option>`; });
+  sel.replaceChildren(new Option('All Sectors', ''));
+  sectors.forEach(s => sel.appendChild(new Option(s, s)));
 
   const industries = [...new Set(allStocks.map(s => s.industry).filter(Boolean))].sort();
   const indSel = document.getElementById('industryFilter');
-  indSel.innerHTML = '<option value="">All Industries</option>';
-  industries.forEach(i => { indSel.innerHTML += `<option value="${i}">${i}</option>`; });
+  indSel.replaceChildren(new Option('All Industries', ''));
+  industries.forEach(i => indSel.appendChild(new Option(i, i)));
 }
 
 // ────────── CSV Export ──────────
@@ -1203,13 +1221,27 @@ function cmpClass(val, avg, lowerIsBetter) {
 }
 
 // ────────── Stock Lookup ──────────
+// Allowed ticker chars — must match server's _SYMBOL_RE. Anything else
+// is stripped client-side so we don't send junk that the server will
+// reject with 400, AND so the symbol can't break out of the URL path.
+const _LOOKUP_SYMBOL_RE = /^[A-Z0-9.\-^=]{1,15}$/;
+
 async function doLookup() {
-  const symbol = document.getElementById('lookupInput').value.trim().toUpperCase();
+  const raw = document.getElementById('lookupInput').value || '';
+  const symbol = raw.trim().toUpperCase();
   if (!symbol) return;
+  if (!_LOOKUP_SYMBOL_RE.test(symbol)) {
+    document.getElementById('lookupStatus').textContent =
+      `Invalid ticker: only A-Z, 0-9, . - ^ = allowed (max 15 chars)`;
+    return;
+  }
   document.getElementById('lookupStatus').textContent = 'Loading...';
   document.getElementById('lookupResult').innerHTML = '';
   try {
-    const r = await fetch(`/api/lookup/${symbol}`);
+    // encodeURIComponent is belt-and-suspenders — the regex above
+    // already rejects anything that needs escaping, but encoding
+    // protects future regex relaxations.
+    const r = await fetch(`/api/lookup/${encodeURIComponent(symbol)}`);
     if (!r.ok) {
       document.getElementById('lookupStatus').textContent = r.status === 404
         ? `No data found for ${symbol}` : 'Error fetching data';
@@ -1232,11 +1264,13 @@ function renderLookupResult(s) {
   const fcfY = s.free_cash_flow && s.market_cap > 0 ? (s.free_cash_flow / s.market_cap * 100).toFixed(1) : '—';
 
   let html = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;margin-bottom:16px;">`;
-  // Header
+  // Header — escape every Yahoo-supplied field. Symbol is server-validated
+  // but we escape anyway as defense-in-depth.
+  const lkSym = escapeHtml(s.symbol);
   html += `<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">`;
   html += `<div>`;
-  html += `<h2 style="font-size:20px;margin-bottom:4px;">${s.symbol} — ${s.short_name || ''}</h2>`;
-  html += `<div style="color:var(--text2);font-size:13px;">${s.sector || '—'} / ${s.industry || '—'} ${s.country ? '('+s.country+')' : ''}</div>`;
+  html += `<h2 style="font-size:20px;margin-bottom:4px;">${lkSym} — ${escapeHtml(s.short_name || '')}</h2>`;
+  html += `<div style="color:var(--text2);font-size:13px;">${escapeHtml(s.sector || '—')} / ${escapeHtml(s.industry || '—')} ${s.country ? '(' + escapeHtml(s.country) + ')' : ''}</div>`;
   html += `</div>`;
   html += `<div style="text-align:right;">`;
   html += `<div style="font-size:24px;font-weight:700;">$${fmt(s.price,2)}</div>`;
@@ -1323,10 +1357,11 @@ function renderLookupResult(s) {
     });
   }
   html += `<div style="margin-top:16px;"><h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;">12-Month Price</h4>`;
-  html += `<canvas id="spark-${s.symbol}" width="400" height="120" style="width:100%;height:120px;"></canvas></div>`;
+  html += `<canvas id="spark-${lkSym}" width="400" height="120" style="width:100%;height:120px;"></canvas></div>`;
   html += `</div></div>`;
 
-  html += `<div style="margin-top:16px;text-align:right;"><a href="https://finance.yahoo.com/quote/${s.symbol}" target="_blank" style="font-size:12px;">View on Yahoo Finance ↗</a></div>`;
+  const lkSymUrl = encodeURIComponent(String(s.symbol||''));
+  html += `<div style="margin-top:16px;text-align:right;"><a href="https://finance.yahoo.com/quote/${lkSymUrl}" target="_blank" rel="noopener noreferrer" style="font-size:12px;">View on Yahoo Finance ↗</a></div>`;
   html += `</div>`;
 
   rd.innerHTML = html;
@@ -1417,9 +1452,11 @@ function renderBounceBack(data) {
   data.bouncers.forEach(b => {
     const vCls = b.value_score >= 70 ? 'c-green' : b.value_score >= 45 ? '' : 'c-red';
     const qCls = b.quality_score >= 65 ? 'c-blue' : '';
+    const bSym = escapeHtml(b.symbol||'');
+    const bDate = escapeHtml(b.low_date||'');
     html += `<tr style="border-bottom:1px solid var(--border);">`;
-    html += `<td style="padding:6px 8px;font-weight:600;">${b.symbol}</td>`;
-    html += `<td style="padding:6px 8px;color:var(--text2);">${b.low_date}</td>`;
+    html += `<td style="padding:6px 8px;font-weight:600;">${bSym}</td>`;
+    html += `<td style="padding:6px 8px;color:var(--text2);">${bDate}</td>`;
     html += `<td style="text-align:right;padding:6px 8px;color:var(--text2);">${b.days_since_low}d</td>`;
     html += `<td style="text-align:right;padding:6px 8px;">$${b.captured_low ? b.captured_low.toFixed(2) : '—'}</td>`;
     html += `<td style="text-align:right;padding:6px 8px;font-weight:600;">$${b.current_price ? b.current_price.toFixed(2) : '—'}</td>`;
@@ -1542,9 +1579,11 @@ function renderTrackingTable(details) {
 
   details.forEach(d => {
     const vCls = d.value_score >= 70 ? 'c-green' : d.value_score >= 45 ? '' : 'c-red';
+    const dSym = escapeHtml(d.symbol||'');
+    const dDate = escapeHtml(d.scan_date||'');
     html += `<tr style="border-bottom:1px solid var(--border);">`;
-    html += `<td style="padding:4px 6px;font-weight:600;">${d.symbol}</td>`;
-    html += `<td style="padding:4px 6px;color:var(--text2);">${d.scan_date}</td>`;
+    html += `<td style="padding:4px 6px;font-weight:600;">${dSym}</td>`;
+    html += `<td style="padding:4px 6px;color:var(--text2);">${dDate}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">$${d.price_at_scan ? d.price_at_scan.toFixed(2) : '—'}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;" class="${vCls}">${d.value_score || '—'}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">${d.quality_score || '—'}</td>`;

@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Path, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, ValidationError
 
 from server import config
 from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HOST, PORT
@@ -34,6 +36,60 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# ──────────────── INPUT VALIDATORS ────────────────
+# Every endpoint that takes a path/query/body parameter from the client
+# routes through one of these — never trust raw strings into SQL queries,
+# Yahoo URLs, or HTML rendering paths.
+
+# Tickers: uppercase letters/digits with `.` `-` `^` (indices) `=` (futures)
+# allowed. Max 15 chars covers e.g. "BRK.B", "ESM=F", "^GSPC", and foreign
+# suffixes like "ASML.AS" without admitting arbitrary content.
+_SYMBOL_RE = re.compile(r"^[A-Z0-9.\-^=]{1,15}$")
+# Scan dates are always ISO YYYY-MM-DD as written by the pipeline.
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def validate_symbol(symbol: str) -> str:
+    """Normalize + validate a ticker. Raises HTTPException(400) on bad input.
+
+    Returns the normalized (upper, stripped) symbol so callers don't have
+    to do it again. Reject anything that doesn't match the strict regex
+    rather than silently passing through — a stray `;DROP TABLE` or
+    `<script>` is never a valid ticker.
+    """
+    if not isinstance(symbol, str):
+        raise HTTPException(400, "symbol must be a string")
+    s = symbol.strip().upper()
+    if not _SYMBOL_RE.match(s):
+        raise HTTPException(400, f"Invalid ticker symbol: {symbol!r}")
+    return s
+
+
+def validate_scan_date(scan_date: str) -> str:
+    """Validate a YYYY-MM-DD scan date. Rejects anything else."""
+    if not isinstance(scan_date, str) or not _DATE_RE.match(scan_date):
+        raise HTTPException(400, f"Invalid scan_date (expected YYYY-MM-DD): {scan_date!r}")
+    try:
+        # Confirms the date itself is real — rejects 2025-13-40 etc.
+        datetime.strptime(scan_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, f"Invalid calendar date: {scan_date!r}")
+    return scan_date
+
+
+class SettingsUpdate(BaseModel):
+    """Whitelist + bounds for `POST /api/settings`. Anything outside this
+    schema is rejected before it touches `config.*` globals."""
+
+    api_key: Optional[str] = Field(default=None, max_length=128)
+    china_adr_penalty: Optional[int] = Field(default=None, ge=-25, le=0)
+    use_damodaran_blend: Optional[bool] = None
+    notify_enabled: Optional[bool] = None
+    notify_top_n: Optional[int] = Field(default=None, ge=1, le=100)
+
+    model_config = {"extra": "forbid"}
+
 
 # Global state
 _refresh_lock = asyncio.Lock()
@@ -359,7 +415,7 @@ async def trigger_refresh(background_tasks: BackgroundTasks):
 
 
 @app.delete("/api/scan/{scan_date}")
-async def delete_scan_endpoint(scan_date: str):
+async def delete_scan_endpoint(scan_date: str = Path(..., max_length=10)):
     """Delete a corrupt cached scan by date.
 
     Used to clean up scans saved before the quality-gate guard was added
@@ -367,6 +423,7 @@ async def delete_scan_endpoint(scan_date: str):
     After deletion the next refresh, or `get_latest_scan()` falling back
     to the previous date, surfaces a real result.
     """
+    scan_date = validate_scan_date(scan_date)
     deleted = delete_scan(scan_date)
     if deleted == 0:
         raise HTTPException(404, f"No scan found for {scan_date}")
@@ -389,8 +446,9 @@ async def scan_status():
 
 
 @app.get("/api/scan/{scan_date}")
-async def get_scan_for_date(scan_date: str):
+async def get_scan_for_date(scan_date: str = Path(..., max_length=10)):
     """Return scan for a specific date (YYYY-MM-DD)."""
+    scan_date = validate_scan_date(scan_date)
     result = get_scan_by_date(scan_date)
     if not result:
         raise HTTPException(404, f"No scan found for {scan_date}")
@@ -398,8 +456,9 @@ async def get_scan_for_date(scan_date: str):
 
 
 @app.get("/api/spark/{symbol}")
-async def get_spark(symbol: str):
+async def get_spark(symbol: str = Path(..., max_length=15)):
     """Return 1-year price history for a symbol."""
+    symbol = validate_symbol(symbol)
     global _yahoo_client
     if _yahoo_client is None:
         _yahoo_client = YahooClient()
@@ -469,12 +528,13 @@ async def diag_db():
 
 
 @app.get("/api/diag/yahoo")
-async def diag_yahoo(symbol: str = "AAPL"):
+async def diag_yahoo(symbol: str = Query("AAPL", max_length=15)):
     """Diagnostic: probe Yahoo's quoteSummary for one symbol and report
     exactly what comes back — HTTP status, response keys, error envelope,
     crumb prefix, session class. Used to debug datacenter-IP soft-blocks
     on Render where we can't see Render's outbound traffic directly.
     """
+    symbol = validate_symbol(symbol)
     import json as _json
     from server.yahoo_client import YahooClient
     from server.config import YAHOO_QUOTE_SUMMARY_URL
@@ -514,13 +574,20 @@ async def diag_yahoo(symbol: str = "AAPL"):
 
 
 @app.get("/api/bounce-back")
-async def bounce_back(threshold: float = 0.05, lookback_days: int = 90):
+async def bounce_back(
+    threshold: float = Query(0.05, ge=0.0, le=1.0),
+    lookback_days: int = Query(90, ge=1, le=365),
+):
     """Return stocks that hit a 52W low within `lookback_days` and have
     since rebounded by at least `threshold` (default 5%, 90-day window).
 
     Each entry includes the captured low (deepest dip we caught), the
     current price (refreshed daily by the fill job), the gain since the
     low, and the original V/Q scores at the time we picked it.
+
+    Bounds enforced by FastAPI's Query validator before the handler runs;
+    the redundant Python-side clamps are kept as defense-in-depth in case
+    a future caller bypasses the validator.
     """
     threshold = max(0.0, min(1.0, threshold))
     lookback_days = max(1, min(365, lookback_days))
@@ -546,27 +613,35 @@ async def get_settings():
 
 
 @app.post("/api/settings")
-async def update_settings(body: dict):
-    """Update configurable settings at runtime. Protected by API key if set."""
+async def update_settings(body: SettingsUpdate):
+    """Update configurable settings at runtime. Protected by API key if set.
+
+    Body is validated against the SettingsUpdate Pydantic schema —
+    unknown keys are rejected (`extra="forbid"`), types are checked, and
+    bounds are enforced (e.g. china_adr_penalty must be -25..0). Only
+    fields explicitly set in the request body are applied; others stay
+    untouched.
+    """
     from server import config
     # Auth check: if SETTINGS_API_KEY is configured, require it
     if config.SETTINGS_API_KEY:
-        key = body.pop("api_key", "") or ""
-        if key != config.SETTINGS_API_KEY:
+        if (body.api_key or "") != config.SETTINGS_API_KEY:
             raise HTTPException(403, "Invalid API key")
-    if "china_adr_penalty" in body:
-        val = int(body["china_adr_penalty"])
-        config.CHINA_ADR_PENALTY = max(-25, min(0, val))
-    if "use_damodaran_blend" in body:
-        config.USE_DAMODARAN_BLEND = bool(body["use_damodaran_blend"])
-    if "notify_enabled" in body:
-        config.NOTIFY_ENABLED = bool(body["notify_enabled"])
+    if body.china_adr_penalty is not None:
+        config.CHINA_ADR_PENALTY = body.china_adr_penalty
+    if body.use_damodaran_blend is not None:
+        config.USE_DAMODARAN_BLEND = body.use_damodaran_blend
+    if body.notify_enabled is not None:
+        config.NOTIFY_ENABLED = body.notify_enabled
+    if body.notify_top_n is not None:
+        config.NOTIFY_TOP_N = body.notify_top_n
     return await get_settings()
 
 
 @app.get("/api/stock/{symbol}/history")
-async def stock_history(symbol: str):
+async def stock_history(symbol: str = Path(..., max_length=15)):
     """Return score history for a single stock across all scan dates."""
+    symbol = validate_symbol(symbol)
     history = get_stock_history(symbol)
     if not history:
         raise HTTPException(404, f"No history for {symbol}")
@@ -574,13 +649,12 @@ async def stock_history(symbol: str):
 
 
 @app.get("/api/lookup/{symbol}")
-async def lookup_stock(symbol: str):
+async def lookup_stock(symbol: str = Path(..., max_length=15)):
     """Fetch, score, and return a single stock by symbol."""
+    symbol = validate_symbol(symbol)
     global _yahoo_client
     if _yahoo_client is None:
         _yahoo_client = YahooClient()
-
-    symbol = symbol.upper().strip()
 
     # 1. Fetch quoteSummary
     raw = await _yahoo_client.fetch_quote_summary(symbol)
