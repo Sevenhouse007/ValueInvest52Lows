@@ -205,17 +205,27 @@ def _fetch_sec_insider(symbol: str) -> Optional[dict]:
         return None
 
 
-def _get_session():
-    """Get a fresh yfinance session with valid cookies/crumb."""
-    ticker = yf.Ticker("AAPL")
-    return ticker.session
+def _get_session_and_crumb():
+    """Get a yfinance session + crumb via YfData's singleton.
 
+    yfinance moved to a curl_cffi session in 1.x specifically to mimic a
+    real browser's TLS fingerprint, which is what gets past Yahoo's
+    datacenter-IP bot detection. The previous bootstrap (yf.Ticker.session
+    + raw GET to /v1/test/getcrumb) used a plain requests.Session that has
+    no browser fingerprint — fine for residential traffic, instantly
+    blocked from Render/AWS/GCP IPs.
 
-def _get_crumb(session) -> str:
-    """Get crumb from the yfinance session."""
-    resp = session.get("https://query2.finance.yahoo.com/v1/test/getcrumb")
-    resp.raise_for_status()
-    return resp.text.strip()
+    YfData()._get_cookie_and_crumb() handles the full consent flow,
+    sets the crumb on its singleton, and exposes the curl_cffi session
+    via _session. We piggyback on both so every quoteSummary call is
+    indistinguishable from a real browser.
+    """
+    from yfinance.data import YfData
+    yfd = YfData()
+    yfd._get_cookie_and_crumb()  # populates yfd._crumb + warms cookies
+    if not yfd._crumb:
+        raise RuntimeError("YfData failed to obtain a crumb")
+    return yfd._session, yfd._crumb
 
 
 class YahooClient:
@@ -227,12 +237,23 @@ class YahooClient:
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
     def _ensure_session(self):
-        """Initialize session if needed (sync, runs in executor)."""
-        if self._session is None:
-            logger.info("Initializing yfinance session...")
-            self._session = _get_session()
-            self._crumb = _get_crumb(self._session)
-            logger.info(f"Session ready, crumb: {self._crumb[:8]}...")
+        """Initialize session if needed (sync, runs in executor).
+
+        If crumb retrieval fails we leave both fields None so the next
+        attempt re-runs the full bootstrap — previously a half-initialized
+        client (session set, crumb None) would cache forever and every
+        subsequent request would 401 with `crumb=None`.
+        """
+        if self._session is None or not self._crumb:
+            logger.info("Initializing yfinance session via YfData...")
+            try:
+                self._session, self._crumb = _get_session_and_crumb()
+                logger.info(f"Session ready, crumb: {self._crumb[:8]}...")
+            except Exception as e:
+                logger.error(f"Session init failed: {e}")
+                self._session = None
+                self._crumb = None
+                raise
 
     def _refresh_session(self):
         """Force refresh the session."""
