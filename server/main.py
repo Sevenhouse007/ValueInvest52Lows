@@ -313,6 +313,51 @@ async def trigger_forward_fill(background_tasks: BackgroundTasks):
     return {"status": "started", "message": "Forward return fill started in background."}
 
 
+@app.get("/api/diag/yahoo")
+async def diag_yahoo(symbol: str = "AAPL"):
+    """Diagnostic: do a single raw quoteSummary fetch and return what Yahoo
+    actually responds with — status code, headers, and the first chunk of the
+    body. Used to debug datacenter-IP soft-blocks where the regular pipeline
+    silently drops fundamentals.
+    """
+    global _yahoo_client
+    if _yahoo_client is None:
+        _yahoo_client = YahooClient()
+    from server.config import YAHOO_QUOTE_SUMMARY_URL
+
+    def _raw_fetch():
+        _yahoo_client._ensure_session()
+        url = YAHOO_QUOTE_SUMMARY_URL.format(symbol=symbol)
+        params = {
+            "modules": "summaryDetail,defaultKeyStatistics,assetProfile,financialData",
+            "crumb": _yahoo_client._crumb,
+        }
+        resp = _yahoo_client._session.get(url, params=params)
+        body_preview = resp.text[:1500]
+        try:
+            j = resp.json()
+            qs = (j.get("quoteSummary") or {})
+            return {
+                "status": resp.status_code,
+                "url": resp.url,
+                "crumb_used": _yahoo_client._crumb,
+                "result_count": len(qs.get("result") or []),
+                "error": qs.get("error"),
+                "headers_subset": {k: v for k, v in resp.headers.items() if k.lower() in ("content-type", "set-cookie", "x-yahoo-request-id", "server")},
+                "body_preview": body_preview,
+            }
+        except Exception as e:
+            return {
+                "status": resp.status_code,
+                "url": resp.url,
+                "json_parse_error": str(e),
+                "body_preview": body_preview,
+            }
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, _raw_fetch)
+
+
 @app.get("/api/bounce-back")
 async def bounce_back(threshold: float = 0.05, lookback_days: int = 90):
     """Return stocks that hit a 52W low within `lookback_days` and have
