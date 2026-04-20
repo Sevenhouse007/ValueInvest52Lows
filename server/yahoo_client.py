@@ -205,8 +205,36 @@ def _fetch_sec_insider(symbol: str) -> Optional[dict]:
         return None
 
 
+def _looks_like_valid_crumb(c: Optional[str]) -> bool:
+    """Real Yahoo crumbs are short opaque tokens (~11 chars, alphanumeric +
+    a few punctuation). We've seen yfinance's bootstrap silently store
+    error bodies like "Too Many Requests\\r\\n" as the crumb when Yahoo
+    rate-limits the getcrumb endpoint — its substring check for
+    "Too Many Requests" misses variants with extra whitespace or
+    punctuation, and the error body becomes the crumb. Every subsequent
+    quoteSummary call then 401s with "Invalid Crumb" forever.
+
+    Treat anything that's empty, looks like an error message, contains
+    HTML, or is suspiciously long as bogus.
+    """
+    if not c:
+        return False
+    s = c.strip()
+    if not s or len(s) > 30:
+        return False
+    lower = s.lower()
+    bad_substrings = ("too many", "request", "error", "<html", "html>", "unauthorized", "<!doctype")
+    if any(b in lower for b in bad_substrings):
+        return False
+    # Real crumbs are URL-safe-ish — no whitespace, no angle brackets
+    if any(ch.isspace() or ch in "<>" for ch in s):
+        return False
+    return True
+
+
 def _get_session_and_crumb():
-    """Get a yfinance session + crumb via YfData's singleton.
+    """Get a yfinance session + crumb via YfData's singleton, with our own
+    crumb sanity check on top.
 
     yfinance moved to a curl_cffi session in 1.x specifically to mimic a
     real browser's TLS fingerprint, which is what gets past Yahoo's
@@ -217,15 +245,70 @@ def _get_session_and_crumb():
 
     YfData()._get_cookie_and_crumb() handles the full consent flow,
     sets the crumb on its singleton, and exposes the curl_cffi session
-    via _session. We piggyback on both so every quoteSummary call is
-    indistinguishable from a real browser.
+    via _session. BUT yfinance's basic-strategy crumb path can stash
+    Yahoo's "Too Many Requests" error body AS the crumb when its
+    substring guard misses (e.g. trailing CRLF). We layer our own
+    `_looks_like_valid_crumb` check, force-reset the singleton's
+    cached crumb/cookie when it looks bogus, and retry with a strategy
+    flip + backoff.
     """
+    import time as _time
     from yfinance.data import YfData
+    from yfinance.exceptions import YFRateLimitError
+
     yfd = YfData()
-    yfd._get_cookie_and_crumb()  # populates yfd._crumb + warms cookies
-    if not yfd._crumb:
-        raise RuntimeError("YfData failed to obtain a crumb")
-    return yfd._session, yfd._crumb
+
+    # If the singleton has a cached but invalid crumb (from a prior bad
+    # bootstrap on this process), wipe it so we re-fetch.
+    if yfd._crumb is not None and not _looks_like_valid_crumb(yfd._crumb):
+        logger.warning(
+            f"YfData has invalid cached crumb (len={len(yfd._crumb)}, "
+            f"prefix={yfd._crumb[:12]!r}); clearing and re-bootstrapping"
+        )
+        yfd._crumb = None
+        yfd._cookie = None
+
+    last_err: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            yfd._get_cookie_and_crumb()
+        except YFRateLimitError as e:
+            last_err = e
+            # yfinance leaves _crumb populated with the error body — clear it
+            yfd._crumb = None
+            yfd._cookie = None
+        except Exception as e:
+            last_err = e
+            yfd._crumb = None
+            yfd._cookie = None
+
+        if _looks_like_valid_crumb(yfd._crumb):
+            logger.info(
+                f"Got valid crumb after {attempt+1} attempt(s) "
+                f"(strategy={yfd._cookie_strategy}, len={len(yfd._crumb)})"
+            )
+            return yfd._session, yfd._crumb
+
+        # Bad crumb (or none) — flip strategy and back off
+        bad_preview = (yfd._crumb or "")[:20]
+        logger.warning(
+            f"Crumb attempt {attempt+1} invalid "
+            f"(strategy={yfd._cookie_strategy}, preview={bad_preview!r}, "
+            f"err={last_err!r}); flipping strategy"
+        )
+        yfd._crumb = None
+        yfd._cookie = None
+        new_strategy = "basic" if yfd._cookie_strategy == "csrf" else "csrf"
+        try:
+            yfd._set_cookie_strategy(new_strategy)
+        except Exception as e:
+            logger.warning(f"Failed to flip cookie strategy: {e}")
+        _time.sleep(2 ** attempt)  # 1s, 2s, 4s
+
+    raise RuntimeError(
+        f"YfData failed to obtain a valid crumb after 3 attempts "
+        f"(last_err={last_err!r})"
+    )
 
 
 class YahooClient:
@@ -243,8 +326,13 @@ class YahooClient:
         attempt re-runs the full bootstrap — previously a half-initialized
         client (session set, crumb None) would cache forever and every
         subsequent request would 401 with `crumb=None`.
+
+        Also validates the cached crumb on every call, since yfinance can
+        silently stash an error-message string as the crumb (see
+        `_looks_like_valid_crumb` for context) and we don't want a single
+        bad bootstrap to poison the entire scan.
         """
-        if self._session is None or not self._crumb:
+        if self._session is None or not _looks_like_valid_crumb(self._crumb):
             logger.info("Initializing yfinance session via YfData...")
             try:
                 self._session, self._crumb = _get_session_and_crumb()
