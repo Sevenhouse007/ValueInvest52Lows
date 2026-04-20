@@ -19,9 +19,10 @@ from server import config
 from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HOST, PORT
 from server.database import (
     delete_scan, get_backtest_details, get_backtest_summary, get_bounce_back_candidates,
-    get_latest_scan, get_latest_scan_averages, get_performance_rows_needing_update,
-    get_recent_tracked_symbols, get_scan_by_date, get_scan_history, get_stock_history,
-    init_db, save_performance_tracking, save_scan, update_forward_price, upsert_latest_price,
+    get_latest_good_scan, get_latest_scan, get_latest_scan_averages,
+    get_performance_rows_needing_update, get_recent_tracked_symbols, get_scan_by_date,
+    get_scan_history, get_stock_history, init_db, save_performance_tracking, save_scan,
+    update_forward_price, upsert_latest_price,
 )
 from server.models import ScanResult, ScanSummary
 from server.pipeline import merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
@@ -326,8 +327,17 @@ async def index():
 
 @app.get("/api/scan")
 async def get_scan():
-    """Return the latest scored stock list."""
-    result = get_latest_scan()
+    """Return the latest user-facing scan.
+
+    Uses `get_latest_good_scan()` so a corrupt latest scan (Yahoo soft-
+    blocked mid-fetch) doesn't blank the page — we walk back through
+    history and return the most recent scan with real fundamentals
+    coverage. If no scan in history clears the bar, we still return
+    the most recent (degraded) one rather than 404, so the UI always
+    has something to render. The refresh-status banner explains the
+    degradation when it happens.
+    """
+    result = get_latest_good_scan()
     if not result:
         raise HTTPException(404, "No scan data available. Trigger a refresh first.")
     return _build_response(result)

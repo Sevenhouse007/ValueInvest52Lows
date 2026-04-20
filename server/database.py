@@ -186,7 +186,14 @@ def delete_scan(scan_date: str) -> int:
 
 
 def get_latest_scan() -> Optional[ScanResult]:
-    """Get the most recent scan."""
+    """Get the most recent scan (regardless of quality).
+
+    Use `get_latest_good_scan()` for the user-facing read path — it walks
+    back through history if the most recent scan is corrupt (Yahoo
+    soft-blocked mid-fetch and produced V=0 across the board). This raw
+    version is kept for callers that genuinely want the most recent row
+    (premarket refresh, bounce-back base, etc.).
+    """
     with get_db() as conn:
         row = conn.execute(
             "SELECT * FROM scans ORDER BY scan_date DESC LIMIT 1"
@@ -194,6 +201,57 @@ def get_latest_scan() -> Optional[ScanResult]:
         if not row:
             return None
         return _load_scan(conn, row)
+
+
+def get_latest_good_scan(min_coverage: float = 0.30) -> Optional[ScanResult]:
+    """Most recent scan with at least `min_coverage` of its stocks having
+    real fundamentals (non-empty sector AND value_score > 0).
+
+    Walks back through scan history from newest to oldest, returns the
+    first scan that clears the bar. If NO scan clears it, falls back to
+    the most recent one anyway — better to show degraded data than a
+    blank page. The caller can detect this by comparing the returned
+    scan_date to the latest known date.
+
+    The quality gate in `main._do_refresh` prevents future low-coverage
+    scans from being saved at all, so this fallback only matters for
+    legacy corrupt scans (saved before the gate existed) and for
+    bootstrap when the very first scan gets saved before the gate
+    catches it.
+    """
+    with get_db() as conn:
+        # One pass: per-scan coverage in SQL, ordered newest first.
+        rows = conn.execute(
+            """
+            SELECT scan_date,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN sector IS NOT NULL AND TRIM(sector) != ''
+                                 AND value_score > 0 THEN 1 ELSE 0 END) AS good
+              FROM scan_stocks
+             GROUP BY scan_date
+             ORDER BY scan_date DESC
+             LIMIT 60
+            """
+        ).fetchall()
+        if not rows:
+            return None
+        for r in rows:
+            total = r["total"] or 0
+            good = r["good"] or 0
+            if total > 0 and (good / total) >= min_coverage:
+                scan_row = conn.execute(
+                    "SELECT * FROM scans WHERE scan_date = ?", (r["scan_date"],)
+                ).fetchone()
+                if scan_row:
+                    return _load_scan(conn, scan_row)
+        # No good scan found — fall back to the absolute latest so the
+        # UI still has *something* to render. The status banner from
+        # /api/scan/status communicates the degraded state.
+        latest_date = rows[0]["scan_date"]
+        scan_row = conn.execute(
+            "SELECT * FROM scans WHERE scan_date = ?", (latest_date,)
+        ).fetchone()
+        return _load_scan(conn, scan_row) if scan_row else None
 
 
 def get_scan_by_date(scan_date: str) -> Optional[ScanResult]:

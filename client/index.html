@@ -111,6 +111,15 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .score-legend { padding:0 24px 8px; font-size:11px; color:var(--text2); display:flex; align-items:center; gap:6px; }
 .score-legend .info-icon { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; background:var(--surface2); color:var(--text2); font-size:10px; font-weight:700; cursor:help; }
 
+/* Refresh status banner — non-blocking, sits above the table */
+.refresh-status-banner { margin:0 24px 8px; padding:10px 14px; border-radius:8px; font-size:13px; display:flex; align-items:center; gap:10px; }
+.refresh-status-banner.warn { background:rgba(234,179,8,0.10); border:1px solid rgba(234,179,8,0.35); color:#facc15; }
+.refresh-status-banner.error { background:rgba(239,68,68,0.10); border:1px solid rgba(239,68,68,0.35); color:#f87171; }
+.refresh-status-banner.info { background:rgba(59,130,246,0.10); border:1px solid rgba(59,130,246,0.35); color:#93c5fd; }
+.refresh-status-banner .dismiss { margin-left:auto; cursor:pointer; opacity:0.6; padding:0 6px; font-weight:700; }
+.refresh-status-banner .dismiss:hover { opacity:1; }
+@media (max-width: 760px) { .refresh-status-banner { margin:0 16px 8px; font-size:12px; } }
+
 /* Dual signal badge (appears on both Deep Value + Quality on Sale) */
 .dual-badge { display:inline-block; margin-left:6px; padding:1px 5px; border-radius:3px; background:linear-gradient(135deg, var(--green-bg), rgba(59,130,246,.15)); color:#a78bfa; font-size:9px; font-weight:700; vertical-align:middle; border:1px solid rgba(167,139,250,.25); }
 tbody tr.dual-signal { border-left:3px solid #a78bfa; }
@@ -232,6 +241,12 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
     <button class="btn" id="refreshBtn">Refresh Data</button>
   </div>
 </div>
+
+<!-- Refresh status banner — non-blocking. Shows when the most recent
+     refresh attempt was rejected (Yahoo rate-limit) or errored. The
+     cached scan keeps rendering below; this just tells the user
+     "today's refresh failed, you're looking at the previous good data". -->
+<div id="refreshStatusBanner" class="refresh-status-banner" style="display:none;"></div>
 
 <div class="score-legend">
   <span class="info-icon" title="Scoring differs by sector — each sector uses a different valuation model with appropriate metrics and weights.">i</span>
@@ -361,8 +376,59 @@ let activeTab = 'value'; // 'value' or 'quality'
 document.addEventListener('DOMContentLoaded', () => {
   loadScan();
   loadHistory();
+  loadRefreshStatus();
   bindControls();
 });
+
+// ────────── Refresh status banner ──────────
+// Shown when the most recent refresh attempt was rejected (Yahoo
+// rate-limit / soft-block) or errored. The cached scan keeps rendering
+// below — this banner just tells the user *why* the data isn't fresh.
+async function loadRefreshStatus() {
+  try {
+    const r = await fetch('/api/scan/status');
+    if (!r.ok) return;
+    const s = await r.json();
+    renderRefreshStatusBanner(s.last_refresh);
+  } catch (e) { /* non-critical */ }
+}
+
+function renderRefreshStatusBanner(last) {
+  const el = document.getElementById('refreshStatusBanner');
+  if (!el || !last || !last.status || last.status === 'idle' || last.status === 'success' || last.status === 'running') {
+    if (el) el.style.display = 'none';
+    return;
+  }
+  // Only show on rejected / error
+  let cls = 'warn';
+  let icon = '!';
+  let label = 'Last refresh failed';
+  if (last.status === 'rejected') {
+    cls = 'warn';
+    icon = '!';
+    label = 'Last refresh skipped';
+  } else if (last.status === 'error') {
+    cls = 'error';
+    icon = 'x';
+    label = 'Last refresh errored';
+  }
+  const when = last.at ? new Date(last.at).toLocaleString() : '';
+  const cov = (last.fundamentals_coverage != null)
+    ? ` · fundamentals coverage ${Math.round(last.fundamentals_coverage * 100)}%`
+    : '';
+  el.className = `refresh-status-banner ${cls}`;
+  el.innerHTML = `
+    <strong>[${icon}]</strong>
+    <span><strong>${label}</strong> at ${when}${cov}. ${escapeHtml(last.message || '')} The cached scan below is still shown.</span>
+    <span class="dismiss" title="Dismiss">x</span>
+  `;
+  el.style.display = 'flex';
+  el.querySelector('.dismiss').addEventListener('click', () => { el.style.display = 'none'; });
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 
 // ────────── API ──────────
 async function loadScan(dateStr) {
@@ -370,7 +436,13 @@ async function loadScan(dateStr) {
   try {
     const url = dateStr ? `/api/scan/${dateStr}` : '/api/scan';
     const r = await fetch(url);
-    if (r.status === 404) { showEmpty(); return; }
+    if (r.status === 404) {
+      // Only show the empty state if there's nothing already rendered.
+      // A transient 404 (or the user clicking Refresh while no cached
+      // scan exists yet) shouldn't visually wipe a populated table.
+      if (!allStocks || allStocks.length === 0) showEmpty();
+      return;
+    }
     const data = await r.json();
     allStocks = data.stocks;
     sectorAverages = data.sector_averages;
@@ -383,7 +455,10 @@ async function loadScan(dateStr) {
     document.getElementById('emptyState').style.display = 'none';
   } catch (e) {
     console.error(e);
-    showEmpty();
+    // Same defensive guard: don't blank a populated page on a network
+    // blip — leave the existing data visible. The status banner (if
+    // any) explains the failure.
+    if (!allStocks || allStocks.length === 0) showEmpty();
   } finally {
     showLoading(false);
   }
@@ -428,7 +503,12 @@ async function triggerRefresh() {
   btn.textContent = 'Refreshing...';
   try {
     await fetch('/api/scan/refresh', { method: 'POST' });
-    // Poll for completion
+    // Poll for completion. Whatever the outcome — success, rejected
+    // (Yahoo rate-limit), or error — surface it via the banner so the
+    // user knows why their click "didn't do anything visible". The
+    // table itself doesn't get blanked: loadScan reads whatever is
+    // cached, which the server's quality gate guarantees is the last
+    // good scan (a failed refresh never overwrites it).
     let tries = 0;
     const poll = setInterval(async () => {
       tries++;
@@ -438,6 +518,7 @@ async function triggerRefresh() {
         clearInterval(poll);
         btn.disabled = false;
         btn.textContent = 'Refresh Data';
+        renderRefreshStatusBanner(s.last_refresh);
         loadScan();
         loadHistory();
       }
