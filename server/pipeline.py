@@ -106,7 +106,6 @@ def parse_screener_quote(q: dict) -> StockQuote:
         price=q.get("regularMarketPrice", 0),
         market_cap=q.get("marketCap", 0),
         change_percent=q.get("regularMarketChangePercent", 0),
-        trailing_pe=q.get("trailingPE"),
         fifty_two_week_low=q.get("fiftyTwoWeekLow", 0),
         fifty_two_week_high=q.get("fiftyTwoWeekHigh", 0),
     )

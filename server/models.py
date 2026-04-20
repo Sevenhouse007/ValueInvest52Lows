@@ -15,7 +15,6 @@ class StockQuote(BaseModel):
     price: float = 0.0
     market_cap: float = 0.0
     change_percent: float = 0.0
-    trailing_pe: Optional[float] = None
     fifty_two_week_low: float = 0.0
     fifty_two_week_high: float = 0.0
 
