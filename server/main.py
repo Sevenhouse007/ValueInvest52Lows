@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from server import config
 from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HOST, PORT
 from server.database import (
-    get_backtest_details, get_backtest_summary, get_bounce_back_candidates,
+    delete_scan, get_backtest_details, get_backtest_summary, get_bounce_back_candidates,
     get_latest_scan, get_latest_scan_averages, get_performance_rows_needing_update,
     get_recent_tracked_symbols, get_scan_by_date, get_scan_history, get_stock_history,
     init_db, save_performance_tracking, save_scan, update_forward_price, upsert_latest_price,
@@ -38,6 +38,43 @@ logger = logging.getLogger(__name__)
 _refresh_lock = asyncio.Lock()
 _yahoo_client: Optional[YahooClient] = None
 _is_refreshing = False
+# Outcome of the most recent refresh attempt — surfaced via /api/scan/status
+# so the UI can tell the user "data is from N hours ago, last refresh failed
+# because Yahoo rate-limited" rather than silently overwriting good data
+# with zeros.
+_last_refresh_outcome: dict = {
+    "status": "idle",          # idle | running | success | rejected | error
+    "at": None,                # ISO timestamp of last completion
+    "message": "",             # human-readable reason
+    "fundamentals_coverage": None,  # fraction of stocks with non-zero V/sector
+}
+
+
+def _scan_quality(result: ScanResult) -> tuple[float, str]:
+    """Return (coverage_fraction, summary_message) for a scan.
+
+    Coverage = fraction of stocks with a non-empty sector AND a non-zero
+    value_score. Used to decide whether a refresh result is worth saving
+    or whether Yahoo soft-blocked the run and we should keep the previous
+    good scan instead.
+    """
+    if not result.stocks:
+        return 0.0, "0 stocks scored"
+    good = sum(
+        1 for s in result.stocks
+        if (s.sector or "").strip() and (s.value_score or 0) > 0
+    )
+    total = len(result.stocks)
+    frac = good / total
+    return frac, f"{good}/{total} stocks have fundamentals"
+
+
+# Refuse to overwrite the cached scan with a result where fewer than this
+# fraction of stocks have real fundamentals (sector + V > 0). 30% is
+# generous — a healthy run is ~95-100%; rate-limited runs are typically
+# 0%. The middle ground (a partial outage) gets rejected too, on the
+# theory that the cached scan is more useful than a half-broken one.
+MIN_FUNDAMENTALS_COVERAGE = 0.30
 
 
 async def scheduled_refresh():
@@ -150,16 +187,54 @@ async def premarket_refresh():
 
 
 async def _do_refresh() -> Optional[ScanResult]:
-    global _is_refreshing, _yahoo_client
+    global _is_refreshing, _yahoo_client, _last_refresh_outcome
     async with _refresh_lock:
         _is_refreshing = True
+        _last_refresh_outcome = {
+            "status": "running",
+            "at": None,
+            "message": "Refresh in progress…",
+            "fundamentals_coverage": None,
+        }
         try:
             if _yahoo_client is None:
                 _yahoo_client = YahooClient()
             result = await run_pipeline(_yahoo_client)
+
+            # Quality gate: don't overwrite the cached good scan with a
+            # half-broken one. If Yahoo soft-blocks the run (rate limit,
+            # invalid crumb cascade, etc.), most stocks will have V=0
+            # and empty sectors — saving that wipes out yesterday's
+            # perfectly good data and the UI looks dead.
+            coverage, summary = _scan_quality(result)
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if coverage < MIN_FUNDAMENTALS_COVERAGE:
+                msg = (
+                    f"Refresh rejected: {summary} (coverage {coverage:.0%} "
+                    f"< {MIN_FUNDAMENTALS_COVERAGE:.0%} threshold). "
+                    f"Likely Yahoo rate-limit. Cached scan kept."
+                )
+                logger.warning(msg)
+                _last_refresh_outcome = {
+                    "status": "rejected",
+                    "at": now_iso,
+                    "message": msg,
+                    "fundamentals_coverage": round(coverage, 3),
+                }
+                return None
+
             save_scan(result)
             save_performance_tracking(result.scan_date, result.stocks)
-            logger.info(f"Scan saved: {result.scan_date} — {result.total_stocks} stocks")
+            logger.info(
+                f"Scan saved: {result.scan_date} — {result.total_stocks} "
+                f"stocks ({summary}, coverage {coverage:.0%})"
+            )
+            _last_refresh_outcome = {
+                "status": "success",
+                "at": now_iso,
+                "message": f"Saved {result.total_stocks} stocks ({summary})",
+                "fundamentals_coverage": round(coverage, 3),
+            }
             # Send notifications
             try:
                 from server.notifications import send_daily_digest
@@ -171,8 +246,14 @@ async def _do_refresh() -> Optional[ScanResult]:
             except Exception as e:
                 logger.warning(f"Notification failed: {e}")
             return result
-        except Exception:
+        except Exception as e:
             logger.exception("Pipeline refresh failed")
+            _last_refresh_outcome = {
+                "status": "error",
+                "at": datetime.now(timezone.utc).isoformat(),
+                "message": f"{type(e).__name__}: {e}",
+                "fundamentals_coverage": None,
+            }
             return None
         finally:
             _is_refreshing = False
@@ -267,10 +348,34 @@ async def trigger_refresh(background_tasks: BackgroundTasks):
     return {"status": "started", "message": "Refresh started in background."}
 
 
+@app.delete("/api/scan/{scan_date}")
+async def delete_scan_endpoint(scan_date: str):
+    """Delete a corrupt cached scan by date.
+
+    Used to clean up scans saved before the quality-gate guard was added
+    (where Yahoo soft-blocked mid-run and stocks ended up with V=0).
+    After deletion the next refresh, or `get_latest_scan()` falling back
+    to the previous date, surfaces a real result.
+    """
+    deleted = delete_scan(scan_date)
+    if deleted == 0:
+        raise HTTPException(404, f"No scan found for {scan_date}")
+    return {"status": "deleted", "scan_date": scan_date, "rows_removed": deleted}
+
+
 @app.get("/api/scan/status")
 async def scan_status():
-    """Check if a refresh is in progress."""
-    return {"refreshing": _is_refreshing}
+    """Check if a refresh is in progress and report the last outcome.
+
+    The `last_refresh` block lets the UI distinguish "no scan yet" from
+    "yesterday's scan is current because today's refresh failed". When
+    `last_refresh.status == "rejected"` the cached scan is intentionally
+    older than the displayed `at` timestamp.
+    """
+    return {
+        "refreshing": _is_refreshing,
+        "last_refresh": _last_refresh_outcome,
+    }
 
 
 @app.get("/api/scan/{scan_date}")

@@ -171,6 +171,20 @@ def save_scan(result: ScanResult):
         )
 
 
+def delete_scan(scan_date: str) -> int:
+    """Delete a scan and its associated stocks/performance rows.
+
+    Returns the number of `scans` rows removed (0 or 1). Used to nuke a
+    corrupt cached scan — e.g. one saved before the quality-gate guard
+    was added, where Yahoo soft-blocked mid-run and every stock has V=0.
+    """
+    with get_db() as conn:
+        conn.execute("DELETE FROM scan_stocks WHERE scan_date = ?", (scan_date,))
+        conn.execute("DELETE FROM scan_performance WHERE scan_date = ?", (scan_date,))
+        cur = conn.execute("DELETE FROM scans WHERE scan_date = ?", (scan_date,))
+        return cur.rowcount
+
+
 def get_latest_scan() -> Optional[ScanResult]:
     """Get the most recent scan."""
     with get_db() as conn:
