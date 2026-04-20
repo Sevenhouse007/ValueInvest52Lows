@@ -353,6 +353,51 @@ async def diag_db():
     return info
 
 
+@app.get("/api/diag/yahoo")
+async def diag_yahoo(symbol: str = "AAPL"):
+    """Diagnostic: probe Yahoo's quoteSummary for one symbol and report
+    exactly what comes back — HTTP status, response keys, error envelope,
+    crumb prefix, session class. Used to debug datacenter-IP soft-blocks
+    on Render where we can't see Render's outbound traffic directly.
+    """
+    import json as _json
+    from server.yahoo_client import YahooClient
+    from server.config import YAHOO_QUOTE_SUMMARY_URL
+
+    info: dict = {"symbol": symbol}
+    client = YahooClient()
+    try:
+        client._ensure_session()
+        info["session_class"] = type(client._session).__name__
+        info["session_module"] = type(client._session).__module__
+        info["crumb_prefix"] = (client._crumb or "")[:8]
+        info["crumb_len"] = len(client._crumb or "")
+        url = YAHOO_QUOTE_SUMMARY_URL.format(symbol=symbol)
+        params = {
+            "modules": "defaultKeyStatistics,financialData,summaryDetail,assetProfile,price",
+            "crumb": client._crumb,
+        }
+        resp = client._session.get(url, params=params)
+        info["http_status"] = resp.status_code
+        info["resp_headers_ct"] = resp.headers.get("content-type", "")
+        text = resp.text
+        info["resp_preview"] = text[:600]
+        try:
+            data = resp.json()
+            qs = (data or {}).get("quoteSummary") or {}
+            info["has_result"] = bool(qs.get("result"))
+            info["result_count"] = len(qs.get("result") or [])
+            info["error_envelope"] = qs.get("error")
+            if qs.get("result"):
+                first = qs["result"][0] or {}
+                info["modules_returned"] = sorted(first.keys())
+        except Exception as e:
+            info["json_parse_err"] = str(e)
+    except Exception as e:
+        info["session_init_err"] = f"{type(e).__name__}: {e}"
+    return info
+
+
 @app.get("/api/bounce-back")
 async def bounce_back(threshold: float = 0.05, lookback_days: int = 90):
     """Return stocks that hit a 52W low within `lookback_days` and have
