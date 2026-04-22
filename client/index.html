@@ -93,8 +93,13 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .reasons-list li { padding:3px 0; font-size:12px; }
 .reasons-list li::before { content:"\2713  "; color:var(--green); font-weight:bold; }
 .reasons-list li.neg::before { content:"\2717  "; color:var(--red); }
-.sparkline-container { height:120px; }
-.sparkline-container canvas { width:100%; height:100%; }
+/* Right-column container holds the price sparkline AND the quality
+   radar — auto height so both fit. The canvases declare their own
+   height attributes; width fills the column. */
+.sparkline-container { display:flex; flex-direction:column; }
+.sparkline-container canvas { width:100%; display:block; }
+.sparkline-container canvas[id^="spark-"] { height:100px; }
+.sparkline-container canvas[id^="radar-"] { height:240px; }
 
 /* Model tag */
 .model-tag { font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(59,130,246,.12); color:var(--blue); white-space:nowrap; }
@@ -191,7 +196,9 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
   .detail-panel { grid-template-columns:1fr; gap:16px; margin:4px; padding:14px; }
   .detail-panel h3 { font-size:13px; }
   .metrics-grid { grid-template-columns:1fr; }
-  .sparkline-container { height:100px; }
+  /* Mobile: keep sparkline compact, radar still readable. */
+  .sparkline-container canvas[id^="spark-"] { height:80px; }
+  .sparkline-container canvas[id^="radar-"] { height:220px; }
 }
 </style>
 </head>
@@ -664,7 +671,13 @@ function renderTable() {
       const sym = tr.dataset.sym;
       expandedSymbol = expandedSymbol === sym ? null : sym;
       renderTable();
-      if (expandedSymbol) loadSparkline(expandedSymbol);
+      if (expandedSymbol) {
+        loadSparkline(expandedSymbol);
+        // Radar uses fields already in `s`, so no fetch needed —
+        // just defer one tick so the canvas is in the DOM.
+        const stock = allStocks.find(x => x.symbol === expandedSymbol);
+        if (stock) requestAnimationFrame(() => loadRadar(expandedSymbol, stock));
+      }
     });
   });
 }
@@ -797,8 +810,202 @@ function detailPanel(s) {
     <div class="sparkline-container">
       <h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">12-Month Price</h4>
       <canvas id="spark-${sym}" width="280" height="100"></canvas>
+      <h4 style="margin:14px 0 4px;color:var(--text2);font-size:11px;text-transform:uppercase;display:flex;justify-content:space-between;align-items:baseline;">
+        <span>Quality Radar</span>
+        <span style="font-size:10px;color:var(--text2);font-weight:400;">${radarOverall(s)} / 100</span>
+      </h4>
+      <canvas id="radar-${sym}" width="280" height="240"></canvas>
     </div>
   </div>`;
+}
+
+// ────────── Quality Radar ──────────
+// Five dimensions (FastGraphs-style) derived from fundamentals we
+// already fetch. Each returns 0–100; null for missing data so the
+// chart can show a hollow vertex instead of a misleading zero.
+
+function _clamp01(x) { return Math.max(0, Math.min(1, x)); }
+
+function radarScores(s) {
+  // Profitability: ROE + ROIC (higher = better). 25% = top of scale.
+  let prof = null;
+  {
+    const parts = [];
+    if (s.return_on_equity != null) parts.push(_clamp01(s.return_on_equity / 0.25) * 100);
+    if (s.roic != null)             parts.push(_clamp01(s.roic / 0.20) * 100);
+    if (parts.length) prof = parts.reduce((a,b)=>a+b,0) / parts.length;
+  }
+  // Cash Flow Generation: FCF yield (FCF / MktCap). 10% = top.
+  let cf = null;
+  if (s.free_cash_flow != null && s.market_cap > 0) {
+    const yld = s.free_cash_flow / s.market_cap;
+    cf = _clamp01(yld / 0.10) * 100;
+    // Below-zero FCF zeroes us out (already clamped, but be explicit).
+    if (yld < 0) cf = 0;
+  }
+  // Financial Strength: Altman Z + interest coverage + inverse leverage.
+  let fs = null;
+  {
+    const parts = [];
+    if (s.altman_z_score != null) {
+      // Z >= 3 safe zone → 100; Z = 1.81 distress threshold → 50; Z<=0 → 0.
+      const z = s.altman_z_score;
+      let pts;
+      if (z >= 3)        pts = 100;
+      else if (z >= 1.81) pts = 50 + (z - 1.81) / (3 - 1.81) * 50;
+      else                pts = Math.max(0, z / 1.81 * 50);
+      parts.push(pts);
+    }
+    if (s.interest_coverage != null) {
+      // ICR >= 10 → 100; ICR 1.5 → 25; ICR <= 0 → 0.
+      const ic = s.interest_coverage;
+      let pts;
+      if (ic >= 10)      pts = 100;
+      else if (ic >= 1.5) pts = 25 + (ic - 1.5) / (10 - 1.5) * 75;
+      else                pts = Math.max(0, ic / 1.5 * 25);
+      parts.push(pts);
+    }
+    if (s.debt_to_equity != null) {
+      // D/E inverse — 0 → 100, 100 → 50, 200 → 0.
+      const de = s.debt_to_equity;
+      parts.push(_clamp01(1 - de / 200) * 100);
+    }
+    if (parts.length) fs = parts.reduce((a,b)=>a+b,0) / parts.length;
+  }
+  // Growth: revenue + earnings growth. 20%/30% = tops respectively.
+  let gr = null;
+  {
+    const parts = [];
+    if (s.revenue_growth != null)  parts.push(_clamp01(s.revenue_growth / 0.20) * 100);
+    if (s.earnings_growth != null) parts.push(_clamp01(s.earnings_growth / 0.30) * 100);
+    if (parts.length) gr = parts.reduce((a,b)=>a+b,0) / parts.length;
+  }
+  // Predictability: Piotroski F-Score (consistency of accruals, leverage,
+  // and operating efficiency over the trailing year — best proxy we have
+  // for the "stable earnings stream" dimension FastGraphs uses). Bonus
+  // if ROIC clears WACC (durable value creator).
+  let pr = null;
+  if (s.piotroski_f_score != null) {
+    pr = (s.piotroski_f_score / 9) * 100;
+    if (s.roic != null && s.sector_wacc != null && s.roic > s.sector_wacc) {
+      pr = Math.min(100, pr + 10);
+    }
+  }
+  return {
+    Profitability: prof,
+    'Cash Flow':   cf,
+    'Fin Strength': fs,
+    Growth:        gr,
+    Predictability: pr,
+  };
+}
+
+function radarOverall(s) {
+  const sc = radarScores(s);
+  const vals = Object.values(sc).filter(v => v != null);
+  if (!vals.length) return '—';
+  return Math.round(vals.reduce((a,b)=>a+b,0) / vals.length);
+}
+
+function drawRadar(canvas, scores) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.offsetWidth;
+  const h = canvas.offsetHeight;
+  // High-DPI: render at 2x then scale.
+  canvas.width = w * 2; canvas.height = h * 2;
+  ctx.scale(2, 2);
+
+  const labels = Object.keys(scores);
+  const values = Object.values(scores);
+  const N = labels.length;
+  const cx = w / 2;
+  const cy = h / 2 + 4; // small downshift so top label has room
+  const R = Math.min(cx, cy) - 28; // leave room for labels
+
+  // Axis angles: start at top (-π/2) and go clockwise.
+  const angle = i => -Math.PI/2 + (i / N) * Math.PI * 2;
+
+  // Concentric grid rings (4 rings = 25/50/75/100).
+  ctx.strokeStyle = 'rgba(148,163,184,0.18)';
+  ctx.lineWidth = 1;
+  for (let r = 1; r <= 4; r++) {
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+      const a = angle(i);
+      const x = cx + Math.cos(a) * R * (r / 4);
+      const y = cy + Math.sin(a) * R * (r / 4);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+  }
+  // Spokes
+  ctx.strokeStyle = 'rgba(148,163,184,0.22)';
+  for (let i = 0; i < N; i++) {
+    const a = angle(i);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
+    ctx.stroke();
+  }
+
+  // Score polygon — color by overall avg.
+  const valid = values.filter(v => v != null);
+  const overall = valid.length ? valid.reduce((a,b)=>a+b,0) / valid.length : 0;
+  const stroke = overall >= 70 ? '#22c55e' : overall >= 45 ? '#3b82f6' : overall >= 25 ? '#f59e0b' : '#ef4444';
+  const fill   = overall >= 70 ? 'rgba(34,197,94,0.18)'
+               : overall >= 45 ? 'rgba(59,130,246,0.18)'
+               : overall >= 25 ? 'rgba(245,158,11,0.18)'
+               :                  'rgba(239,68,68,0.18)';
+  ctx.beginPath();
+  for (let i = 0; i < N; i++) {
+    const v = values[i] == null ? 0 : values[i];
+    const a = angle(i);
+    const r = (v / 100) * R;
+    const x = cx + Math.cos(a) * r;
+    const y = cy + Math.sin(a) * r;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+  ctx.strokeStyle = stroke; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // Vertex dots (hollow if missing).
+  for (let i = 0; i < N; i++) {
+    const v = values[i];
+    const a = angle(i);
+    const r = ((v == null ? 0 : v) / 100) * R;
+    const x = cx + Math.cos(a) * r;
+    const y = cy + Math.sin(a) * r;
+    ctx.beginPath();
+    ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = v == null ? 'transparent' : stroke;
+    ctx.strokeStyle = stroke; ctx.lineWidth = 1;
+    if (v == null) ctx.stroke(); else ctx.fill();
+  }
+
+  // Axis labels
+  ctx.fillStyle = 'rgba(148,163,184,0.95)';
+  ctx.font = '10px system-ui,-apple-system,sans-serif';
+  for (let i = 0; i < N; i++) {
+    const a = angle(i);
+    const x = cx + Math.cos(a) * (R + 12);
+    const y = cy + Math.sin(a) * (R + 12);
+    // Anchor labels by quadrant so they don't overlap the chart.
+    const cosA = Math.cos(a), sinA = Math.sin(a);
+    ctx.textAlign = cosA > 0.3 ? 'left' : cosA < -0.3 ? 'right' : 'center';
+    ctx.textBaseline = sinA > 0.3 ? 'top' : sinA < -0.3 ? 'bottom' : 'middle';
+    const label = labels[i];
+    const v = values[i];
+    const num = v == null ? '—' : Math.round(v);
+    ctx.fillText(`${label} ${num}`, x, y);
+  }
+}
+
+function loadRadar(symbol, stock) {
+  const canvas = document.getElementById(`radar-${symbol}`);
+  if (!canvas) return;
+  drawRadar(canvas, radarScores(stock));
 }
 
 async function loadSparkline(symbol) {
