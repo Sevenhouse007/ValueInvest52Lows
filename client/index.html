@@ -826,106 +826,133 @@ function detailPanel(s) {
 
 function _clamp01(x) { return Math.max(0, Math.min(1, x)); }
 
-function radarScores(s) {
-  // Profitability: ROE + ROIC (higher = better). 25% = top of scale.
-  let prof = null;
-  {
-    const parts = [];
-    if (s.return_on_equity != null) parts.push(_clamp01(s.return_on_equity / 0.25) * 100);
-    if (s.roic != null)             parts.push(_clamp01(s.roic / 0.20) * 100);
-    if (parts.length) prof = parts.reduce((a,b)=>a+b,0) / parts.length;
-  }
-  // Cheap vs Peers: average discount on Fwd P/E, EV/EBITDA, P/B
-  // against the sector median (Damodaran benchmark, falling back to
-  // market-avg if the sector benchmark is missing). Each metric
-  // contributes max(0, 1 - stock_mult / peer_mult) capped at 100% —
-  // a stock at half its sector median gets +50, at the median 0,
-  // and richer than peers also 0 (we don't penalize, just don't
-  // reward). Average the available metrics so a stock missing one
-  // (e.g. negative EBITDA) still scores fairly on the others.
-  let cv = null;
-  {
-    const parts = [];
-    const _disc = (mult, peer) => {
-      // Both must be positive for the ratio to be meaningful — a
-      // negative EV/EBITDA isn't "cheap," it's broken.
-      if (mult == null || peer == null || mult <= 0 || peer <= 0) return null;
-      return _clamp01(1 - mult / peer) * 100;
-    };
-    const fpePeer = s.sector_median_pe         ?? s.market_avg_fpe;
-    const evPeer  = s.sector_median_ev_ebitda  ?? s.market_avg_ev_ebitda;
-    const pbPeer  = s.sector_median_pb         ?? s.market_avg_pb;
-    [
-      _disc(s.forward_pe,    fpePeer),
-      _disc(s.ev_to_ebitda,  evPeer),
-      _disc(s.price_to_book, pbPeer),
-    ].forEach(p => { if (p != null) parts.push(p); });
-    if (parts.length) cv = parts.reduce((a,b)=>a+b,0) / parts.length;
-  }
-  // Financial Strength: Altman Z + interest coverage + inverse leverage.
-  let fs = null;
-  {
-    const parts = [];
-    if (s.altman_z_score != null) {
-      // Z >= 3 safe zone → 100; Z = 1.81 distress threshold → 50; Z<=0 → 0.
-      const z = s.altman_z_score;
-      let pts;
-      if (z >= 3)        pts = 100;
-      else if (z >= 1.81) pts = 50 + (z - 1.81) / (3 - 1.81) * 50;
-      else                pts = Math.max(0, z / 1.81 * 50);
-      parts.push(pts);
-    }
-    if (s.interest_coverage != null) {
-      // ICR >= 10 → 100; ICR 1.5 → 25; ICR <= 0 → 0.
-      const ic = s.interest_coverage;
-      let pts;
-      if (ic >= 10)      pts = 100;
-      else if (ic >= 1.5) pts = 25 + (ic - 1.5) / (10 - 1.5) * 75;
-      else                pts = Math.max(0, ic / 1.5 * 25);
-      parts.push(pts);
-    }
-    if (s.debt_to_equity != null) {
-      // D/E inverse — 0 → 100, 100 → 50, 200 → 0.
-      const de = s.debt_to_equity;
-      parts.push(_clamp01(1 - de / 200) * 100);
-    }
-    if (parts.length) fs = parts.reduce((a,b)=>a+b,0) / parts.length;
-  }
-  // Growth: revenue + earnings growth. 20%/30% = tops respectively.
-  let gr = null;
-  {
-    const parts = [];
-    if (s.revenue_growth != null)  parts.push(_clamp01(s.revenue_growth / 0.20) * 100);
-    if (s.earnings_growth != null) parts.push(_clamp01(s.earnings_growth / 0.30) * 100);
-    if (parts.length) gr = parts.reduce((a,b)=>a+b,0) / parts.length;
-  }
-  // Predictability: Piotroski F-Score (consistency of accruals, leverage,
-  // and operating efficiency over the trailing year — best proxy we have
-  // for the "stable earnings stream" dimension FastGraphs uses). Bonus
-  // if ROIC clears WACC (durable value creator).
-  let pr = null;
-  if (s.piotroski_f_score != null) {
-    pr = (s.piotroski_f_score / 9) * 100;
-    if (s.roic != null && s.sector_wacc != null && s.roic > s.sector_wacc) {
-      pr = Math.min(100, pr + 10);
-    }
-  }
+// Sanity range — anything outside is almost certainly a data-feed glitch
+// (Yahoo occasionally returns Fwd P/E of 1.26 for stocks trading at 30x,
+// for example). Returning null lets the radar show partial-data confidence
+// instead of computing a misleading score from garbage input.
+function _ok(v, lo, hi) {
+  return (v != null && Number.isFinite(v) && v >= lo && v <= hi) ? v : null;
+}
+
+// Build an axis result from per-input score parts. `expected` is how many
+// inputs the axis would have if data were complete; confidence is the
+// fraction we actually got. value=null when no inputs survived.
+function _axis(parts, expected) {
+  const valid = parts.filter(p => p != null);
+  if (!valid.length) return { value: null, confidence: 0, present: 0, expected };
   return {
-    Profitability:   prof,
+    value:      valid.reduce((a,b)=>a+b,0) / valid.length,
+    confidence: valid.length / expected,
+    present:    valid.length,
+    expected,
+  };
+}
+
+function radarScores(s) {
+  // Sanity-clamp inputs first. Plausible ranges based on real-world
+  // distributions: a stock with Fwd P/E < 3 or D/E > 1000 is almost
+  // certainly a bad data point, not a real outlier.
+  const x = {
+    return_on_equity:   _ok(s.return_on_equity,    -1,    1),
+    roic:               _ok(s.roic,                -1,    1),
+    forward_pe:         _ok(s.forward_pe,           3,  200),
+    ev_to_ebitda:       _ok(s.ev_to_ebitda,         1,  100),
+    price_to_book:      _ok(s.price_to_book,      0.1,   50),
+    altman_z_score:     _ok(s.altman_z_score,     -10,   30),
+    interest_coverage:  _ok(s.interest_coverage, -100, 1000),
+    debt_to_equity:     _ok(s.debt_to_equity,       0, 1000),
+    revenue_growth:     _ok(s.revenue_growth,      -1,    5),
+    earnings_growth:    _ok(s.earnings_growth,     -5,   10),
+    piotroski_f_score:  _ok(s.piotroski_f_score,    0,    9),
+  };
+
+  // Profitability: ROE + ROIC (higher = better). 25%/20% = top of scale.
+  const prof = _axis([
+    x.return_on_equity != null ? _clamp01(x.return_on_equity / 0.25) * 100 : null,
+    x.roic             != null ? _clamp01(x.roic             / 0.20) * 100 : null,
+  ], 2);
+
+  // Cheap vs Peers: average discount on Fwd P/E, EV/EBITDA, P/B against
+  // the sector median (Damodaran), falling back to market-avg if the
+  // sector benchmark is missing. Each metric contributes max(0, 1 -
+  // stock/peer) — a stock at half its sector median gets +50, at the
+  // median 0, richer than peers also 0 (we don't penalize, just don't
+  // reward).
+  const _disc = (mult, peer) => {
+    if (mult == null || peer == null || mult <= 0 || peer <= 0) return null;
+    return _clamp01(1 - mult / peer) * 100;
+  };
+  const fpePeer = s.sector_median_pe         ?? s.market_avg_fpe;
+  const evPeer  = s.sector_median_ev_ebitda  ?? s.market_avg_ev_ebitda;
+  const pbPeer  = s.sector_median_pb         ?? s.market_avg_pb;
+  const cv = _axis([
+    _disc(x.forward_pe,    fpePeer),
+    _disc(x.ev_to_ebitda,  evPeer),
+    _disc(x.price_to_book, pbPeer),
+  ], 3);
+
+  // Financial Strength: Altman Z + interest coverage + inverse leverage.
+  let zPts = null;
+  if (x.altman_z_score != null) {
+    // Z >= 3 safe → 100; Z = 1.81 distress threshold → 50; Z<=0 → 0.
+    const z = x.altman_z_score;
+    if (z >= 3)         zPts = 100;
+    else if (z >= 1.81) zPts = 50 + (z - 1.81) / (3 - 1.81) * 50;
+    else                zPts = Math.max(0, z / 1.81 * 50);
+  }
+  let icPts = null;
+  if (x.interest_coverage != null) {
+    // ICR >= 10 → 100; ICR 1.5 → 25; ICR <= 0 → 0.
+    const ic = x.interest_coverage;
+    if (ic >= 10)       icPts = 100;
+    else if (ic >= 1.5) icPts = 25 + (ic - 1.5) / (10 - 1.5) * 75;
+    else                icPts = Math.max(0, ic / 1.5 * 25);
+  }
+  const dePts = x.debt_to_equity != null
+    ? _clamp01(1 - x.debt_to_equity / 200) * 100
+    : null;
+  const fs = _axis([zPts, icPts, dePts], 3);
+
+  // Growth: revenue + earnings growth. 20%/30% = tops respectively.
+  const gr = _axis([
+    x.revenue_growth  != null ? _clamp01(x.revenue_growth  / 0.20) * 100 : null,
+    x.earnings_growth != null ? _clamp01(x.earnings_growth / 0.30) * 100 : null,
+  ], 2);
+
+  // Predictability: Piotroski F-Score (consistency of accruals, leverage,
+  // and operating efficiency). Bonus if ROIC clears WACC.
+  let pr = { value: null, confidence: 0, present: 0, expected: 1 };
+  if (x.piotroski_f_score != null) {
+    let v = (x.piotroski_f_score / 9) * 100;
+    if (x.roic != null && s.sector_wacc != null && x.roic > s.sector_wacc) {
+      v = Math.min(100, v + 10);
+    }
+    pr = { value: v, confidence: 1, present: 1, expected: 1 };
+  }
+
+  return {
+    Profitability:    prof,
     'Cheap vs Peers': cv,
-    'Fin Strength':  fs,
-    Growth:          gr,
+    'Fin Strength':   fs,
+    Growth:           gr,
     // "Predict." rather than "Predictability" — full word overflows
     // the 300-px right column at the canvas's leftmost label slot.
-    'Predict.':      pr,
+    'Predict.':       pr,
   };
 }
 
 function radarOverall(s) {
   const sc = radarScores(s);
-  const vals = Object.values(sc).filter(v => v != null);
-  if (!vals.length) return '—';
-  return Math.round(vals.reduce((a,b)=>a+b,0) / vals.length);
+  // Confidence-weight the overall: an axis built from 1-of-3 inputs
+  // shouldn't count as much as a fully-supported axis.
+  let num = 0, den = 0;
+  for (const ax of Object.values(sc)) {
+    if (ax.value == null) continue;
+    num += ax.value * ax.confidence;
+    den += ax.confidence;
+  }
+  if (den === 0) return '—';
+  return Math.round(num / den);
 }
 
 function drawRadar(canvas, scores) {
@@ -937,7 +964,11 @@ function drawRadar(canvas, scores) {
   ctx.scale(2, 2);
 
   const labels = Object.keys(scores);
-  const values = Object.values(scores);
+  // Each entry is {value, confidence, present, expected}. Pull the
+  // numeric value out for the geometry; keep confidence for styling.
+  const axes   = Object.values(scores);
+  const values = axes.map(a => a.value);
+  const confs  = axes.map(a => a.confidence);
   const N = labels.length;
   const cx = w / 2;
   const cy = h / 2 + 4; // small downshift so top label has room
@@ -993,23 +1024,30 @@ function drawRadar(canvas, scores) {
   ctx.fillStyle = fill; ctx.fill();
   ctx.strokeStyle = stroke; ctx.lineWidth = 1.5; ctx.stroke();
 
-  // Vertex dots (hollow if missing).
+  // Vertex dots: filled when full-confidence, hollow when partial,
+  // hollow + small when value is missing entirely.
   for (let i = 0; i < N; i++) {
     const v = values[i];
+    const c = confs[i];
     const a = angle(i);
     const r = ((v == null ? 0 : v) / 100) * R;
     const x = cx + Math.cos(a) * r;
     const y = cy + Math.sin(a) * r;
     ctx.beginPath();
     ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-    ctx.fillStyle = v == null ? 'transparent' : stroke;
     ctx.strokeStyle = stroke; ctx.lineWidth = 1;
-    if (v == null) ctx.stroke(); else ctx.fill();
+    if (v == null || c < 1) {
+      ctx.fillStyle = 'transparent';
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = stroke;
+      ctx.fill();
+    }
   }
 
   // Axis labels
-  ctx.fillStyle = 'rgba(148,163,184,0.95)';
   ctx.font = '10px system-ui,-apple-system,sans-serif';
+  let anyPartial = false;
   for (let i = 0; i < N; i++) {
     const a = angle(i);
     let x = cx + Math.cos(a) * (R + 12);
@@ -1020,8 +1058,17 @@ function drawRadar(canvas, scores) {
     ctx.textBaseline = sinA > 0.3 ? 'top' : sinA < -0.3 ? 'bottom' : 'middle';
     const label = labels[i];
     const v = values[i];
+    const c = confs[i];
     const num = v == null ? '—' : Math.round(v);
-    const text = `${label} ${num}`;
+    // Asterisk when an axis was built from incomplete inputs (or when
+    // sanity-clamping rejected one). Faded color reinforces the signal.
+    const partial = v != null && c < 1;
+    if (partial) anyPartial = true;
+    const suffix = partial ? '*' : '';
+    ctx.fillStyle = (v == null || partial)
+      ? 'rgba(148,163,184,0.55)'
+      : 'rgba(148,163,184,0.95)';
+    const text = `${label} ${num}${suffix}`;
     // Clamp against canvas bounds so a long label can never escape
     // the 300-px column (defends against future label-rename slips).
     const tw = ctx.measureText(text).width;
@@ -1031,6 +1078,15 @@ function drawRadar(canvas, scores) {
       x = Math.max(tw/2 + 2, Math.min(w - tw/2 - 2, x));
     }
     ctx.fillText(text, x, y);
+  }
+
+  // Footnote when any axis was sanity-clamped or built from partial data.
+  if (anyPartial) {
+    ctx.fillStyle = 'rgba(148,163,184,0.55)';
+    ctx.font = '9px system-ui,-apple-system,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('* partial data', w / 2, h - 2);
   }
 }
 
