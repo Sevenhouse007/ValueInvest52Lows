@@ -83,8 +83,17 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 
 /* Detail panel */
 .detail-row td { padding:0; }
-.detail-panel { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin:8px; padding:20px; display:grid; grid-template-columns:1fr 1fr 360px; gap:20px; }
+.detail-panel { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin:8px; padding:20px; display:grid; grid-template-columns:1fr 1fr; gap:20px; }
 .detail-panel h3 { font-size:14px; margin-bottom:10px; grid-column:1/-1; display:flex; align-items:center; gap:10px; }
+/* Charts row spans both columns. Three equal cells so EPS / Price /
+   Radar each get ~1/3 of the panel width — far more usable on a wide
+   monitor than the old 360px sidebar. */
+.detail-panel .detail-charts { grid-column:1/-1; display:grid; grid-template-columns:1fr 1fr 1fr; gap:20px; align-items:flex-start; }
+.detail-panel .detail-charts h4 { margin-bottom:8px; color:var(--text2); font-size:11px; text-transform:uppercase; display:flex; justify-content:space-between; align-items:baseline; }
+.detail-panel .detail-charts canvas { width:100%; display:block; }
+.detail-panel .detail-charts canvas[id^="spark-"] { height:140px; }
+.detail-panel .detail-charts canvas[id^="eps-"]   { height:140px; }
+.detail-panel .detail-charts canvas[id^="radar-"] { height:280px; }
 .detail-panel h3 a { font-size:12px; font-weight:400; }
 .metrics-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
 .metric-item { display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid var(--border); font-size:12px; }
@@ -197,6 +206,10 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
   /* Detail panel: single column */
   .detail-panel { grid-template-columns:1fr; gap:16px; margin:4px; padding:14px; }
   .detail-panel h3 { font-size:13px; }
+  .detail-panel .detail-charts { grid-template-columns:1fr; }
+  .detail-panel .detail-charts canvas[id^="spark-"] { height:120px; }
+  .detail-panel .detail-charts canvas[id^="eps-"]   { height:120px; }
+  .detail-panel .detail-charts canvas[id^="radar-"] { height:240px; }
   .metrics-grid { grid-template-columns:1fr; }
   /* Mobile: keep sparkline compact, radar still readable. */
   .sparkline-container canvas[id^="spark-"] { height:80px; }
@@ -799,6 +812,20 @@ function detailPanel(s) {
   const symUrl = encodeURIComponent(String(s.symbol||''));
   return `<div class="detail-panel">
     <h3>${sym} — ${escapeHtml(s.short_name||'')} <a href="https://finance.yahoo.com/quote/${symUrl}" target="_blank" rel="noopener noreferrer">Yahoo Finance ↗</a></h3>
+    <div class="detail-charts">
+      <div>
+        <h4>5Y EPS</h4>
+        <canvas id="eps-${sym}"></canvas>
+      </div>
+      <div>
+        <h4>12-Month Price</h4>
+        <canvas id="spark-${sym}"></canvas>
+      </div>
+      <div>
+        <h4><span>Quality Radar</span><span style="font-size:10px;color:var(--text2);font-weight:400;text-transform:none;">${radarOverall(s)} / 100</span></h4>
+        <canvas id="radar-${sym}"></canvas>
+      </div>
+    </div>
     <div>
       <div style="margin-bottom:10px;padding:6px 10px;background:rgba(59,130,246,.08);border-radius:6px;font-size:11px;color:var(--blue);">
         ${escapeHtml(modelDesc)}<br><span style="opacity:.75">${peerDesc}</span>
@@ -809,23 +836,6 @@ function detailPanel(s) {
     <div>
       <h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">Score Reasons</h4>
       ${reasonsHtml}
-    </div>
-    <div class="sparkline-container">
-      <div class="charts-row">
-        <div>
-          <h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">5Y EPS</h4>
-          <canvas id="eps-${sym}" width="170" height="100"></canvas>
-        </div>
-        <div>
-          <h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">12-Month Price</h4>
-          <canvas id="spark-${sym}" width="170" height="100"></canvas>
-        </div>
-      </div>
-      <h4 style="margin:14px 0 4px;color:var(--text2);font-size:11px;text-transform:uppercase;display:flex;justify-content:space-between;align-items:baseline;">
-        <span>Quality Radar</span>
-        <span style="font-size:10px;color:var(--text2);font-weight:400;">${radarOverall(s)} / 100</span>
-      </h4>
-      <canvas id="radar-${sym}" width="340" height="240"></canvas>
     </div>
   </div>`;
 }
