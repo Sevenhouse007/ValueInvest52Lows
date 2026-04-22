@@ -1470,8 +1470,10 @@ async function doLookup() {
     const data = await r.json();
     document.getElementById('lookupStatus').textContent = '';
     renderLookupResult(data.stock);
-    // Load sparkline
+    // Load sparkline + quality radar (radar uses fields already on
+    // data.stock — no extra fetch).
     loadSparkline(symbol);
+    requestAnimationFrame(() => loadRadar(symbol, data.stock));
   } catch (e) {
     document.getElementById('lookupStatus').textContent = 'Network error';
   }
@@ -1576,8 +1578,22 @@ function renderLookupResult(s) {
       html += `<div style="padding:6px 8px;margin-bottom:4px;background:${bg};border-radius:4px;font-size:12px;"><strong style="color:${clr}">${r.l}: ${r.v}</strong><div style="color:var(--text2);margin-top:2px;">${r.d}</div></div>`;
     });
   }
-  html += `<div style="margin-top:16px;"><h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;">12-Month Price</h4>`;
-  html += `<canvas id="spark-${lkSym}" width="400" height="120" style="width:100%;height:120px;"></canvas></div>`;
+  // Bottom row: 12-month price (left) + Quality Radar (right). On the
+  // lookup view we have full page width so the radar gets a generous
+  // 380x300 box rather than the cramped 280x240 of the inline detail
+  // panel. Stacks vertically on narrow screens via flex-wrap.
+  html += `<div style="margin-top:16px;display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start;">`;
+  html += `  <div style="flex:1 1 360px;min-width:280px;">`;
+  html += `    <h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;">12-Month Price</h4>`;
+  html += `    <canvas id="spark-${lkSym}" width="400" height="120" style="width:100%;height:120px;"></canvas>`;
+  html += `  </div>`;
+  html += `  <div style="flex:1 1 360px;min-width:280px;">`;
+  html += `    <h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;display:flex;justify-content:space-between;align-items:baseline;">`;
+  html += `      <span>Quality Radar</span>`;
+  html += `      <span style="font-size:10px;color:var(--text2);font-weight:400;">${radarOverall(s)} / 100</span>`;
+  html += `    </h4>`;
+  html += `    <canvas id="radar-${lkSym}" width="400" height="300" style="width:100%;height:300px;"></canvas>`;
+  html += `  </div>`;
   html += `</div></div>`;
 
   const lkSymUrl = encodeURIComponent(String(s.symbol||''));
