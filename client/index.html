@@ -203,15 +203,34 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
   table { font-size:11px; }
   td, thead th { padding:7px 6px; }
 
-  /* Detail panel: single column */
-  .detail-panel { grid-template-columns:1fr; gap:16px; margin:4px; padding:14px; }
+  /* Detail panel sits inside <tr><td colspan="21"> in the horizontally
+     scrollable table, so by default it inherits the table's full
+     natural width (~1900px on a wide layout). On mobile that makes
+     every chart and label render 3-4x too large. Pin the cell to the
+     viewport so the panel renders at phone width regardless of how
+     wide the table scrolls. position:sticky;left:0 keeps it anchored
+     when the user scrolls the table horizontally. */
+  .detail-row td {
+    position: sticky;
+    left: 0;
+    width: 100vw;
+    max-width: 100vw;
+    box-sizing: border-box;
+    padding: 0;
+  }
+  .detail-panel { grid-template-columns:1fr; gap:16px; margin:4px; padding:14px; box-sizing:border-box; max-width:calc(100vw - 8px); }
   .detail-panel h3 { font-size:13px; }
-  .detail-panel .detail-charts { grid-template-columns:1fr; }
-  .detail-panel .detail-charts canvas[id^="spark-"] { height:120px; }
-  .detail-panel .detail-charts canvas[id^="eps-"]   { height:120px; }
-  .detail-panel .detail-charts canvas[id^="radar-"] { height:240px; }
+  .detail-panel .detail-charts { grid-template-columns:1fr 1fr; }
+  /* Radar spans both columns below the EPS+Price pair so it still
+     gets a usable square aspect on a narrow screen. */
+  .detail-panel .detail-charts > div:nth-child(3) { grid-column:1/-1; }
+  .detail-panel .detail-charts canvas[id^="spark-"] { height:100px; }
+  .detail-panel .detail-charts canvas[id^="eps-"]   { height:100px; }
+  .detail-panel .detail-charts canvas[id^="radar-"] { height:220px; }
   .metrics-grid { grid-template-columns:1fr; }
-  /* Mobile: keep sparkline compact, radar still readable. */
+  /* Lookup view's chart row has its own inline flex layout — keep
+     legacy sparkline-container rules in place for any code path that
+     still uses them. */
   .sparkline-container canvas[id^="spark-"] { height:80px; }
   .sparkline-container canvas[id^="radar-"] { height:220px; }
 }
