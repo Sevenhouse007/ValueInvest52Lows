@@ -83,7 +83,7 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 
 /* Detail panel */
 .detail-row td { padding:0; }
-.detail-panel { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin:8px; padding:20px; display:grid; grid-template-columns:1fr 1fr 300px; gap:20px; }
+.detail-panel { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin:8px; padding:20px; display:grid; grid-template-columns:1fr 1fr 360px; gap:20px; }
 .detail-panel h3 { font-size:14px; margin-bottom:10px; grid-column:1/-1; display:flex; align-items:center; gap:10px; }
 .detail-panel h3 a { font-size:12px; font-weight:400; }
 .metrics-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
@@ -99,7 +99,9 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .sparkline-container { display:flex; flex-direction:column; }
 .sparkline-container canvas { width:100%; display:block; }
 .sparkline-container canvas[id^="spark-"] { height:100px; }
+.sparkline-container canvas[id^="eps-"]   { height:100px; }
 .sparkline-container canvas[id^="radar-"] { height:240px; }
+.sparkline-container .charts-row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
 
 /* Model tag */
 .model-tag { font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(59,130,246,.12); color:var(--blue); white-space:nowrap; }
@@ -673,6 +675,7 @@ function renderTable() {
       renderTable();
       if (expandedSymbol) {
         loadSparkline(expandedSymbol);
+        loadEpsChart(expandedSymbol);
         // Radar uses fields already in `s`, so no fetch needed —
         // just defer one tick so the canvas is in the DOM.
         const stock = allStocks.find(x => x.symbol === expandedSymbol);
@@ -808,13 +811,21 @@ function detailPanel(s) {
       ${reasonsHtml}
     </div>
     <div class="sparkline-container">
-      <h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">12-Month Price</h4>
-      <canvas id="spark-${sym}" width="280" height="100"></canvas>
+      <div class="charts-row">
+        <div>
+          <h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">5Y EPS</h4>
+          <canvas id="eps-${sym}" width="170" height="100"></canvas>
+        </div>
+        <div>
+          <h4 style="margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;">12-Month Price</h4>
+          <canvas id="spark-${sym}" width="170" height="100"></canvas>
+        </div>
+      </div>
       <h4 style="margin:14px 0 4px;color:var(--text2);font-size:11px;text-transform:uppercase;display:flex;justify-content:space-between;align-items:baseline;">
         <span>Quality Radar</span>
         <span style="font-size:10px;color:var(--text2);font-weight:400;">${radarOverall(s)} / 100</span>
       </h4>
-      <canvas id="radar-${sym}" width="280" height="240"></canvas>
+      <canvas id="radar-${sym}" width="340" height="240"></canvas>
     </div>
   </div>`;
 }
@@ -1139,6 +1150,87 @@ function drawSparkline(canvas, values) {
   grad.addColorStop(1, 'transparent');
   ctx.fillStyle = grad;
   ctx.fill();
+}
+
+// ────────── 5-Year EPS Chart ──────────
+async function loadEpsChart(symbol) {
+  try {
+    const r = await fetch(`/api/eps/${symbol}`);
+    const canvas = document.getElementById(`eps-${symbol}`);
+    if (!canvas) return;
+    if (!r.ok) {
+      drawEpsChart(canvas, []);  // renders "no data" state
+      return;
+    }
+    const data = await r.json();
+    drawEpsChart(canvas, data);
+  } catch (e) { /* ignore */ }
+}
+
+// Bar chart: one bar per fiscal year, value above (or below for negatives),
+// year label below. Negative bars in red. Baseline at 0 so positive/negative
+// trends are visually obvious.
+function drawEpsChart(canvas, data) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.offsetWidth;
+  const h = canvas.offsetHeight;
+  canvas.width = w * 2; canvas.height = h * 2;
+  ctx.scale(2, 2);
+  ctx.clearRect(0, 0, w, h);
+
+  if (!data || !data.length) {
+    ctx.fillStyle = 'rgba(148,163,184,0.55)';
+    ctx.font = '10px system-ui,-apple-system,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('No EPS history', w / 2, h / 2);
+    return;
+  }
+
+  const padTop = 14, padBot = 14, padX = 4;
+  const innerW = w - padX * 2;
+  const innerH = h - padTop - padBot;
+
+  const values = data.map(d => d.eps);
+  const lo = Math.min(0, ...values);
+  const hi = Math.max(0, ...values);
+  const range = (hi - lo) || 1;
+  const zeroY = padTop + (hi / range) * innerH;  // y of value=0
+
+  const barGap = 4;
+  const barW = (innerW - barGap * (data.length - 1)) / data.length;
+
+  ctx.font = '9px system-ui,-apple-system,sans-serif';
+
+  data.forEach((d, i) => {
+    const x = padX + i * (barW + barGap);
+    const barH = Math.abs(d.eps) / range * innerH;
+    const y = d.eps >= 0 ? zeroY - barH : zeroY;
+    const positive = d.eps >= 0;
+    ctx.fillStyle = positive ? 'rgba(34,197,94,0.75)' : 'rgba(239,68,68,0.75)';
+    ctx.fillRect(x, y, barW, barH);
+
+    // Value label (above for positive, below for negative)
+    ctx.fillStyle = 'rgba(226,232,240,0.85)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = positive ? 'bottom' : 'top';
+    ctx.fillText(d.eps.toFixed(2), x + barW / 2, positive ? y - 1 : y + barH + 1);
+
+    // Year label at bottom
+    ctx.fillStyle = 'rgba(148,163,184,0.75)';
+    ctx.textBaseline = 'top';
+    ctx.fillText(String(d.year).slice(-2), x + barW / 2, h - padBot + 2);
+  });
+
+  // Zero baseline (only draw if some bars cross it)
+  if (lo < 0 && hi > 0) {
+    ctx.strokeStyle = 'rgba(148,163,184,0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padX, zeroY);
+    ctx.lineTo(w - padX, zeroY);
+    ctx.stroke();
+  }
 }
 
 // ────────── Watchlist ──────────
@@ -1545,9 +1637,10 @@ async function doLookup() {
     const data = await r.json();
     document.getElementById('lookupStatus').textContent = '';
     renderLookupResult(data.stock);
-    // Load sparkline + quality radar (radar uses fields already on
-    // data.stock — no extra fetch).
+    // Load sparkline + EPS history + quality radar (radar uses fields
+    // already on data.stock — no extra fetch).
     loadSparkline(symbol);
+    loadEpsChart(symbol);
     requestAnimationFrame(() => loadRadar(symbol, data.stock));
   } catch (e) {
     document.getElementById('lookupStatus').textContent = 'Network error';
@@ -1587,7 +1680,11 @@ function renderLookupResult(s) {
   // the bottom of the score-reasons column. Stacks vertically on
   // narrow screens via flex-wrap.
   html += `<div style="margin-bottom:20px;display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start;">`;
-  html += `  <div style="flex:1 1 360px;min-width:280px;">`;
+  html += `  <div style="flex:1 1 220px;min-width:200px;">`;
+  html += `    <h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;">5Y EPS</h4>`;
+  html += `    <canvas id="eps-${lkSym}" width="280" height="120" style="width:100%;height:120px;"></canvas>`;
+  html += `  </div>`;
+  html += `  <div style="flex:1 1 280px;min-width:240px;">`;
   html += `    <h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;">12-Month Price</h4>`;
   html += `    <canvas id="spark-${lkSym}" width="400" height="120" style="width:100%;height:120px;"></canvas>`;
   html += `  </div>`;

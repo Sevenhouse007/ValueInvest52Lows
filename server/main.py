@@ -468,6 +468,19 @@ async def get_spark(symbol: str = Path(..., max_length=15)):
     return data
 
 
+@app.get("/api/eps/{symbol}")
+async def get_eps_history(symbol: str = Path(..., max_length=15)):
+    """Return up to 5 years of annual diluted EPS for a symbol."""
+    symbol = validate_symbol(symbol)
+    global _yahoo_client
+    if _yahoo_client is None:
+        _yahoo_client = YahooClient()
+    data = await _yahoo_client.fetch_eps_history(symbol)
+    if not data:
+        raise HTTPException(404, f"No EPS history for {symbol}")
+    return data
+
+
 @app.get("/api/backtest/summary")
 async def backtest_summary():
     """Return backtest summary: average returns by score tier."""

@@ -514,6 +514,72 @@ class YahooClient:
 
         return await loop.run_in_executor(_executor, _fetch)
 
+    async def fetch_eps_history(self, symbol: str) -> Optional[list[dict]]:
+        """Fetch annual diluted EPS history (up to 5 most recent years).
+
+        Returns a list of {year, eps} sorted ascending by year, or None
+        if no history is available. Falls back to Basic EPS, then to
+        Net Income / Diluted Shares if neither EPS row is present.
+        """
+        loop = asyncio.get_event_loop()
+
+        def _fetch():
+            try:
+                ticker = yf.Ticker(symbol)
+                stmt = ticker.income_stmt  # annual; columns are dates desc
+                if stmt is None or stmt.empty:
+                    return None
+                row = None
+                for key in ("Diluted EPS", "Basic EPS"):
+                    if key in stmt.index:
+                        row = stmt.loc[key]
+                        break
+                if row is None:
+                    # Fallback: compute EPS from Net Income / Diluted Shares.
+                    ni_key = next((k for k in ("Net Income", "Net Income Common Stockholders")
+                                   if k in stmt.index), None)
+                    sh_key = next((k for k in ("Diluted Average Shares", "Basic Average Shares")
+                                   if k in stmt.index), None)
+                    if not (ni_key and sh_key):
+                        return None
+                    ni_row = stmt.loc[ni_key]
+                    sh_row = stmt.loc[sh_key]
+                    out = []
+                    for col in ni_row.index:
+                        ni = ni_row.get(col)
+                        sh = sh_row.get(col)
+                        if ni is None or sh is None or sh == 0:
+                            continue
+                        try:
+                            year = col.year if hasattr(col, "year") else int(str(col)[:4])
+                            out.append({"year": year, "eps": round(float(ni) / float(sh), 2)})
+                        except Exception:
+                            continue
+                    out.sort(key=lambda x: x["year"])
+                    return out[-5:] if out else None
+                out = []
+                for col, val in row.items():
+                    if val is None:
+                        continue
+                    try:
+                        fval = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    if fval != fval:  # NaN
+                        continue
+                    try:
+                        year = col.year if hasattr(col, "year") else int(str(col)[:4])
+                    except Exception:
+                        continue
+                    out.append({"year": year, "eps": round(fval, 2)})
+                out.sort(key=lambda x: x["year"])
+                return out[-5:] if out else None
+            except Exception as e:
+                logger.error(f"Error fetching EPS history for {symbol}: {e}")
+                return None
+
+        return await loop.run_in_executor(_executor, _fetch)
+
     async def close(self):
         """Cleanup (no persistent connections to close with requests)."""
         pass
