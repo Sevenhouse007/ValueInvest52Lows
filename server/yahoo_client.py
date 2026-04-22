@@ -580,6 +580,158 @@ class YahooClient:
 
         return await loop.run_in_executor(_executor, _fetch)
 
+    async def fetch_fundamentals_history(self, symbol: str) -> Optional[dict]:
+        """Bundle 5-10 years of annual fundamentals into one payload.
+
+        Returns one row per fiscal year with revenue, net income, FCF,
+        EBIT, tax provision, pretax income, total debt, total equity,
+        diluted EPS, year-end price, and dividends paid that year. The
+        client computes derived metrics (ROIC, P/E bands, div yield)
+        from this bundle so we make one Yahoo round-trip instead of six.
+
+        Designed to feed all the long-term-trend charts (Revenue, FCF
+        vs NI, D/E, P/E banding, ROIC vs WACC, Dividend Yield).
+        """
+        loop = asyncio.get_event_loop()
+
+        def _pick_row(stmt, *keys):
+            """Return the first row in `stmt` matching any of `keys`."""
+            if stmt is None or stmt.empty:
+                return None
+            for k in keys:
+                if k in stmt.index:
+                    return stmt.loc[k]
+            return None
+
+        def _to_float(v):
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return None
+            if f != f:  # NaN
+                return None
+            return f
+
+        def _year_of(col):
+            try:
+                return col.year if hasattr(col, "year") else int(str(col)[:4])
+            except Exception:
+                return None
+
+        def _fetch():
+            try:
+                ticker = yf.Ticker(symbol)
+                inc = ticker.income_stmt
+                bal = ticker.balance_sheet
+                cf  = ticker.cashflow
+                if (inc is None or inc.empty) and (bal is None or bal.empty):
+                    return None
+
+                rev_row    = _pick_row(inc, "Total Revenue", "Operating Revenue")
+                ni_row     = _pick_row(inc, "Net Income", "Net Income Common Stockholders")
+                ebit_row   = _pick_row(inc, "EBIT", "Operating Income")
+                tax_row    = _pick_row(inc, "Tax Provision", "Income Tax Expense")
+                pretax_row = _pick_row(inc, "Pretax Income", "Income Before Tax")
+                eps_row    = _pick_row(inc, "Diluted EPS", "Basic EPS")
+
+                debt_row   = _pick_row(bal, "Total Debt", "Long Term Debt")
+                eq_row     = _pick_row(bal, "Stockholders Equity", "Total Stockholder Equity", "Common Stock Equity")
+
+                fcf_row    = _pick_row(cf, "Free Cash Flow")
+                ocf_row    = _pick_row(cf, "Operating Cash Flow", "Cash Flow From Continuing Operating Activities")
+                capex_row  = _pick_row(cf, "Capital Expenditure", "Capital Expenditures")
+
+                # Collect all years that show up in any statement.
+                years = set()
+                for r in (rev_row, ni_row, ebit_row, tax_row, pretax_row, eps_row,
+                          debt_row, eq_row, fcf_row, ocf_row, capex_row):
+                    if r is not None:
+                        for col in r.index:
+                            y = _year_of(col)
+                            if y:
+                                years.add((y, col))
+                if not years:
+                    return None
+
+                # Year-end prices: pull 11y of monthly closes once and pick
+                # the last close of each calendar year.
+                year_end_price = {}
+                try:
+                    hist = ticker.history(period="11y", interval="1mo", auto_adjust=False)
+                    if hist is not None and not hist.empty:
+                        for ts, row in hist.iterrows():
+                            try:
+                                year_end_price[ts.year] = float(row["Close"])
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+
+                # Dividends per fiscal year (sum of all dividend payments
+                # within the calendar year — close enough for a yield chart).
+                div_per_year = {}
+                try:
+                    divs = ticker.dividends
+                    if divs is not None and not divs.empty:
+                        for ts, val in divs.items():
+                            try:
+                                y = ts.year
+                                div_per_year[y] = div_per_year.get(y, 0.0) + float(val)
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+
+                def _val(row, col):
+                    if row is None:
+                        return None
+                    v = row.get(col)
+                    return _to_float(v)
+
+                annual = []
+                # Sort by (year, col) — col is a Timestamp so this orders
+                # multi-period years correctly (rare, but safe).
+                for y, col in sorted(years, key=lambda x: (x[0], x[1])):
+                    rev    = _val(rev_row, col)
+                    ni     = _val(ni_row, col)
+                    ebit   = _val(ebit_row, col)
+                    tax    = _val(tax_row, col)
+                    pretax = _val(pretax_row, col)
+                    eps    = _val(eps_row, col)
+                    debt   = _val(debt_row, col)
+                    eq     = _val(eq_row, col)
+                    fcf    = _val(fcf_row, col)
+                    if fcf is None:
+                        ocf   = _val(ocf_row, col)
+                        capex = _val(capex_row, col)
+                        if ocf is not None and capex is not None:
+                            fcf = ocf + capex  # capex is negative in yfinance
+                    annual.append({
+                        "year":           y,
+                        "revenue":        rev,
+                        "net_income":     ni,
+                        "fcf":            fcf,
+                        "ebit":           ebit,
+                        "tax_provision":  tax,
+                        "pretax_income":  pretax,
+                        "eps":            round(eps, 2) if eps is not None else None,
+                        "total_debt":     debt,
+                        "total_equity":   eq,
+                        "year_end_price": round(year_end_price[y], 2) if y in year_end_price else None,
+                        "dividend":       round(div_per_year[y], 4) if y in div_per_year else None,
+                    })
+
+                # Keep the most recent 10 years.
+                annual = annual[-10:]
+                if not annual:
+                    return None
+                return {"annual": annual}
+            except Exception as e:
+                logger.error(f"Error fetching fundamentals history for {symbol}: {e}")
+                return None
+
+        return await loop.run_in_executor(_executor, _fetch)
+
     async def close(self):
         """Cleanup (no persistent connections to close with requests)."""
         pass

@@ -481,6 +481,21 @@ async def get_eps_history(symbol: str = Path(..., max_length=15)):
     return data
 
 
+@app.get("/api/fundamentals-history/{symbol}")
+async def get_fundamentals_history(symbol: str = Path(..., max_length=15)):
+    """Return bundled 5-10 years of annual fundamentals for the long-
+    term-trends charts (Revenue, FCF vs NI, D/E, P/E bands, ROIC vs
+    WACC, Dividend Yield). One call instead of six."""
+    symbol = validate_symbol(symbol)
+    global _yahoo_client
+    if _yahoo_client is None:
+        _yahoo_client = YahooClient()
+    data = await _yahoo_client.fetch_fundamentals_history(symbol)
+    if not data:
+        raise HTTPException(404, f"No fundamentals history for {symbol}")
+    return data
+
+
 @app.get("/api/backtest/summary")
 async def backtest_summary():
     """Return backtest summary: average returns by score tier."""

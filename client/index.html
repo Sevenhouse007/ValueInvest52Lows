@@ -94,6 +94,12 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .detail-panel .detail-charts canvas[id^="spark-"] { height:140px; }
 .detail-panel .detail-charts canvas[id^="eps-"]   { height:140px; }
 .detail-panel .detail-charts canvas[id^="radar-"] { height:280px; }
+/* Long-term trends row — 5-10 year fundamental charts. Same column
+   widths as the chart strip above, so the visual rhythm is preserved. */
+.detail-panel .detail-trends { grid-column:1/-1; display:grid; grid-template-columns:1fr 1fr 1fr; gap:20px; align-items:flex-start; }
+.detail-panel .detail-trends h4 { margin-bottom:8px; color:var(--text2); font-size:11px; text-transform:uppercase; }
+.detail-panel .detail-trends canvas { width:100%; height:140px; display:block; }
+.detail-panel .detail-trends-section-header { grid-column:1/-1; margin:8px 0 -8px; font-size:11px; color:var(--text2); text-transform:uppercase; letter-spacing:.04em; border-top:1px solid var(--border); padding-top:14px; }
 .detail-panel h3 a { font-size:12px; font-weight:400; }
 .metrics-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
 .metric-item { display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid var(--border); font-size:12px; }
@@ -227,6 +233,8 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
   .detail-panel .detail-charts canvas[id^="spark-"] { height:100px; }
   .detail-panel .detail-charts canvas[id^="eps-"]   { height:100px; }
   .detail-panel .detail-charts canvas[id^="radar-"] { height:220px; }
+  .detail-panel .detail-trends { grid-template-columns:1fr; }
+  .detail-panel .detail-trends canvas { height:120px; }
   .metrics-grid { grid-template-columns:1fr; }
   /* Lookup view's chart row has its own inline flex layout — keep
      legacy sparkline-container rules in place for any code path that
@@ -708,6 +716,7 @@ function renderTable() {
       if (expandedSymbol) {
         loadSparkline(expandedSymbol);
         loadEpsChart(expandedSymbol);
+        loadTrendCharts(expandedSymbol);
         // Radar uses fields already in `s`, so no fetch needed —
         // just defer one tick so the canvas is in the DOM.
         const stock = allStocks.find(x => x.symbol === expandedSymbol);
@@ -843,6 +852,21 @@ function detailPanel(s) {
       <div>
         <h4><span>Quality Radar</span><span style="font-size:10px;color:var(--text2);font-weight:400;text-transform:none;">${radarOverall(s)} / 100</span></h4>
         <canvas id="radar-${sym}"></canvas>
+      </div>
+    </div>
+    <div class="detail-trends-section-header">Long-Term Trends (5–10 yr)</div>
+    <div class="detail-trends">
+      <div>
+        <h4>Revenue ($M)</h4>
+        <canvas id="rev-${sym}"></canvas>
+      </div>
+      <div>
+        <h4>FCF vs Net Income ($M)</h4>
+        <canvas id="fcfni-${sym}"></canvas>
+      </div>
+      <div>
+        <h4>Debt / Equity</h4>
+        <canvas id="de-${sym}"></canvas>
       </div>
     </div>
     <div>
@@ -1260,6 +1284,202 @@ function drawEpsChart(canvas, data) {
     ctx.lineTo(w - padX, zeroY);
     ctx.stroke();
   }
+}
+
+// ────────── Long-Term Trend Charts (5–10 yr) ──────────
+// One bundled fetch covers all the trend charts so we don't hammer
+// Yahoo with 6 separate calls per stock click. Charts gracefully
+// render an empty state when their underlying field is missing.
+
+async function loadTrendCharts(symbol) {
+  try {
+    const r = await fetch(`/api/fundamentals-history/${symbol}`);
+    const rows = (r.ok ? (await r.json()).annual : []) || [];
+    drawRevenueChart(document.getElementById(`rev-${symbol}`),    rows);
+    drawFcfNiChart  (document.getElementById(`fcfni-${symbol}`),  rows);
+    drawDeChart     (document.getElementById(`de-${symbol}`),     rows);
+  } catch (e) { /* ignore */ }
+}
+
+// ───── Shared chart helpers ─────
+function _chartSetup(canvas) {
+  if (!canvas) return null;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.offsetWidth;
+  const h = canvas.offsetHeight;
+  canvas.width = w * 2; canvas.height = h * 2;
+  ctx.scale(2, 2);
+  ctx.clearRect(0, 0, w, h);
+  return { ctx, w, h };
+}
+function _drawNoData(ctx, w, h, msg) {
+  ctx.fillStyle = 'rgba(148,163,184,0.55)';
+  ctx.font = '10px system-ui,-apple-system,sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(msg || 'No data', w / 2, h / 2);
+}
+// Format a financial value compactly: 1.2B, 345M, 12K. Sign preserved.
+function _fmtCompact(v) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  const a = Math.abs(v);
+  const sign = v < 0 ? '-' : '';
+  if (a >= 1e9) return sign + (a / 1e9).toFixed(1) + 'B';
+  if (a >= 1e6) return sign + (a / 1e6).toFixed(0) + 'M';
+  if (a >= 1e3) return sign + (a / 1e3).toFixed(0) + 'K';
+  return sign + a.toFixed(0);
+}
+
+// ───── Revenue Trend (single-series bar chart) ─────
+function drawRevenueChart(canvas, rows) {
+  const setup = _chartSetup(canvas); if (!setup) return;
+  const { ctx, w, h } = setup;
+  const data = rows.filter(r => r.revenue != null);
+  if (!data.length) return _drawNoData(ctx, w, h, 'No revenue history');
+
+  const padTop = 14, padBot = 14, padX = 4;
+  const innerW = w - padX * 2;
+  const innerH = h - padTop - padBot;
+  const lo = Math.min(0, ...data.map(d => d.revenue));
+  const hi = Math.max(0, ...data.map(d => d.revenue));
+  const range = (hi - lo) || 1;
+  const zeroY = padTop + (hi / range) * innerH;
+  const barGap = 4;
+  const barW = (innerW - barGap * (data.length - 1)) / data.length;
+
+  ctx.font = '9px system-ui,-apple-system,sans-serif';
+  data.forEach((d, i) => {
+    const x = padX + i * (barW + barGap);
+    const barH = Math.abs(d.revenue) / range * innerH;
+    const y = d.revenue >= 0 ? zeroY - barH : zeroY;
+    ctx.fillStyle = 'rgba(59,130,246,0.75)';
+    ctx.fillRect(x, y, barW, barH);
+    ctx.fillStyle = 'rgba(226,232,240,0.85)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(_fmtCompact(d.revenue), x + barW / 2, y - 1);
+    ctx.fillStyle = 'rgba(148,163,184,0.75)';
+    ctx.textBaseline = 'top';
+    ctx.fillText(String(d.year).slice(-2), x + barW / 2, h - padBot + 2);
+  });
+}
+
+// ───── FCF vs Net Income (two-series grouped bars) ─────
+// FCF closely tracking or exceeding Net Income is the "earnings
+// quality" signal value investors look for — paper profits convert
+// to cash. Plot both as side-by-side bars per year for direct compare.
+function drawFcfNiChart(canvas, rows) {
+  const setup = _chartSetup(canvas); if (!setup) return;
+  const { ctx, w, h } = setup;
+  const data = rows.filter(r => r.fcf != null || r.net_income != null);
+  if (!data.length) return _drawNoData(ctx, w, h, 'No cash-flow history');
+
+  const padTop = 18, padBot = 14, padX = 4;
+  const innerW = w - padX * 2;
+  const innerH = h - padTop - padBot;
+  // Range across BOTH series so bars share a scale.
+  const all = data.flatMap(d => [d.fcf, d.net_income]).filter(v => v != null);
+  const lo = Math.min(0, ...all);
+  const hi = Math.max(0, ...all);
+  const range = (hi - lo) || 1;
+  const zeroY = padTop + (hi / range) * innerH;
+  const groupGap = 6;
+  const groupW = (innerW - groupGap * (data.length - 1)) / data.length;
+  const barGap = 1;
+  const barW = (groupW - barGap) / 2;
+
+  ctx.font = '9px system-ui,-apple-system,sans-serif';
+  data.forEach((d, i) => {
+    const gx = padX + i * (groupW + groupGap);
+    [
+      { v: d.net_income, color: 'rgba(148,163,184,0.65)', x: gx },
+      { v: d.fcf,        color: 'rgba(34,197,94,0.80)',   x: gx + barW + barGap },
+    ].forEach(({ v, color, x }) => {
+      if (v == null) return;
+      const barH = Math.abs(v) / range * innerH;
+      const y = v >= 0 ? zeroY - barH : zeroY;
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y, barW, barH);
+    });
+    ctx.fillStyle = 'rgba(148,163,184,0.75)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(String(d.year).slice(-2), gx + groupW / 2, h - padBot + 2);
+  });
+
+  // Zero baseline if any negative bars
+  if (lo < 0 && hi > 0) {
+    ctx.strokeStyle = 'rgba(148,163,184,0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padX, zeroY);
+    ctx.lineTo(w - padX, zeroY);
+    ctx.stroke();
+  }
+  // Legend
+  ctx.font = '9px system-ui,-apple-system,sans-serif';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(148,163,184,0.65)';
+  ctx.fillRect(padX, 2, 8, 8);
+  ctx.fillStyle = 'rgba(148,163,184,0.95)';
+  ctx.fillText('Net Inc', padX + 11, 2);
+  const fcfX = padX + 60;
+  ctx.fillStyle = 'rgba(34,197,94,0.80)';
+  ctx.fillRect(fcfX, 2, 8, 8);
+  ctx.fillStyle = 'rgba(148,163,184,0.95)';
+  ctx.fillText('FCF', fcfX + 11, 2);
+}
+
+// ───── Debt-to-Equity Trend (line chart) ─────
+function drawDeChart(canvas, rows) {
+  const setup = _chartSetup(canvas); if (!setup) return;
+  const { ctx, w, h } = setup;
+  // D/E only when both fields present and equity > 0 (negative equity
+  // makes the ratio meaningless).
+  const data = rows
+    .map(r => (r.total_debt != null && r.total_equity != null && r.total_equity > 0
+      ? { year: r.year, de: r.total_debt / r.total_equity * 100 }
+      : null))
+    .filter(d => d != null);
+  if (!data.length) return _drawNoData(ctx, w, h, 'No D/E history');
+
+  const padTop = 14, padBot = 14, padX = 8;
+  const innerW = w - padX * 2;
+  const innerH = h - padTop - padBot;
+  const values = data.map(d => d.de);
+  const lo = Math.min(0, ...values);
+  const hi = Math.max(...values, lo + 1);
+  const range = (hi - lo) || 1;
+  const xStep = data.length > 1 ? innerW / (data.length - 1) : 0;
+  const yOf = v => padTop + (1 - (v - lo) / range) * innerH;
+
+  // Connecting line
+  ctx.strokeStyle = 'rgba(245,158,11,0.85)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  data.forEach((d, i) => {
+    const x = padX + i * xStep;
+    const y = yOf(d.de);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Dots + value labels + year ticks
+  ctx.font = '9px system-ui,-apple-system,sans-serif';
+  data.forEach((d, i) => {
+    const x = padX + i * xStep;
+    const y = yOf(d.de);
+    ctx.fillStyle = 'rgba(245,158,11,1)';
+    ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(226,232,240,0.85)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(d.de.toFixed(0), x, y - 4);
+    ctx.fillStyle = 'rgba(148,163,184,0.75)';
+    ctx.textBaseline = 'top';
+    ctx.fillText(String(d.year).slice(-2), x, h - padBot + 2);
+  });
 }
 
 // ────────── Watchlist ──────────
