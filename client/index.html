@@ -876,6 +876,10 @@ function detailPanel(s) {
         <h4>Dividend Yield (%)</h4>
         <canvas id="divy-${sym}"></canvas>
       </div>
+      <div>
+        <h4>Price vs Fair Value</h4>
+        <canvas id="pe-${sym}"></canvas>
+      </div>
     </div>
     <div>
       <div style="margin-bottom:10px;padding:6px 10px;background:rgba(59,130,246,.08);border-radius:6px;font-size:11px;color:var(--blue);">
@@ -1311,6 +1315,7 @@ async function loadTrendCharts(symbol, stock) {
     const wacc = stock && stock.sector_wacc != null ? stock.sector_wacc * 100 : null;
     drawRoicChart   (document.getElementById(`roic-${symbol}`),   rows, wacc);
     drawDivYieldChart(document.getElementById(`divy-${symbol}`),  rows);
+    drawPeBandChart  (document.getElementById(`pe-${symbol}`),    rows);
   } catch (e) { /* ignore */ }
 }
 
@@ -1644,6 +1649,138 @@ function drawDivYieldChart(canvas, rows) {
     ctx.textBaseline = 'top';
     ctx.fillText(String(d.year).slice(-2), x, h - padBot + 2);
   });
+}
+
+// ───── Price vs Fair Value (Peter Lynch / FastGraphs style) ─────
+// Overlay actual year-end price with a "fair value" line computed as
+// EPS × the stock's own historical median P/E. The visual gap shows
+// when the stock was cheap (price below fair) vs expensive (price
+// above). The shaded fill between the two lines is colored by which
+// side is on top — green when price < fair (undervalued), red when
+// price > fair (overvalued).
+function drawPeBandChart(canvas, rows) {
+  const setup = _chartSetup(canvas); if (!setup) return;
+  const { ctx, w, h } = setup;
+  // Need both EPS and price for each year. Skip years with negative
+  // or zero EPS — P/E is meaningless and would warp the median.
+  const data = rows
+    .filter(r => r.eps != null && r.eps > 0 && r.year_end_price != null && r.year_end_price > 0)
+    .map(r => ({ year: r.year, eps: r.eps, price: r.year_end_price }));
+  if (data.length < 2) return _drawNoData(ctx, w, h, 'Not enough P/E history');
+
+  // Median historical P/E becomes the "normal" multiple.
+  const ratios = data.map(d => d.price / d.eps).sort((a, b) => a - b);
+  const median = ratios.length % 2
+    ? ratios[(ratios.length - 1) / 2]
+    : (ratios[ratios.length / 2 - 1] + ratios[ratios.length / 2]) / 2;
+
+  // Fair value per year = EPS × median P/E
+  const series = data.map(d => ({
+    year: d.year,
+    price: d.price,
+    fair: d.eps * median,
+  }));
+
+  const padTop = 18, padBot = 14, padX = 8;
+  const innerW = w - padX * 2;
+  const innerH = h - padTop - padBot;
+  const all = series.flatMap(s => [s.price, s.fair]);
+  const lo = Math.min(...all);
+  const hi = Math.max(...all);
+  const pad = (hi - lo) * 0.08 || 1;
+  const yLo = Math.max(0, lo - pad);
+  const yHi = hi + pad;
+  const range = (yHi - yLo) || 1;
+  const xStep = series.length > 1 ? innerW / (series.length - 1) : 0;
+  const yOf = v => padTop + (1 - (v - yLo) / range) * innerH;
+  const xOf = i => padX + i * xStep;
+
+  // Shaded area between the two lines, color-coded per segment.
+  // Drawing per-segment quadrilaterals lets the fill switch sides
+  // when the lines cross (cheap → expensive transitions).
+  for (let i = 0; i < series.length - 1; i++) {
+    const a = series[i], b = series[i + 1];
+    const x1 = xOf(i), x2 = xOf(i + 1);
+    const undervaluedAtA = a.price <= a.fair;
+    const undervaluedAtB = b.price <= b.fair;
+    // If both endpoints are on the same side, fill the trapezoid.
+    if (undervaluedAtA === undervaluedAtB) {
+      ctx.fillStyle = undervaluedAtA ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)';
+      ctx.beginPath();
+      ctx.moveTo(x1, yOf(a.price));
+      ctx.lineTo(x2, yOf(b.price));
+      ctx.lineTo(x2, yOf(b.fair));
+      ctx.lineTo(x1, yOf(a.fair));
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      // Lines cross between i and i+1 — find the crossing point and
+      // fill two triangles with the correct colors.
+      const dPriceA = a.price - a.fair;
+      const dPriceB = b.price - b.fair;
+      const t = dPriceA / (dPriceA - dPriceB);  // 0..1
+      const xc = x1 + (x2 - x1) * t;
+      const yc = yOf(a.price + (b.price - a.price) * t);  // same as fair at crossing
+      // Left triangle (x1 → xc): side at A
+      ctx.fillStyle = undervaluedAtA ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)';
+      ctx.beginPath();
+      ctx.moveTo(x1, yOf(a.price));
+      ctx.lineTo(xc, yc);
+      ctx.lineTo(x1, yOf(a.fair));
+      ctx.closePath();
+      ctx.fill();
+      // Right triangle (xc → x2): side at B
+      ctx.fillStyle = undervaluedAtB ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)';
+      ctx.beginPath();
+      ctx.moveTo(xc, yc);
+      ctx.lineTo(x2, yOf(b.price));
+      ctx.lineTo(x2, yOf(b.fair));
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // Fair value line (orange dashed)
+  ctx.strokeStyle = 'rgba(245,158,11,0.85)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  series.forEach((s, i) => {
+    const x = xOf(i), y = yOf(s.fair);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Actual price line (white-ish)
+  ctx.strokeStyle = 'rgba(226,232,240,0.95)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  series.forEach((s, i) => {
+    const x = xOf(i), y = yOf(s.price);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Year ticks
+  ctx.font = '9px system-ui,-apple-system,sans-serif';
+  ctx.fillStyle = 'rgba(148,163,184,0.75)';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  series.forEach((s, i) => ctx.fillText(String(s.year).slice(-2), xOf(i), h - padBot + 2));
+
+  // Top-left legend with median P/E
+  ctx.font = '9px system-ui,-apple-system,sans-serif';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(226,232,240,0.95)';
+  ctx.fillRect(padX, 2, 8, 2);
+  ctx.fillText('Price', padX + 11, 0);
+  const fairX = padX + 44;
+  ctx.fillStyle = 'rgba(245,158,11,0.85)';
+  ctx.fillRect(fairX, 2, 8, 2);
+  ctx.fillStyle = 'rgba(148,163,184,0.95)';
+  ctx.fillText(`Fair (×${median.toFixed(1)})`, fairX + 11, 0);
 }
 
 // ────────── Watchlist ──────────
