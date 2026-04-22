@@ -896,7 +896,9 @@ function radarScores(s) {
     'Cash Flow':   cf,
     'Fin Strength': fs,
     Growth:        gr,
-    Predictability: pr,
+    // "Predict." rather than "Predictability" — full word overflows
+    // the 300-px right column at the canvas's leftmost label slot.
+    'Predict.':    pr,
   };
 }
 
@@ -920,7 +922,9 @@ function drawRadar(canvas, scores) {
   const N = labels.length;
   const cx = w / 2;
   const cy = h / 2 + 4; // small downshift so top label has room
-  const R = Math.min(cx, cy) - 28; // leave room for labels
+  // Generous padding so "Profitability 100" / "Predict. 100" don't
+  // get clipped against the canvas edges.
+  const R = Math.min(cx, cy) - 42;
 
   // Axis angles: start at top (-π/2) and go clockwise.
   const angle = i => -Math.PI/2 + (i / N) * Math.PI * 2;
@@ -989,7 +993,7 @@ function drawRadar(canvas, scores) {
   ctx.font = '10px system-ui,-apple-system,sans-serif';
   for (let i = 0; i < N; i++) {
     const a = angle(i);
-    const x = cx + Math.cos(a) * (R + 12);
+    let x = cx + Math.cos(a) * (R + 12);
     const y = cy + Math.sin(a) * (R + 12);
     // Anchor labels by quadrant so they don't overlap the chart.
     const cosA = Math.cos(a), sinA = Math.sin(a);
@@ -998,7 +1002,16 @@ function drawRadar(canvas, scores) {
     const label = labels[i];
     const v = values[i];
     const num = v == null ? '—' : Math.round(v);
-    ctx.fillText(`${label} ${num}`, x, y);
+    const text = `${label} ${num}`;
+    // Clamp against canvas bounds so a long label can never escape
+    // the 300-px column (defends against future label-rename slips).
+    const tw = ctx.measureText(text).width;
+    if (ctx.textAlign === 'left'  && x + tw > w - 2) x = w - tw - 2;
+    if (ctx.textAlign === 'right' && x - tw < 2)     x = tw + 2;
+    if (ctx.textAlign === 'center') {
+      x = Math.max(tw/2 + 2, Math.min(w - tw/2 - 2, x));
+    }
+    ctx.fillText(text, x, y);
   }
 }
 
