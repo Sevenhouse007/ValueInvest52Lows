@@ -835,13 +835,32 @@ function radarScores(s) {
     if (s.roic != null)             parts.push(_clamp01(s.roic / 0.20) * 100);
     if (parts.length) prof = parts.reduce((a,b)=>a+b,0) / parts.length;
   }
-  // Cash Flow Generation: FCF yield (FCF / MktCap). 10% = top.
-  let cf = null;
-  if (s.free_cash_flow != null && s.market_cap > 0) {
-    const yld = s.free_cash_flow / s.market_cap;
-    cf = _clamp01(yld / 0.10) * 100;
-    // Below-zero FCF zeroes us out (already clamped, but be explicit).
-    if (yld < 0) cf = 0;
+  // Cheap vs Peers: average discount on Fwd P/E, EV/EBITDA, P/B
+  // against the sector median (Damodaran benchmark, falling back to
+  // market-avg if the sector benchmark is missing). Each metric
+  // contributes max(0, 1 - stock_mult / peer_mult) capped at 100% —
+  // a stock at half its sector median gets +50, at the median 0,
+  // and richer than peers also 0 (we don't penalize, just don't
+  // reward). Average the available metrics so a stock missing one
+  // (e.g. negative EBITDA) still scores fairly on the others.
+  let cv = null;
+  {
+    const parts = [];
+    const _disc = (mult, peer) => {
+      // Both must be positive for the ratio to be meaningful — a
+      // negative EV/EBITDA isn't "cheap," it's broken.
+      if (mult == null || peer == null || mult <= 0 || peer <= 0) return null;
+      return _clamp01(1 - mult / peer) * 100;
+    };
+    const fpePeer = s.sector_median_pe         ?? s.market_avg_fpe;
+    const evPeer  = s.sector_median_ev_ebitda  ?? s.market_avg_ev_ebitda;
+    const pbPeer  = s.sector_median_pb         ?? s.market_avg_pb;
+    [
+      _disc(s.forward_pe,    fpePeer),
+      _disc(s.ev_to_ebitda,  evPeer),
+      _disc(s.price_to_book, pbPeer),
+    ].forEach(p => { if (p != null) parts.push(p); });
+    if (parts.length) cv = parts.reduce((a,b)=>a+b,0) / parts.length;
   }
   // Financial Strength: Altman Z + interest coverage + inverse leverage.
   let fs = null;
@@ -892,13 +911,13 @@ function radarScores(s) {
     }
   }
   return {
-    Profitability: prof,
-    'Cash Flow':   cf,
-    'Fin Strength': fs,
-    Growth:        gr,
+    Profitability:   prof,
+    'Cheap vs Peers': cv,
+    'Fin Strength':  fs,
+    Growth:          gr,
     // "Predict." rather than "Predictability" — full word overflows
     // the 300-px right column at the canvas's leftmost label slot.
-    'Predict.':    pr,
+    'Predict.':      pr,
   };
 }
 
