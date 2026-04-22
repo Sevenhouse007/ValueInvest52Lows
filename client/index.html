@@ -714,12 +714,12 @@ function renderTable() {
       expandedSymbol = expandedSymbol === sym ? null : sym;
       renderTable();
       if (expandedSymbol) {
+        const stock = allStocks.find(x => x.symbol === expandedSymbol);
         loadSparkline(expandedSymbol);
         loadEpsChart(expandedSymbol);
-        loadTrendCharts(expandedSymbol);
+        loadTrendCharts(expandedSymbol, stock);
         // Radar uses fields already in `s`, so no fetch needed —
         // just defer one tick so the canvas is in the DOM.
-        const stock = allStocks.find(x => x.symbol === expandedSymbol);
         if (stock) requestAnimationFrame(() => loadRadar(expandedSymbol, stock));
       }
     });
@@ -867,6 +867,14 @@ function detailPanel(s) {
       <div>
         <h4>Debt / Equity</h4>
         <canvas id="de-${sym}"></canvas>
+      </div>
+      <div>
+        <h4>ROIC vs WACC (%)</h4>
+        <canvas id="roic-${sym}"></canvas>
+      </div>
+      <div>
+        <h4>Dividend Yield (%)</h4>
+        <canvas id="divy-${sym}"></canvas>
       </div>
     </div>
     <div>
@@ -1291,13 +1299,18 @@ function drawEpsChart(canvas, data) {
 // Yahoo with 6 separate calls per stock click. Charts gracefully
 // render an empty state when their underlying field is missing.
 
-async function loadTrendCharts(symbol) {
+async function loadTrendCharts(symbol, stock) {
   try {
     const r = await fetch(`/api/fundamentals-history/${symbol}`);
     const rows = (r.ok ? (await r.json()).annual : []) || [];
     drawRevenueChart(document.getElementById(`rev-${symbol}`),    rows);
     drawFcfNiChart  (document.getElementById(`fcfni-${symbol}`),  rows);
     drawDeChart     (document.getElementById(`de-${symbol}`),     rows);
+    // ROIC needs WACC for the comparison line — pass sector WACC if
+    // available; the chart will hide the line if it's not.
+    const wacc = stock && stock.sector_wacc != null ? stock.sector_wacc * 100 : null;
+    drawRoicChart   (document.getElementById(`roic-${symbol}`),   rows, wacc);
+    drawDivYieldChart(document.getElementById(`divy-${symbol}`),  rows);
   } catch (e) { /* ignore */ }
 }
 
@@ -1476,6 +1489,157 @@ function drawDeChart(canvas, rows) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     ctx.fillText(d.de.toFixed(0), x, y - 4);
+    ctx.fillStyle = 'rgba(148,163,184,0.75)';
+    ctx.textBaseline = 'top';
+    ctx.fillText(String(d.year).slice(-2), x, h - padBot + 2);
+  });
+}
+
+// ───── ROIC vs WACC (line + horizontal benchmark) ─────
+// ROIC per year = NOPAT / Invested Capital, where:
+//   NOPAT = EBIT × (1 − effective tax rate)
+//   effective tax rate = tax_provision / pretax_income (clamped 0..0.5)
+//   Invested Capital = total_debt + total_equity
+// WACC drawn as a flat reference line; bars above WACC = value
+// creation, below = value destruction.
+function drawRoicChart(canvas, rows, waccPct) {
+  const setup = _chartSetup(canvas); if (!setup) return;
+  const { ctx, w, h } = setup;
+  const data = rows
+    .map(r => {
+      if (r.ebit == null || r.total_debt == null || r.total_equity == null) return null;
+      const ic = r.total_debt + r.total_equity;
+      if (ic <= 0) return null;
+      // Effective tax rate: clamp to a sane range so a one-off tax
+      // benefit (negative provision) or 100%+ rate doesn't blow up NOPAT.
+      let etr = 0.21;
+      if (r.tax_provision != null && r.pretax_income != null && r.pretax_income > 0) {
+        etr = Math.max(0, Math.min(0.5, r.tax_provision / r.pretax_income));
+      }
+      const nopat = r.ebit * (1 - etr);
+      return { year: r.year, roic: nopat / ic * 100 };
+    })
+    .filter(d => d != null);
+  if (!data.length) return _drawNoData(ctx, w, h, 'No ROIC history');
+
+  const padTop = 14, padBot = 14, padX = 8;
+  const innerW = w - padX * 2;
+  const innerH = h - padTop - padBot;
+  const values = data.map(d => d.roic);
+  if (waccPct != null) values.push(waccPct);
+  const lo = Math.min(0, ...values);
+  const hi = Math.max(...values, lo + 1);
+  const range = (hi - lo) || 1;
+  const xStep = data.length > 1 ? innerW / (data.length - 1) : 0;
+  const yOf = v => padTop + (1 - (v - lo) / range) * innerH;
+
+  // WACC reference line (dashed).
+  if (waccPct != null) {
+    const wy = yOf(waccPct);
+    ctx.strokeStyle = 'rgba(148,163,184,0.55)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(padX, wy);
+    ctx.lineTo(w - padX, wy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(148,163,184,0.75)';
+    ctx.font = '9px system-ui,-apple-system,sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`WACC ${waccPct.toFixed(1)}`, w - padX - 1, wy - 1);
+  }
+
+  // ROIC line — green above WACC, red below (color the line by latest)
+  const latest = data[data.length - 1].roic;
+  const lineColor = (waccPct != null && latest < waccPct)
+    ? 'rgba(239,68,68,0.85)'
+    : 'rgba(34,197,94,0.85)';
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  data.forEach((d, i) => {
+    const x = padX + i * xStep;
+    const y = yOf(d.roic);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  ctx.font = '9px system-ui,-apple-system,sans-serif';
+  data.forEach((d, i) => {
+    const x = padX + i * xStep;
+    const y = yOf(d.roic);
+    // Dot color: green if above WACC, red if below
+    const above = waccPct == null || d.roic >= waccPct;
+    ctx.fillStyle = above ? 'rgba(34,197,94,1)' : 'rgba(239,68,68,1)';
+    ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(226,232,240,0.85)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(d.roic.toFixed(0), x, y - 4);
+    ctx.fillStyle = 'rgba(148,163,184,0.75)';
+    ctx.textBaseline = 'top';
+    ctx.fillText(String(d.year).slice(-2), x, h - padBot + 2);
+  });
+}
+
+// ───── Dividend Yield History (line chart) ─────
+// Yield per year = dividends paid that year / year-end price × 100.
+// Helps spot the "dividend trap": yield spiking because the price
+// is collapsing rather than because the payout grew.
+function drawDivYieldChart(canvas, rows) {
+  const setup = _chartSetup(canvas); if (!setup) return;
+  const { ctx, w, h } = setup;
+  const data = rows
+    .map(r => (r.dividend != null && r.year_end_price != null && r.year_end_price > 0
+      ? { year: r.year, yld: r.dividend / r.year_end_price * 100 }
+      : null))
+    .filter(d => d != null && d.yld > 0);
+  if (!data.length) return _drawNoData(ctx, w, h, 'No dividend history');
+
+  const padTop = 14, padBot = 14, padX = 8;
+  const innerW = w - padX * 2;
+  const innerH = h - padTop - padBot;
+  const values = data.map(d => d.yld);
+  const lo = 0;
+  const hi = Math.max(...values) * 1.1 || 1;
+  const range = hi - lo;
+  const xStep = data.length > 1 ? innerW / (data.length - 1) : 0;
+  const yOf = v => padTop + (1 - (v - lo) / range) * innerH;
+
+  // Filled area below line for visual weight
+  ctx.fillStyle = 'rgba(168,85,247,0.18)';
+  ctx.beginPath();
+  ctx.moveTo(padX, padTop + innerH);
+  data.forEach((d, i) => {
+    const x = padX + i * xStep;
+    ctx.lineTo(x, yOf(d.yld));
+  });
+  ctx.lineTo(padX + (data.length - 1) * xStep, padTop + innerH);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(168,85,247,0.85)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  data.forEach((d, i) => {
+    const x = padX + i * xStep;
+    const y = yOf(d.yld);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  ctx.font = '9px system-ui,-apple-system,sans-serif';
+  data.forEach((d, i) => {
+    const x = padX + i * xStep;
+    const y = yOf(d.yld);
+    ctx.fillStyle = 'rgba(168,85,247,1)';
+    ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(226,232,240,0.85)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(d.yld.toFixed(1), x, y - 4);
     ctx.fillStyle = 'rgba(148,163,184,0.75)';
     ctx.textBaseline = 'top';
     ctx.fillText(String(d.year).slice(-2), x, h - padBot + 2);
