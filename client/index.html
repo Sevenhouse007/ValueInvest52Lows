@@ -924,7 +924,7 @@ function _axis(parts, expected) {
   };
 }
 
-function radarScores(s) {
+function radarScores(s, history) {
   // Sanity-clamp inputs first. Plausible ranges based on real-world
   // distributions: a stock with Fwd P/E < 3 or D/E > 1000 is almost
   // certainly a bad data point, not a real outlier.
@@ -941,6 +941,15 @@ function radarScores(s) {
     earnings_growth:    _ok(s.earnings_growth,     -5,   10),
     piotroski_f_score:  _ok(s.piotroski_f_score,    0,    9),
   };
+  // Multi-year CAGR from the bundled history endpoint, when we have it.
+  // Used to override TTM growth fields below — TTM can read negative
+  // during a recent slowdown even when the long-term trend is strongly
+  // positive (e.g. BMI: TTM rev -9%, but 3y CAGR ~+18%).
+  const revCagr = history ? _cagr(history, 'revenue')    : null;
+  const epsCagr = history ? _cagr(history, 'eps')        : null;
+  // Net income CAGR as a fallback for earnings — EPS history can be
+  // sparse for stocks with frequent share issuance.
+  const niCagr  = history ? _cagr(history, 'net_income') : null;
 
   // Profitability: ROE + ROIC (higher = better). 25%/20% = top of scale.
   const prof = _axis([
@@ -989,10 +998,18 @@ function radarScores(s) {
     : null;
   const fs = _axis([zPts, icPts, dePts], 3);
 
-  // Growth: revenue + earnings growth. 20%/30% = tops respectively.
+  // Growth: prefer multi-year CAGR (smooths out one-quarter blips).
+  // Fall back to TTM growth fields only when no history was loaded —
+  // they overweight the most recent period and can flip negative
+  // mid-cycle even for compounders. 20%/30% caps tied to what counts
+  // as "top of scale" growth for revenue / earnings respectively.
+  const revGrowthInput = revCagr != null ? revCagr : x.revenue_growth;
+  const earnGrowthInput = epsCagr != null ? epsCagr
+                        : niCagr  != null ? niCagr
+                        : x.earnings_growth;
   const gr = _axis([
-    x.revenue_growth  != null ? _clamp01(x.revenue_growth  / 0.20) * 100 : null,
-    x.earnings_growth != null ? _clamp01(x.earnings_growth / 0.30) * 100 : null,
+    revGrowthInput  != null ? _clamp01(revGrowthInput  / 0.20) * 100 : null,
+    earnGrowthInput != null ? _clamp01(earnGrowthInput / 0.30) * 100 : null,
   ], 2);
 
   // Predictability: Piotroski F-Score (consistency of accruals, leverage,
@@ -1017,8 +1034,8 @@ function radarScores(s) {
   };
 }
 
-function radarOverall(s) {
-  const sc = radarScores(s);
+function radarOverall(s, history) {
+  const sc = radarScores(s, history);
   // Confidence-weight the overall: an axis built from 1-of-3 inputs
   // shouldn't count as much as a fully-supported axis.
   let num = 0, den = 0;
@@ -1166,10 +1183,10 @@ function drawRadar(canvas, scores) {
   }
 }
 
-function loadRadar(symbol, stock) {
+function loadRadar(symbol, stock, history) {
   const canvas = document.getElementById(`radar-${symbol}`);
   if (!canvas) return;
-  drawRadar(canvas, radarScores(stock));
+  drawRadar(canvas, radarScores(stock, history));
 }
 
 async function loadSparkline(symbol) {
@@ -1316,7 +1333,26 @@ async function loadTrendCharts(symbol, stock) {
     drawRoicChart   (document.getElementById(`roic-${symbol}`),   rows, wacc);
     drawDivYieldChart(document.getElementById(`divy-${symbol}`),  rows);
     drawPeBandChart  (document.getElementById(`pe-${symbol}`),    rows);
+    // Re-render the radar now that history is in hand. The Growth
+    // axis switches from TTM (which can read negative for a recent
+    // slowdown despite years of growth) to multi-year CAGR computed
+    // from the same revenue/EPS series the trend charts use.
+    if (stock) loadRadar(symbol, stock, rows);
   } catch (e) { /* ignore */ }
+}
+
+// Compound annual growth rate from the first to last non-null value.
+// Returns null when we can't compute a meaningful rate (need ≥2 points,
+// positive endpoints, ≥1 year span).
+function _cagr(rows, field) {
+  const points = rows
+    .filter(r => r[field] != null && r[field] > 0)
+    .map(r => ({ y: r.year, v: r[field] }));
+  if (points.length < 2) return null;
+  const first = points[0], last = points[points.length - 1];
+  const years = last.y - first.y;
+  if (years < 1) return null;
+  return Math.pow(last.v / first.v, 1 / years) - 1;
 }
 
 // ───── Shared chart helpers ─────

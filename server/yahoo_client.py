@@ -634,8 +634,22 @@ class YahooClient:
                 pretax_row = _pick_row(inc, "Pretax Income", "Income Before Tax")
                 eps_row    = _pick_row(inc, "Diluted EPS", "Basic EPS")
 
-                debt_row   = _pick_row(bal, "Total Debt", "Long Term Debt")
-                eq_row     = _pick_row(bal, "Stockholders Equity", "Total Stockholder Equity", "Common Stock Equity")
+                # Many companies (especially low-leverage ones like BMI)
+                # don't have a "Total Debt" row in yfinance's balance sheet
+                # — the line item only appears when there's debt to report.
+                # Try a wider fallback list, including the components we'd
+                # sum to reconstruct it.
+                debt_row    = _pick_row(bal, "Total Debt", "Long Term Debt And Capital Lease Obligation",
+                                        "Long Term Debt", "Net Debt")
+                lt_debt_row = _pick_row(bal, "Long Term Debt")
+                cur_debt_row = _pick_row(bal, "Current Debt", "Current Debt And Capital Lease Obligation",
+                                         "Short Long Term Debt")
+                eq_row     = _pick_row(bal, "Stockholders Equity", "Total Stockholder Equity",
+                                       "Common Stock Equity", "Total Equity Gross Minority Interest")
+                # Whether the balance sheet exists at all for this filing
+                # — used to decide if a missing debt row should mean "zero"
+                # (no debt issued) vs "unknown" (no filing).
+                bal_has_data = bal is not None and not bal.empty
 
                 fcf_row    = _pick_row(cf, "Free Cash Flow")
                 ocf_row    = _pick_row(cf, "Operating Cash Flow", "Cash Flow From Continuing Operating Activities")
@@ -644,7 +658,8 @@ class YahooClient:
                 # Collect all years that show up in any statement.
                 years = set()
                 for r in (rev_row, ni_row, ebit_row, tax_row, pretax_row, eps_row,
-                          debt_row, eq_row, fcf_row, ocf_row, capex_row):
+                          debt_row, lt_debt_row, cur_debt_row, eq_row,
+                          fcf_row, ocf_row, capex_row):
                     if r is not None:
                         for col in r.index:
                             y = _year_of(col)
@@ -700,6 +715,17 @@ class YahooClient:
                     eps    = _val(eps_row, col)
                     debt   = _val(debt_row, col)
                     eq     = _val(eq_row, col)
+                    # Reconstruct from components if the top-level row missed.
+                    if debt is None:
+                        lt = _val(lt_debt_row, col)
+                        cur = _val(cur_debt_row, col)
+                        if lt is not None or cur is not None:
+                            debt = (lt or 0) + (cur or 0)
+                    # Balance sheet exists for this year and equity is
+                    # reported, but no debt row matched anywhere → company
+                    # has no interest-bearing debt to disclose. Treat as 0.
+                    if debt is None and eq is not None and bal_has_data:
+                        debt = 0.0
                     fcf    = _val(fcf_row, col)
                     if fcf is None:
                         ocf   = _val(ocf_row, col)
