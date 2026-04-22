@@ -873,7 +873,7 @@ function detailPanel(s) {
         <canvas id="roic-${sym}"></canvas>
       </div>
       <div>
-        <h4>Dividend Yield (%)</h4>
+        <h4>Shareholder Yield (%)</h4>
         <canvas id="divy-${sym}"></canvas>
       </div>
       <div>
@@ -1331,7 +1331,7 @@ async function loadTrendCharts(symbol, stock) {
     // available; the chart will hide the line if it's not.
     const wacc = stock && stock.sector_wacc != null ? stock.sector_wacc * 100 : null;
     drawRoicChart   (document.getElementById(`roic-${symbol}`),   rows, wacc);
-    drawDivYieldChart(document.getElementById(`divy-${symbol}`),  rows);
+    drawShareholderYieldChart(document.getElementById(`divy-${symbol}`),  rows);
     drawPeBandChart  (document.getElementById(`pe-${symbol}`),    rows);
     // Re-render the radar now that history is in hand. The Growth
     // axis switches from TTM (which can read negative for a recent
@@ -1625,66 +1625,106 @@ function drawRoicChart(canvas, rows, waccPct) {
   });
 }
 
-// ───── Dividend Yield History (line chart) ─────
-// Yield per year = dividends paid that year / year-end price × 100.
-// Helps spot the "dividend trap": yield spiking because the price
-// is collapsing rather than because the payout grew.
-function drawDivYieldChart(canvas, rows) {
+// ───── Shareholder Yield History (stacked bar chart) ─────
+// Total capital returned to shareholders = dividends + net buybacks.
+// Universal across companies regardless of payout strategy:
+//   • Dividend yield = dividends paid / year-end price × 100
+//   • Buyback yield  = (shares_prev - shares_curr) / shares_prev × 100
+// Negative buyback yield = share dilution (issuance > repurchase).
+// Stacked so users see the composition; total label shown above each bar.
+function drawShareholderYieldChart(canvas, rows) {
   const setup = _chartSetup(canvas); if (!setup) return;
   const { ctx, w, h } = setup;
-  const data = rows
-    .map(r => (r.dividend != null && r.year_end_price != null && r.year_end_price > 0
-      ? { year: r.year, yld: r.dividend / r.year_end_price * 100 }
-      : null))
-    .filter(d => d != null && d.yld > 0);
-  if (!data.length) return _drawNoData(ctx, w, h, 'No dividend history');
 
-  const padTop = 14, padBot = 14, padX = 8;
+  // Build per-year {div, buy} where each component is null if unknowable.
+  // Buyback yield needs the previous year's share count to compute.
+  const data = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const prev = i > 0 ? rows[i - 1] : null;
+    const div = (r.dividend != null && r.year_end_price != null && r.year_end_price > 0)
+      ? r.dividend / r.year_end_price * 100 : null;
+    let buy = null;
+    if (prev && prev.shares_outstanding != null && r.shares_outstanding != null && prev.shares_outstanding > 0) {
+      buy = (prev.shares_outstanding - r.shares_outstanding) / prev.shares_outstanding * 100;
+    }
+    if (div != null || buy != null) data.push({ year: r.year, div, buy });
+  }
+  if (!data.length) return _drawNoData(ctx, w, h, 'No yield history');
+
+  const padTop = 18, padBot = 14, padX = 10;
   const innerW = w - padX * 2;
   const innerH = h - padTop - padBot;
-  const values = data.map(d => d.yld);
-  const lo = 0;
-  const hi = Math.max(...values) * 1.1 || 1;
-  const range = hi - lo;
-  const xStep = data.length > 1 ? innerW / (data.length - 1) : 0;
-  const yOf = v => padTop + (1 - (v - lo) / range) * innerH;
+  // Range must include negative buybacks (dilution) and positive totals.
+  const totals = data.map(d => (d.div || 0) + (d.buy || 0));
+  const positives = data.map(d => Math.max(0, d.div || 0) + Math.max(0, d.buy || 0));
+  const negatives = data.map(d => Math.min(0, d.buy || 0)); // only buy can be neg
+  const yMaxRaw = Math.max(...positives, ...totals, 0.5);
+  const yMinRaw = Math.min(...negatives, 0);
+  const yHi = yMaxRaw * 1.15 || 1;
+  const yLo = yMinRaw * 1.15;
+  const range = (yHi - yLo) || 1;
+  const yOf = v => padTop + (1 - (v - yLo) / range) * innerH;
+  const zeroY = yOf(0);
+  const barW = Math.max(6, Math.min(28, innerW / data.length * 0.6));
+  const xStep = data.length > 1 ? innerW / data.length : innerW;
 
-  // Filled area below line for visual weight
-  ctx.fillStyle = 'rgba(168,85,247,0.18)';
+  // Zero baseline
+  ctx.strokeStyle = 'rgba(148,163,184,0.35)';
+  ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(padX, padTop + innerH);
-  data.forEach((d, i) => {
-    const x = padX + i * xStep;
-    ctx.lineTo(x, yOf(d.yld));
-  });
-  ctx.lineTo(padX + (data.length - 1) * xStep, padTop + innerH);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.strokeStyle = 'rgba(168,85,247,0.85)';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  data.forEach((d, i) => {
-    const x = padX + i * xStep;
-    const y = yOf(d.yld);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  });
-  ctx.stroke();
+  ctx.moveTo(padX, zeroY); ctx.lineTo(w - padX, zeroY); ctx.stroke();
 
   ctx.font = '9px system-ui,-apple-system,sans-serif';
   data.forEach((d, i) => {
-    const x = padX + i * xStep;
-    const y = yOf(d.yld);
-    ctx.fillStyle = 'rgba(168,85,247,1)';
-    ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = 'rgba(226,232,240,0.85)';
+    const cx = padX + (i + 0.5) * xStep;
+    const x = cx - barW / 2;
+    const div = d.div || 0;
+    const buy = d.buy || 0;
+    // Dividend (always ≥ 0): teal, drawn from baseline upward.
+    if (div > 0) {
+      const y0 = zeroY;
+      const y1 = yOf(div);
+      ctx.fillStyle = 'rgba(45,212,191,0.85)'; // teal
+      ctx.fillRect(x, y1, barW, y0 - y1);
+    }
+    // Buyback: stacks on top of dividend if positive; drops below zero if dilution.
+    if (buy !== 0) {
+      if (buy > 0) {
+        const y0 = yOf(div);          // top of dividend
+        const y1 = yOf(div + buy);
+        ctx.fillStyle = 'rgba(168,85,247,0.85)'; // purple
+        ctx.fillRect(x, y1, barW, y0 - y1);
+      } else {
+        const y0 = zeroY;
+        const y1 = yOf(buy);          // below zero
+        ctx.fillStyle = 'rgba(239,68,68,0.75)'; // red = dilution
+        ctx.fillRect(x, y0, barW, y1 - y0);
+      }
+    }
+    // Total label above bar (or below if negative-only)
+    const total = div + buy;
+    const labelY = total >= 0 ? yOf(Math.max(total, 0)) - 3 : yOf(buy) + 10;
+    ctx.fillStyle = 'rgba(226,232,240,0.9)';
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText(d.yld.toFixed(1), x, y - 4);
+    ctx.textBaseline = total >= 0 ? 'bottom' : 'top';
+    ctx.fillText(total.toFixed(1), cx, labelY);
+    // Year label
     ctx.fillStyle = 'rgba(148,163,184,0.75)';
     ctx.textBaseline = 'top';
-    ctx.fillText(String(d.year).slice(-2), x, h - padBot + 2);
+    ctx.fillText(String(d.year).slice(-2), cx, h - padBot + 2);
   });
+
+  // Mini legend (top-left)
+  ctx.font = '8px system-ui,-apple-system,sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  let lx = padX, ly = 2;
+  ctx.fillStyle = 'rgba(45,212,191,0.85)'; ctx.fillRect(lx, ly + 1, 8, 6);
+  ctx.fillStyle = 'rgba(226,232,240,0.75)'; ctx.fillText('Div', lx + 10, ly);
+  lx += 32;
+  ctx.fillStyle = 'rgba(168,85,247,0.85)'; ctx.fillRect(lx, ly + 1, 8, 6);
+  ctx.fillStyle = 'rgba(226,232,240,0.75)'; ctx.fillText('Buyback', lx + 10, ly);
 }
 
 // ───── Price vs Fair Value (Peter Lynch / FastGraphs style) ─────
@@ -2228,6 +2268,11 @@ async function doLookup() {
     loadSparkline(symbol);
     loadEpsChart(symbol);
     requestAnimationFrame(() => loadRadar(symbol, data.stock));
+    // Long-term trend charts (revenue, FCF/NI, D/E, ROIC, shareholder
+    // yield, P/E band) — same bundled endpoint the table detail panel
+    // uses. Will also re-render the radar with multi-year CAGR once
+    // history is in hand.
+    loadTrendCharts(symbol, data.stock);
   } catch (e) {
     document.getElementById('lookupStatus').textContent = 'Network error';
   }
@@ -2281,6 +2326,23 @@ function renderLookupResult(s) {
   html += `    </h4>`;
   html += `    <canvas id="radar-${lkSym}" width="400" height="300" style="width:100%;height:300px;"></canvas>`;
   html += `  </div>`;
+  html += `</div>`;
+
+  // Long-term trends — same 6 charts as the table detail panel.
+  // Reuses the bundled /api/fundamentals-history endpoint via loadTrendCharts.
+  html += `<div style="margin-bottom:8px;font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;border-top:1px solid var(--border);padding-top:14px;">Long-Term Trends (5–10 yr)</div>`;
+  html += `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-bottom:20px;">`;
+  const _trend = (title, id) =>
+    `<div>
+      <h4 style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-bottom:8px;">${title}</h4>
+      <canvas id="${id}-${lkSym}" width="400" height="140" style="width:100%;height:140px;display:block;"></canvas>
+    </div>`;
+  html += _trend('Revenue ($M)',           'rev');
+  html += _trend('FCF vs Net Income ($M)', 'fcfni');
+  html += _trend('Debt / Equity',          'de');
+  html += _trend('ROIC vs WACC (%)',       'roic');
+  html += _trend('Shareholder Yield (%)',  'divy');
+  html += _trend('Price vs Fair Value',    'pe');
   html += `</div>`;
 
   // Key metrics grid

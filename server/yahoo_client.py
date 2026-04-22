@@ -646,6 +646,8 @@ class YahooClient:
                                          "Short Long Term Debt")
                 eq_row     = _pick_row(bal, "Stockholders Equity", "Total Stockholder Equity",
                                        "Common Stock Equity", "Total Equity Gross Minority Interest")
+                shares_row = _pick_row(bal, "Ordinary Shares Number", "Share Issued",
+                                       "Common Stock Shares Outstanding")
                 # Whether the balance sheet exists at all for this filing
                 # — used to decide if a missing debt row should mean "zero"
                 # (no debt issued) vs "unknown" (no filing).
@@ -658,7 +660,7 @@ class YahooClient:
                 # Collect all years that show up in any statement.
                 years = set()
                 for r in (rev_row, ni_row, ebit_row, tax_row, pretax_row, eps_row,
-                          debt_row, lt_debt_row, cur_debt_row, eq_row,
+                          debt_row, lt_debt_row, cur_debt_row, eq_row, shares_row,
                           fcf_row, ocf_row, capex_row):
                     if r is not None:
                         for col in r.index:
@@ -715,6 +717,7 @@ class YahooClient:
                     eps    = _val(eps_row, col)
                     debt   = _val(debt_row, col)
                     eq     = _val(eq_row, col)
+                    shares = _val(shares_row, col)
                     # Reconstruct from components if the top-level row missed.
                     if debt is None:
                         lt = _val(lt_debt_row, col)
@@ -743,6 +746,7 @@ class YahooClient:
                         "eps":            round(eps, 2) if eps is not None else None,
                         "total_debt":     debt,
                         "total_equity":   eq,
+                        "shares_outstanding": shares,
                         "year_end_price": round(year_end_price[y], 2) if y in year_end_price else None,
                         "dividend":       round(div_per_year[y], 4) if y in div_per_year else None,
                     })
