@@ -140,6 +140,31 @@ def init_db():
             ON scan_performance(symbol, scan_date)
         """)
 
+        # Watchlist — stocks the user is tracking as potential buys.
+        # Questions are stored as a JSON array so a single PATCH can rewrite
+        # the whole checklist without juggling FK rows; the volume per row
+        # is small (≤30 questions) and we never query across questions.
+        # Snapshot captures the V/Q/F scores at add time so the user can
+        # see thesis drift on revisit.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL UNIQUE,
+                short_name TEXT DEFAULT '',
+                thesis TEXT DEFAULT '',
+                target_price REAL,
+                target_event TEXT DEFAULT '',
+                target_date TEXT,
+                questions_json TEXT DEFAULT '[]',
+                status TEXT DEFAULT 'watching',
+                notes TEXT DEFAULT '',
+                snapshot_json TEXT DEFAULT '{}',
+                added_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status)")
+
 
 def save_scan(result: ScanResult):
     """Persist a scan result, replacing any existing data for that date."""
@@ -587,3 +612,123 @@ def _load_scan(conn: sqlite3.Connection, scan_row: sqlite3.Row) -> ScanResult:
         sector_averages=sector_averages,
         market_sector_averages=market_sector_averages,
     )
+
+
+# ─────────────────────── Watchlist (Potential Buys) ───────────────────────
+# CRUD helpers. Rows are dicts (not Pydantic models) so the API layer can
+# shape them freely — the watchlist surface is small and self-contained.
+
+def _watchlist_row_to_dict(r: sqlite3.Row) -> dict:
+    return {
+        "id":            r["id"],
+        "symbol":        r["symbol"],
+        "short_name":    r["short_name"] or "",
+        "thesis":        r["thesis"] or "",
+        "target_price":  r["target_price"],
+        "target_event":  r["target_event"] or "",
+        "target_date":   r["target_date"],
+        "questions":     json.loads(r["questions_json"] or "[]"),
+        "status":        r["status"] or "watching",
+        "notes":         r["notes"] or "",
+        "snapshot":      json.loads(r["snapshot_json"] or "{}"),
+        "added_at":      r["added_at"],
+        "updated_at":    r["updated_at"],
+    }
+
+
+def list_watchlist() -> list[dict]:
+    """All watchlist items, newest first."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM watchlist ORDER BY "
+            "CASE status WHEN 'watching' THEN 0 WHEN 'bought' THEN 1 ELSE 2 END, "
+            "added_at DESC"
+        ).fetchall()
+        return [_watchlist_row_to_dict(r) for r in rows]
+
+
+def get_watchlist_item(item_id: int) -> Optional[dict]:
+    with get_db() as conn:
+        r = conn.execute("SELECT * FROM watchlist WHERE id = ?", (item_id,)).fetchone()
+        return _watchlist_row_to_dict(r) if r else None
+
+
+def get_watchlist_by_symbol(symbol: str) -> Optional[dict]:
+    with get_db() as conn:
+        r = conn.execute("SELECT * FROM watchlist WHERE symbol = ?", (symbol,)).fetchone()
+        return _watchlist_row_to_dict(r) if r else None
+
+
+def create_watchlist_item(
+    symbol: str,
+    short_name: str = "",
+    thesis: str = "",
+    target_price: Optional[float] = None,
+    target_event: str = "",
+    target_date: Optional[str] = None,
+    questions: Optional[list[dict]] = None,
+    notes: str = "",
+    snapshot: Optional[dict] = None,
+) -> dict:
+    """Insert a new watchlist row. Raises sqlite3.IntegrityError on duplicate symbol."""
+    with get_db() as conn:
+        cur = conn.execute(
+            """INSERT INTO watchlist
+               (symbol, short_name, thesis, target_price, target_event,
+                target_date, questions_json, notes, snapshot_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                symbol,
+                short_name or "",
+                thesis or "",
+                target_price,
+                target_event or "",
+                target_date,
+                json.dumps(questions or []),
+                notes or "",
+                json.dumps(snapshot or {}),
+            ),
+        )
+        new_id = cur.lastrowid
+    return get_watchlist_item(new_id)
+
+
+# Whitelist of fields that PATCH /api/watchlist/{id} can update. Anything
+# else in the body is ignored. `questions` and `snapshot` are JSON-serialized
+# before persisting; other fields go in raw.
+_WATCHLIST_UPDATABLE = {
+    "short_name", "thesis", "target_price", "target_event", "target_date",
+    "status", "notes",
+}
+
+
+def update_watchlist_item(item_id: int, fields: dict) -> Optional[dict]:
+    """Partial update. Returns the updated row, or None if not found."""
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in _WATCHLIST_UPDATABLE:
+            sets.append(f"{k} = ?")
+            vals.append(v)
+        elif k == "questions":
+            sets.append("questions_json = ?")
+            vals.append(json.dumps(v or []))
+        elif k == "snapshot":
+            sets.append("snapshot_json = ?")
+            vals.append(json.dumps(v or {}))
+    if not sets:
+        return get_watchlist_item(item_id)
+    sets.append("updated_at = datetime('now')")
+    vals.append(item_id)
+    with get_db() as conn:
+        cur = conn.execute(
+            f"UPDATE watchlist SET {', '.join(sets)} WHERE id = ?", vals
+        )
+        if cur.rowcount == 0:
+            return None
+    return get_watchlist_item(item_id)
+
+
+def delete_watchlist_item(item_id: int) -> bool:
+    with get_db() as conn:
+        cur = conn.execute("DELETE FROM watchlist WHERE id = ?", (item_id,))
+        return cur.rowcount > 0

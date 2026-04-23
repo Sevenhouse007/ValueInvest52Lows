@@ -20,11 +20,12 @@ from pydantic import BaseModel, Field, ValidationError
 from server import config
 from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HOST, PORT
 from server.database import (
-    delete_scan, get_backtest_details, get_backtest_summary, get_bounce_back_candidates,
-    get_latest_good_scan, get_latest_scan, get_latest_scan_averages,
-    get_performance_rows_needing_update, get_recent_tracked_symbols, get_scan_by_date,
-    get_scan_history, get_stock_history, init_db, save_performance_tracking, save_scan,
-    update_forward_price, upsert_latest_price,
+    create_watchlist_item, delete_scan, delete_watchlist_item, get_backtest_details,
+    get_backtest_summary, get_bounce_back_candidates, get_latest_good_scan, get_latest_scan,
+    get_latest_scan_averages, get_performance_rows_needing_update, get_recent_tracked_symbols,
+    get_scan_by_date, get_scan_history, get_stock_history, get_watchlist_by_symbol,
+    get_watchlist_item, init_db, list_watchlist, save_performance_tracking, save_scan,
+    update_forward_price, update_watchlist_item, upsert_latest_price,
 )
 from server.models import ScanResult, ScanSummary
 from server.pipeline import merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
@@ -87,6 +88,50 @@ class SettingsUpdate(BaseModel):
     use_damodaran_blend: Optional[bool] = None
     notify_enabled: Optional[bool] = None
     notify_top_n: Optional[int] = Field(default=None, ge=1, le=100)
+
+    model_config = {"extra": "forbid"}
+
+
+# ──────────────── WATCHLIST SCHEMAS ────────────────
+
+class WatchlistQuestion(BaseModel):
+    """A single yes/no due-diligence question on a watchlist item."""
+    question: str = Field(..., min_length=1, max_length=500)
+    answer: str = Field(default="", max_length=2000)
+    confirmed: bool = False
+
+    model_config = {"extra": "forbid"}
+
+
+class WatchlistCreate(BaseModel):
+    """POST body for adding a stock to the watchlist."""
+    symbol: str = Field(..., min_length=1, max_length=15)
+    short_name: str = Field(default="", max_length=200)
+    thesis: str = Field(default="", max_length=4000)
+    target_price: Optional[float] = Field(default=None, ge=0, le=1_000_000)
+    target_event: str = Field(default="", max_length=200)
+    # ISO YYYY-MM-DD; validated by validate_scan_date when provided.
+    target_date: Optional[str] = Field(default=None, max_length=10)
+    questions: list[WatchlistQuestion] = Field(default_factory=list, max_length=50)
+    notes: str = Field(default="", max_length=10_000)
+    # Snapshot is free-form (V/Q/F scores, price at add time, etc.) — bounded
+    # by the parent body size so we don't need a per-key schema.
+    snapshot: dict = Field(default_factory=dict)
+
+    model_config = {"extra": "forbid"}
+
+
+class WatchlistUpdate(BaseModel):
+    """PATCH body — every field optional; only provided fields are written."""
+    short_name: Optional[str] = Field(default=None, max_length=200)
+    thesis: Optional[str] = Field(default=None, max_length=4000)
+    target_price: Optional[float] = Field(default=None, ge=0, le=1_000_000)
+    target_event: Optional[str] = Field(default=None, max_length=200)
+    target_date: Optional[str] = Field(default=None, max_length=10)
+    questions: Optional[list[WatchlistQuestion]] = Field(default=None, max_length=50)
+    status: Optional[str] = Field(default=None, pattern=r"^(watching|bought|rejected)$")
+    notes: Optional[str] = Field(default=None, max_length=10_000)
+    snapshot: Optional[dict] = None
 
     model_config = {"extra": "forbid"}
 
@@ -714,6 +759,133 @@ def _build_response(result: ScanResult) -> dict:
         "stocks": stock_dicts,
         "sector_averages": {k: v.model_dump() for k, v in result.sector_averages.items()},
     }
+
+
+# ──────────────── WATCHLIST ENDPOINTS ────────────────
+# Lightweight CRUD over the `watchlist` table. List endpoint also enriches
+# each row with the latest known price (from the symbol_latest_price table
+# the scan/fill jobs maintain) and computes a derived "ready_to_buy" flag
+# the UI uses to highlight cards.
+
+def _enrich_watchlist_item(item: dict, latest_prices: dict) -> dict:
+    """Add current_price + ready_to_buy flag in place of pure DB fields."""
+    sym = item["symbol"]
+    cur = latest_prices.get(sym)
+    item["current_price"] = cur
+    target = item.get("target_price")
+    questions = item.get("questions") or []
+    all_confirmed = bool(questions) and all(q.get("confirmed") for q in questions)
+    price_hit = (cur is not None and target is not None and cur <= target)
+    # "Ready" = both signals fire, OR price hit with no questions defined.
+    # When there are no questions, the price target alone is the trigger.
+    item["price_hit"] = price_hit
+    item["all_questions_confirmed"] = all_confirmed
+    item["ready_to_buy"] = (
+        item.get("status") == "watching"
+        and price_hit
+        and (all_confirmed or not questions)
+    )
+    return item
+
+
+def _fetch_latest_prices(symbols: list[str]) -> dict[str, float]:
+    """Read latest prices from symbol_latest_price (maintained by scan/fill).
+
+    For symbols not in that table — typically watchlist items the scanner
+    hasn't seen because they aren't at 52W lows — fall back to a quick
+    yfinance fast_info call. Limited to the watchlist size (≤ a few dozen)
+    so per-request latency stays reasonable.
+    """
+    from server.database import get_db
+    out: dict[str, float] = {}
+    if not symbols:
+        return out
+    placeholders = ",".join("?" * len(symbols))
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT symbol, price FROM symbol_latest_price WHERE symbol IN ({placeholders})",
+            symbols,
+        ).fetchall()
+        for r in rows:
+            out[r["symbol"]] = r["price"]
+    missing = [s for s in symbols if s not in out]
+    if missing:
+        # Fall back to yfinance fast_info — a single regular_market_price
+        # lookup, no full quoteSummary roundtrip.
+        import yfinance as yf
+        for sym in missing:
+            try:
+                fi = yf.Ticker(sym).fast_info
+                price = float(fi.get("last_price") or fi.get("regular_market_price") or 0) or None
+                if price:
+                    out[sym] = price
+            except Exception as e:
+                logger.debug(f"fast_info fallback failed for {sym}: {e}")
+    return out
+
+
+@app.get("/api/watchlist")
+async def watchlist_list():
+    """Return all watchlist items, enriched with current price + ready flag."""
+    items = list_watchlist()
+    prices = _fetch_latest_prices([i["symbol"] for i in items])
+    return {"items": [_enrich_watchlist_item(i, prices) for i in items]}
+
+
+@app.post("/api/watchlist")
+async def watchlist_create(body: WatchlistCreate):
+    """Add a stock to the watchlist. 409 if already present."""
+    symbol = validate_symbol(body.symbol)
+    if body.target_date:
+        validate_scan_date(body.target_date)
+    if get_watchlist_by_symbol(symbol):
+        raise HTTPException(409, f"{symbol} is already on the watchlist")
+    try:
+        item = create_watchlist_item(
+            symbol=symbol,
+            short_name=body.short_name,
+            thesis=body.thesis,
+            target_price=body.target_price,
+            target_event=body.target_event,
+            target_date=body.target_date,
+            questions=[q.model_dump() for q in body.questions],
+            notes=body.notes,
+            snapshot=body.snapshot,
+        )
+    except Exception as e:
+        logger.exception("watchlist create failed")
+        raise HTTPException(500, f"Failed to create watchlist item: {e}")
+    prices = _fetch_latest_prices([symbol])
+    return _enrich_watchlist_item(item, prices)
+
+
+@app.patch("/api/watchlist/{item_id}")
+async def watchlist_update(item_id: int, body: WatchlistUpdate):
+    """Partial update — only fields present in the body are written."""
+    if item_id <= 0:
+        raise HTTPException(400, "item_id must be positive")
+    if body.target_date:
+        validate_scan_date(body.target_date)
+    fields = body.model_dump(exclude_unset=True)
+    if "questions" in fields and fields["questions"] is not None:
+        fields["questions"] = [
+            (q if isinstance(q, dict) else q.model_dump())
+            for q in fields["questions"]
+        ]
+    item = update_watchlist_item(item_id, fields)
+    if not item:
+        raise HTTPException(404, f"Watchlist item {item_id} not found")
+    prices = _fetch_latest_prices([item["symbol"]])
+    return _enrich_watchlist_item(item, prices)
+
+
+@app.delete("/api/watchlist/{item_id}")
+async def watchlist_delete(item_id: int):
+    if item_id <= 0:
+        raise HTTPException(400, "item_id must be positive")
+    if not delete_watchlist_item(item_id):
+        raise HTTPException(404, f"Watchlist item {item_id} not found")
+    return {"deleted": item_id}
 
 
 if __name__ == "__main__":

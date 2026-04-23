@@ -268,6 +268,7 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
   <div class="tab" data-tab="lookup" onclick="switchTab('lookup')">Stock Lookup</div>
   <div class="tab" data-tab="backtest" onclick="switchTab('backtest')">Backtest</div>
   <div class="tab" data-tab="bounceback" onclick="switchTab('bounceback')">Bounce Back <span class="badge badge-amber" id="tabBounceCount" style="display:none;">0</span></div>
+  <div class="tab" data-tab="watchlist" onclick="switchTab('watchlist')">Potential Buys <span class="badge badge-blue" id="tabWatchCount" style="display:none;">0</span></div>
   <span id="tabDualCount" class="badge" style="display:none;margin-left:auto;background:rgba(167,139,250,.15);color:#a78bfa;font-size:11px;padding:3px 8px;align-self:center;">0 V+Q</span>
 </div>
 
@@ -411,6 +412,26 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
     <span id="lookupStatus" style="color:var(--text2);font-size:13px;"></span>
   </div>
   <div id="lookupResult"></div>
+</div>
+
+<div id="watchlistSection" style="display:none;padding:0 24px 24px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;padding:20px 0 12px;gap:16px;flex-wrap:wrap;">
+    <div>
+      <h3 style="font-size:16px;">Potential Buys — Watchlist</h3>
+      <p style="color:var(--text2);font-size:12px;margin-top:4px;">
+        Stocks you're tracking with target prices, catalysts, and due-diligence questions.
+        A card turns <span style="color:var(--green);">green / Ready to Buy</span> when current price ≤ target AND all questions are confirmed.
+      </p>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button class="btn" onclick="openWatchlistAddForm()" style="padding:8px 16px;font-size:13px;">+ Add Stock</button>
+      <button onclick="loadWatchlist()" title="Refresh prices" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;">↻ Refresh</button>
+    </div>
+  </div>
+  <div id="watchlistAddForm" style="display:none;"></div>
+  <div id="watchlistContent">
+    <p style="color:var(--text2);">Loading watchlist...</p>
+  </div>
 </div>
 
 <script>
@@ -838,8 +859,16 @@ function detailPanel(s) {
   // cached scans contain bad symbols saved before validation existed.
   const sym = escapeHtml(s.symbol);
   const symUrl = encodeURIComponent(String(s.symbol||''));
+  // Stash the stock object on window so the inline onclick handler can
+  // reach it without serialising the whole record into an HTML attribute
+  // (the snapshot needs numeric scores, not just the symbol).
+  window._stockBySym = window._stockBySym || {};
+  window._stockBySym[s.symbol] = s;
   return `<div class="detail-panel">
-    <h3>${sym} — ${escapeHtml(s.short_name||'')} <a href="https://finance.yahoo.com/quote/${symUrl}" target="_blank" rel="noopener noreferrer">Yahoo Finance ↗</a></h3>
+    <h3>${sym} — ${escapeHtml(s.short_name||'')}
+      <a href="https://finance.yahoo.com/quote/${symUrl}" target="_blank" rel="noopener noreferrer">Yahoo Finance ↗</a>
+      <button class="btn btn-outline" onclick="addToWatchlistFrom(window._stockBySym['${sym}'])" style="font-size:11px;padding:4px 10px;margin-left:auto;">+ Watchlist</button>
+    </h3>
     <div class="detail-charts">
       <div>
         <h4>5Y EPS</h4>
@@ -1877,7 +1906,8 @@ function switchTab(tab) {
   const isLookup = tab === 'lookup';
   const isBacktest = tab === 'backtest';
   const isBounceback = tab === 'bounceback';
-  const isSpecial = isLookup || isBacktest || isBounceback;
+  const isWatchlist = tab === 'watchlist';
+  const isSpecial = isLookup || isBacktest || isBounceback || isWatchlist;
   // Show/hide sections
   document.querySelector('.controls').style.display = isSpecial ? 'none' : '';
   document.querySelector('.score-legend').style.display = isSpecial ? 'none' : '';
@@ -1886,6 +1916,7 @@ function switchTab(tab) {
   document.getElementById('lookupSection').style.display = isLookup ? 'block' : 'none';
   document.getElementById('backtestSection').style.display = isBacktest ? 'block' : 'none';
   document.getElementById('bouncebackSection').style.display = isBounceback ? 'block' : 'none';
+  document.getElementById('watchlistSection').style.display = isWatchlist ? 'block' : 'none';
 
   if (isBacktest) {
     loadBacktest();
@@ -1893,6 +1924,10 @@ function switchTab(tab) {
   }
   if (isBounceback) {
     loadBounceBack();
+    return;
+  }
+  if (isWatchlist) {
+    loadWatchlist();
     return;
   }
   if (isLookup) {
@@ -2233,7 +2268,467 @@ function cmpClass(val, avg, lowerIsBetter) {
   return '';
 }
 
-// ────────── Stock Lookup ──────────
+// ────────── Potential Buys (Watchlist) ──────────
+// Persistent CRUD over /api/watchlist. Each item carries a thesis, a
+// target price, an optional catalyst event/date, and a checklist of
+// due-diligence questions. A card flips to "Ready to Buy" (green border)
+// when current price ≤ target AND every question is confirmed.
+
+// Default checklist seeded into a new add — saves typing and standardizes
+// the questions you'd want to answer before buying any value setup.
+const WATCHLIST_DEFAULT_QUESTIONS = [
+  'Has revenue growth stabilized or reaccelerated?',
+  'Are gross/operating margins stabilizing?',
+  'Insider buying activity in the last 90 days?',
+  'Beneish M-Score below -1.78 (no manipulation flag)?',
+  'Altman Z-Score above 2.99 (safe zone)?',
+  'FCF/NI ratio above 70%?',
+  'Buyback pace sustainable (not exceeding FCF)?',
+  'Catalyst confirmed (earnings, product, regulation)?',
+];
+
+let _watchlistItems = [];
+let _watchlistEditingId = null;  // id of card currently in edit-questions mode
+
+async function loadWatchlist() {
+  const c = document.getElementById('watchlistContent');
+  c.innerHTML = '<p style="color:var(--text2);">Loading watchlist...</p>';
+  try {
+    const r = await fetch('/api/watchlist');
+    const data = await r.json();
+    _watchlistItems = data.items || [];
+    renderWatchlist();
+  } catch (e) {
+    c.innerHTML = '<p style="color:var(--red);">Failed to load watchlist.</p>';
+  }
+}
+
+function renderWatchlist() {
+  const c = document.getElementById('watchlistContent');
+  const items = _watchlistItems;
+  // Update tab badge — count active (watching) items only.
+  const active = items.filter(i => i.status === 'watching');
+  const badge = document.getElementById('tabWatchCount');
+  badge.textContent = active.length;
+  badge.style.display = active.length > 0 ? '' : 'none';
+
+  if (!items.length) {
+    c.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:32px;text-align:center;">
+        <h3 style="margin-bottom:8px;">No stocks on your watchlist yet</h3>
+        <p style="color:var(--text2);">Click <strong>+ Add Stock</strong> above, or add from a Stock Lookup result.</p>
+      </div>`;
+    return;
+  }
+
+  const watching = items.filter(i => i.status === 'watching');
+  const archived = items.filter(i => i.status !== 'watching');
+  let html = '';
+  watching.forEach(i => { html += renderWatchlistCard(i); });
+  if (archived.length > 0) {
+    html += `<details style="margin-top:24px;">
+      <summary style="cursor:pointer;color:var(--text2);font-size:13px;padding:8px 0;">Archived (${archived.length}) — Bought / Rejected</summary>
+      <div style="margin-top:8px;">`;
+    archived.forEach(i => { html += renderWatchlistCard(i); });
+    html += `</div></details>`;
+  }
+  c.innerHTML = html;
+}
+
+function renderWatchlistCard(i) {
+  const sym = escapeHtml(i.symbol);
+  const name = escapeHtml(i.short_name || '');
+  const ready = i.ready_to_buy;
+  const isBought = i.status === 'bought';
+  const isRejected = i.status === 'rejected';
+  const borderColor = ready ? 'var(--green)'
+                    : isBought ? 'rgba(45,212,191,0.5)'
+                    : isRejected ? 'rgba(239,68,68,0.4)'
+                    : 'var(--border)';
+  const ribbonHtml = ready
+    ? `<span style="background:var(--green);color:#062;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;">READY TO BUY</span>`
+    : isBought
+    ? `<span style="background:rgba(45,212,191,0.2);color:var(--green);padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;">BOUGHT</span>`
+    : isRejected
+    ? `<span style="background:rgba(239,68,68,0.2);color:var(--red);padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;">REJECTED</span>`
+    : `<span style="background:rgba(148,163,184,0.15);color:var(--text2);padding:3px 10px;border-radius:12px;font-size:11px;">WATCHING</span>`;
+
+  // Price block
+  const cur = i.current_price;
+  const tgt = i.target_price;
+  let priceBlock = '';
+  if (cur != null && tgt != null) {
+    const diff = ((cur - tgt) / tgt) * 100;
+    const atOrBelow = cur <= tgt;
+    const color = atOrBelow ? 'var(--green)' : 'var(--text2)';
+    const arrow = atOrBelow ? '✓ at target' : `${diff >= 0 ? '+' : ''}${diff.toFixed(1)}% above target`;
+    priceBlock = `<div style="text-align:right;">
+      <div style="font-size:20px;font-weight:700;">$${fmt(cur,2)}</div>
+      <div style="font-size:11px;color:var(--text2);">target $${fmt(tgt,2)} · <span style="color:${color};">${arrow}</span></div>
+    </div>`;
+  } else if (cur != null) {
+    priceBlock = `<div style="text-align:right;">
+      <div style="font-size:20px;font-weight:700;">$${fmt(cur,2)}</div>
+      <div style="font-size:11px;color:var(--text2);">no target set</div>
+    </div>`;
+  } else {
+    priceBlock = `<div style="text-align:right;color:var(--text2);font-size:13px;">price unavailable</div>`;
+  }
+
+  // Catalyst row
+  let catalystHtml = '';
+  if (i.target_event || i.target_date) {
+    let countdown = '';
+    if (i.target_date) {
+      const d = new Date(i.target_date + 'T12:00:00');
+      const days = Math.round((d - Date.now()) / 86400000);
+      countdown = days > 0 ? ` — ${days} days` : days === 0 ? ' — today' : ` — ${-days} days ago`;
+    }
+    catalystHtml = `<div style="margin:10px 0;padding:6px 10px;background:rgba(59,130,246,0.08);border-radius:6px;font-size:12px;color:var(--blue);">
+      📅 <strong>${escapeHtml(i.target_event || 'catalyst')}</strong>${escapeHtml(countdown)}${i.target_date ? ' (' + escapeHtml(i.target_date) + ')' : ''}
+    </div>`;
+  }
+
+  // Thesis
+  const thesisHtml = i.thesis
+    ? `<div style="margin:10px 0;font-size:13px;color:var(--text);line-height:1.5;">${escapeHtml(i.thesis)}</div>`
+    : '';
+
+  // Snapshot vs current scores (if snapshot has them)
+  let snapHtml = '';
+  if (i.snapshot && (i.snapshot.value_score != null || i.snapshot.quality_score != null)) {
+    const sv = i.snapshot.value_score != null ? i.snapshot.value_score : '—';
+    const sq = i.snapshot.quality_score != null ? i.snapshot.quality_score : '—';
+    const sf = i.snapshot.f_score != null ? i.snapshot.f_score : '—';
+    const sp = i.snapshot.price_at_add != null ? '$' + fmt(i.snapshot.price_at_add,2) : '—';
+    const sd = i.snapshot.added_date || (i.added_at || '').slice(0,10);
+    snapHtml = `<div style="font-size:11px;color:var(--text2);margin:6px 0;padding:6px 10px;background:var(--surface2);border-radius:6px;">
+      Snapshot when added (${escapeHtml(sd)}): V <strong>${sv}</strong> · Q <strong>${sq}</strong> · F <strong>${sf}</strong> · price <strong>${sp}</strong>
+    </div>`;
+  }
+
+  // Questions checklist
+  const questions = i.questions || [];
+  const confirmedCount = questions.filter(q => q.confirmed).length;
+  let questionsHtml = '';
+  if (questions.length > 0) {
+    questionsHtml = `<div style="margin:10px 0;">
+      <div style="font-size:11px;color:var(--text2);text-transform:uppercase;margin-bottom:6px;letter-spacing:.04em;">
+        Due Diligence (${confirmedCount}/${questions.length} confirmed)
+      </div>
+      <div>`;
+    questions.forEach((q, idx) => {
+      const checked = q.confirmed ? 'checked' : '';
+      const answerHtml = q.answer
+        ? `<div style="font-size:11px;color:var(--text2);margin-left:24px;margin-top:2px;">${escapeHtml(q.answer)}</div>`
+        : '';
+      questionsHtml += `
+        <div style="padding:5px 0;border-bottom:1px dashed var(--border);">
+          <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px;">
+            <input type="checkbox" ${checked} onchange="toggleWatchlistQuestion(${i.id}, ${idx})" style="margin-top:3px;flex-shrink:0;">
+            <span style="${q.confirmed ? 'color:var(--green);' : ''}">${escapeHtml(q.question)}</span>
+          </label>
+          ${answerHtml}
+        </div>`;
+    });
+    questionsHtml += `</div></div>`;
+  }
+
+  // Notes
+  const notesHtml = i.notes
+    ? `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:11px;color:var(--text2);">Notes</summary>
+       <div style="font-size:12px;color:var(--text);margin-top:6px;white-space:pre-wrap;">${escapeHtml(i.notes)}</div></details>`
+    : '';
+
+  // Action buttons
+  const actionsHtml = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">
+    <button onclick="editWatchlistItem(${i.id})" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;">Edit</button>
+    <button onclick="lookupWatchlistItem('${sym}')" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;">Re-analyze</button>
+    ${i.status !== 'bought' ? `<button onclick="setWatchlistStatus(${i.id}, 'bought')" style="background:rgba(45,212,191,0.2);color:var(--green);border:1px solid var(--green);border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;">Mark Bought</button>` : ''}
+    ${i.status !== 'rejected' ? `<button onclick="setWatchlistStatus(${i.id}, 'rejected')" style="background:rgba(239,68,68,0.15);color:var(--red);border:1px solid rgba(239,68,68,0.5);border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;">Reject</button>` : ''}
+    ${i.status !== 'watching' ? `<button onclick="setWatchlistStatus(${i.id}, 'watching')" style="background:var(--surface2);color:var(--text2);border:1px solid var(--border);border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;">Re-activate</button>` : ''}
+    <button onclick="deleteWatchlistItem(${i.id})" style="background:transparent;color:var(--red);border:1px solid rgba(239,68,68,0.4);border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;margin-left:auto;">Delete</button>
+  </div>`;
+
+  return `
+    <div style="background:var(--surface);border:2px solid ${borderColor};border-radius:var(--radius);padding:16px 18px;margin-bottom:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+        <div style="flex:1;min-width:0;">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <h3 style="font-size:17px;margin:0;">${sym}${name ? ' — ' + name : ''}</h3>
+            ${ribbonHtml}
+          </div>
+        </div>
+        ${priceBlock}
+      </div>
+      ${catalystHtml}
+      ${thesisHtml}
+      ${snapHtml}
+      ${questionsHtml}
+      ${notesHtml}
+      ${actionsHtml}
+    </div>`;
+}
+
+// ── Add / Edit form (inline, single form reused) ──────────────────────────
+function openWatchlistAddForm(prefill) {
+  _watchlistEditingId = null;
+  renderWatchlistForm(prefill || {});
+}
+
+function editWatchlistItem(id) {
+  const item = _watchlistItems.find(i => i.id === id);
+  if (!item) return;
+  _watchlistEditingId = id;
+  renderWatchlistForm(item);
+  document.getElementById('watchlistAddForm').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function renderWatchlistForm(prefill) {
+  const f = document.getElementById('watchlistAddForm');
+  const isEdit = _watchlistEditingId != null;
+  const sym = prefill.symbol || '';
+  const name = prefill.short_name || '';
+  const thesis = prefill.thesis || '';
+  const target = prefill.target_price != null ? prefill.target_price : '';
+  const event = prefill.target_event || '';
+  const date = prefill.target_date || '';
+  const notes = prefill.notes || '';
+  const questions = (prefill.questions && prefill.questions.length > 0)
+    ? prefill.questions
+    : (isEdit ? [] : WATCHLIST_DEFAULT_QUESTIONS.map(q => ({question:q, answer:'', confirmed:false})));
+
+  f.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--blue);border-radius:var(--radius);padding:18px;margin-bottom:18px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h4 style="font-size:14px;">${isEdit ? 'Edit ' + escapeHtml(sym) : 'Add to Watchlist'}</h4>
+        <button onclick="closeWatchlistForm()" style="background:transparent;color:var(--text2);border:none;font-size:18px;cursor:pointer;">×</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+        <label style="font-size:11px;color:var(--text2);">Ticker
+          <input id="wfSymbol" type="text" maxlength="15" value="${escapeHtml(sym)}" ${isEdit ? 'disabled' : ''} placeholder="LULU"
+            style="display:block;width:100%;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:13px;margin-top:3px;">
+        </label>
+        <label style="font-size:11px;color:var(--text2);">Company name (optional)
+          <input id="wfName" type="text" maxlength="200" value="${escapeHtml(name)}" placeholder="auto-filled if blank"
+            style="display:block;width:100%;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:13px;margin-top:3px;">
+        </label>
+      </div>
+      <label style="font-size:11px;color:var(--text2);display:block;margin-bottom:10px;">Thesis (1-2 sentences)
+        <textarea id="wfThesis" rows="2" maxlength="4000" placeholder="e.g. 10x P/E for a 35% ROIC business; waiting on US comp inflection"
+          style="display:block;width:100%;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:13px;margin-top:3px;resize:vertical;">${escapeHtml(thesis)}</textarea>
+      </label>
+      <div style="display:grid;grid-template-columns:1fr 2fr 1fr;gap:10px;margin-bottom:10px;">
+        <label style="font-size:11px;color:var(--text2);">Target price ($)
+          <input id="wfTarget" type="number" step="0.01" min="0" value="${target}" placeholder="120.00"
+            style="display:block;width:100%;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:13px;margin-top:3px;">
+        </label>
+        <label style="font-size:11px;color:var(--text2);">Catalyst event
+          <input id="wfEvent" type="text" maxlength="200" value="${escapeHtml(event)}" placeholder="Q1 FY27 print, activist letter, etc."
+            style="display:block;width:100%;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:13px;margin-top:3px;">
+        </label>
+        <label style="font-size:11px;color:var(--text2);">Catalyst date (YYYY-MM-DD)
+          <input id="wfDate" type="date" value="${escapeHtml(date)}"
+            style="display:block;width:100%;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:13px;margin-top:3px;">
+        </label>
+      </div>
+      <div style="font-size:11px;color:var(--text2);text-transform:uppercase;margin:14px 0 6px;letter-spacing:.04em;">
+        Due-diligence questions
+      </div>
+      <div id="wfQuestions"></div>
+      <button onclick="addWatchlistQuestionRow()" style="background:var(--surface2);color:var(--text2);border:1px dashed var(--border);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;margin-top:6px;">+ Add question</button>
+      <label style="font-size:11px;color:var(--text2);display:block;margin:14px 0 10px;">Notes (optional, free-form)
+        <textarea id="wfNotes" rows="3" maxlength="10000" placeholder="Anything else worth remembering"
+          style="display:block;width:100%;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:13px;margin-top:3px;resize:vertical;">${escapeHtml(notes)}</textarea>
+      </label>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
+        <button onclick="closeWatchlistForm()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:7px 14px;font-size:12px;cursor:pointer;">Cancel</button>
+        <button class="btn" onclick="saveWatchlistForm()" style="padding:7px 18px;font-size:12px;">${isEdit ? 'Save changes' : 'Add to watchlist'}</button>
+      </div>
+      <div id="wfStatus" style="font-size:11px;color:var(--red);margin-top:8px;"></div>
+    </div>`;
+  f.style.display = 'block';
+  // Render the question rows
+  _wfRenderQuestions(questions);
+}
+
+function _wfRenderQuestions(questions) {
+  const c = document.getElementById('wfQuestions');
+  c.innerHTML = '';
+  questions.forEach((q, idx) => {
+    c.appendChild(_wfBuildRow(q, idx));
+  });
+}
+
+function _wfBuildRow(q, idx) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:6px;align-items:center;padding:4px 0;';
+  row.innerHTML = `
+    <input type="checkbox" ${q.confirmed ? 'checked' : ''} class="wfQConfirmed" style="flex-shrink:0;">
+    <input type="text" maxlength="500" value="${escapeHtml(q.question)}" placeholder="question"
+      class="wfQText" style="flex:1;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:5px 8px;font-size:12px;">
+    <input type="text" maxlength="2000" value="${escapeHtml(q.answer || '')}" placeholder="answer / status"
+      class="wfQAnswer" style="flex:1;background:var(--surface2);color:var(--text2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;font-size:12px;">
+    <button class="wfQRemove" style="background:transparent;color:var(--red);border:none;font-size:14px;cursor:pointer;padding:0 6px;">×</button>`;
+  row.querySelector('.wfQRemove').onclick = () => row.remove();
+  return row;
+}
+
+function addWatchlistQuestionRow() {
+  const c = document.getElementById('wfQuestions');
+  c.appendChild(_wfBuildRow({question:'', answer:'', confirmed:false}, c.children.length));
+}
+
+function _wfCollectQuestions() {
+  const rows = document.querySelectorAll('#wfQuestions > div');
+  const out = [];
+  rows.forEach(row => {
+    const text = row.querySelector('.wfQText').value.trim();
+    if (!text) return;
+    out.push({
+      question: text,
+      answer: row.querySelector('.wfQAnswer').value.trim(),
+      confirmed: row.querySelector('.wfQConfirmed').checked,
+    });
+  });
+  return out;
+}
+
+function closeWatchlistForm() {
+  const f = document.getElementById('watchlistAddForm');
+  f.style.display = 'none';
+  f.innerHTML = '';
+  _watchlistEditingId = null;
+  window._wfPendingSnapshot = null;
+}
+
+async function saveWatchlistForm() {
+  const status = document.getElementById('wfStatus');
+  status.textContent = '';
+  const sym = (document.getElementById('wfSymbol').value || '').trim().toUpperCase();
+  if (!sym) { status.textContent = 'Ticker required.'; return; }
+  if (!/^[A-Z0-9.\-^=]{1,15}$/.test(sym)) { status.textContent = 'Invalid ticker.'; return; }
+  const target = document.getElementById('wfTarget').value;
+  const body = {
+    symbol: sym,
+    short_name: document.getElementById('wfName').value.trim(),
+    thesis: document.getElementById('wfThesis').value.trim(),
+    target_price: target ? parseFloat(target) : null,
+    target_event: document.getElementById('wfEvent').value.trim(),
+    target_date: document.getElementById('wfDate').value || null,
+    questions: _wfCollectQuestions(),
+    notes: document.getElementById('wfNotes').value.trim(),
+  };
+  // Pending snapshot stashed by addToWatchlistFrom — only sent on create
+  // (server doesn't accept snapshot on PATCH, and editing shouldn't clobber
+  // the original "what scores looked like at add time" record).
+  const isEdit = _watchlistEditingId != null;
+  if (!isEdit && window._wfPendingSnapshot) {
+    body.snapshot = window._wfPendingSnapshot;
+  }
+  try {
+    const url = isEdit ? `/api/watchlist/${_watchlistEditingId}` : '/api/watchlist';
+    const method = isEdit ? 'PATCH' : 'POST';
+    // PATCH body excludes `symbol` (immutable on the server side).
+    if (isEdit) delete body.symbol;
+    const r = await fetch(url, {
+      method,
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      status.textContent = err.detail || `HTTP ${r.status}`;
+      return;
+    }
+    window._wfPendingSnapshot = null;
+    closeWatchlistForm();
+    await loadWatchlist();
+  } catch (e) {
+    status.textContent = 'Network error: ' + (e && e.message || e);
+  }
+}
+
+async function toggleWatchlistQuestion(id, idx) {
+  const item = _watchlistItems.find(i => i.id === id);
+  if (!item) return;
+  const questions = (item.questions || []).map(q => ({...q}));
+  if (!questions[idx]) return;
+  questions[idx].confirmed = !questions[idx].confirmed;
+  // Optimistic local update — but await the server to get the canonical
+  // ready_to_buy flag back (it depends on price too).
+  try {
+    const r = await fetch(`/api/watchlist/${id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({questions}),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const updated = await r.json();
+    const i = _watchlistItems.findIndex(x => x.id === id);
+    if (i >= 0) _watchlistItems[i] = updated;
+    renderWatchlist();
+  } catch (e) {
+    alert('Failed to save: ' + e);
+  }
+}
+
+async function setWatchlistStatus(id, status) {
+  try {
+    const r = await fetch(`/api/watchlist/${id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({status}),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    await loadWatchlist();
+  } catch (e) {
+    alert('Failed to update: ' + e);
+  }
+}
+
+async function deleteWatchlistItem(id) {
+  const item = _watchlistItems.find(i => i.id === id);
+  if (!confirm(`Remove ${item ? item.symbol : 'this item'} from your watchlist?`)) return;
+  try {
+    const r = await fetch(`/api/watchlist/${id}`, {method: 'DELETE'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    await loadWatchlist();
+  } catch (e) {
+    alert('Failed to delete: ' + e);
+  }
+}
+
+function lookupWatchlistItem(symbol) {
+  switchTab('lookup');
+  const input = document.getElementById('lookupInput');
+  input.value = symbol;
+  doLookup();
+}
+
+// Called from the Stock Lookup result + table detail panel "Add to Watchlist"
+// buttons. Pre-fills the form with name + a snapshot of current scores so
+// thesis drift is observable on revisit.
+function addToWatchlistFrom(stock) {
+  switchTab('watchlist');
+  const snapshot = {
+    price_at_add: stock.price,
+    value_score: stock.value_score,
+    quality_score: stock.quality_score,
+    f_score: stock.piotroski_f_score,
+    added_date: new Date().toISOString().slice(0,10),
+  };
+  openWatchlistAddForm({
+    symbol: stock.symbol,
+    short_name: stock.short_name || '',
+    thesis: '',
+    questions: WATCHLIST_DEFAULT_QUESTIONS.map(q => ({question:q, answer:'', confirmed:false})),
+  });
+  // Stash snapshot on the form so saveWatchlistForm picks it up.
+  setTimeout(() => { window._wfPendingSnapshot = snapshot; }, 0);
+}
+
+// Stock Lookup ──────────
 // Allowed ticker chars — must match server's _SYMBOL_RE. Anything else
 // is stripped client-side so we don't send junk that the server will
 // reject with 400, AND so the symbol can't break out of the URL path.
@@ -2296,6 +2791,11 @@ function renderLookupResult(s) {
   html += `<div style="text-align:right;">`;
   html += `<div style="font-size:24px;font-weight:700;">$${fmt(s.price,2)}</div>`;
   html += `<div style="color:var(--text2);font-size:12px;">Mkt Cap: ${fmtCap(s.market_cap)} | Down ${drop}% from 52W high</div>`;
+  // Stash so the button's onclick can reach the full stock object
+  // (snapshot needs numeric scores, not just the symbol).
+  window._stockBySym = window._stockBySym || {};
+  window._stockBySym[s.symbol] = s;
+  html += `<button class="btn btn-outline" onclick="addToWatchlistFrom(window._stockBySym['${lkSym}'])" style="margin-top:8px;font-size:11px;padding:5px 12px;">+ Watchlist</button>`;
   html += `</div></div>`;
 
   // Score cards
