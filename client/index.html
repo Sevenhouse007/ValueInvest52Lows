@@ -2371,18 +2371,23 @@ function renderWatchlistCard(i) {
     ? `<span style="background:rgba(239,68,68,0.2);color:var(--red);padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;">REJECTED</span>`
     : `<span style="background:rgba(148,163,184,0.15);color:var(--text2);padding:3px 10px;border-radius:12px;font-size:11px;">WATCHING</span>`;
 
-  // Price block
+  // Price block — surfaces both the live price and the buy trigger
+  // ("Buy ≤ $X") together with the % drop still needed, so the user
+  // can decide at a glance whether to act without expanding the card.
   const cur = i.current_price;
   const tgt = i.target_price;
   let priceBlock = '';
   if (cur != null && tgt != null) {
-    const diff = ((cur - tgt) / tgt) * 100;
+    const diffPct = ((cur - tgt) / tgt) * 100;
     const atOrBelow = cur <= tgt;
-    const color = atOrBelow ? 'var(--green)' : 'var(--text2)';
-    const arrow = atOrBelow ? '✓ at target' : `${diff >= 0 ? '+' : ''}${diff.toFixed(1)}% above target`;
+    const buyLineColor = atOrBelow ? 'var(--green)' : 'var(--amber)';
+    const buyLineText = atOrBelow
+      ? `✓ at buy zone — Buy ≤ $${fmt(tgt,2)}`
+      : `Buy ≤ $${fmt(tgt,2)} · need −${diffPct.toFixed(1)}%`;
     priceBlock = `<div style="text-align:right;">
-      <div style="font-size:20px;font-weight:700;">$${fmt(cur,2)}</div>
-      <div style="font-size:11px;color:var(--text2);">target $${fmt(tgt,2)} · <span style="color:${color};">${arrow}</span></div>
+      <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;">Current</div>
+      <div style="font-size:20px;font-weight:700;line-height:1.1;">$${fmt(cur,2)}</div>
+      <div style="font-size:12px;color:${buyLineColor};margin-top:3px;font-weight:600;">${buyLineText}</div>
     </div>`;
   } else if (cur != null) {
     priceBlock = `<div style="text-align:right;">
