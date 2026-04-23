@@ -2335,12 +2335,30 @@ function renderWatchlist() {
   c.innerHTML = html;
 }
 
+// Per-card expanded state. Map id -> bool (explicit user choice).
+// Absent => fall back to default: READY-TO-BUY auto-expands so the
+// checklist is right there to act on; everything else stays collapsed
+// to keep the list scannable when there are many items.
+window._watchlistExpanded = window._watchlistExpanded || new Map();
+function toggleWatchlistCard(id, defaultOpen) {
+  const cur = window._watchlistExpanded.has(id)
+    ? window._watchlistExpanded.get(id)
+    : !!defaultOpen;
+  window._watchlistExpanded.set(id, !cur);
+  renderWatchlist();
+}
+
 function renderWatchlistCard(i) {
   const sym = escapeHtml(i.symbol);
   const name = escapeHtml(i.short_name || '');
   const ready = i.ready_to_buy;
   const isBought = i.status === 'bought';
   const isRejected = i.status === 'rejected';
+  const defaultOpen = !!ready;
+  const expanded = window._watchlistExpanded.has(i.id)
+    ? window._watchlistExpanded.get(i.id)
+    : defaultOpen;
+  const chevron = expanded ? '▾' : '▸';
   const borderColor = ready ? 'var(--green)'
                     : isBought ? 'rgba(45,212,191,0.5)'
                     : isRejected ? 'rgba(239,68,68,0.4)'
@@ -2450,23 +2468,43 @@ function renderWatchlistCard(i) {
     <button onclick="deleteWatchlistItem(${i.id})" style="background:transparent;color:var(--red);border:1px solid rgba(239,68,68,0.4);border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;margin-left:auto;">Delete</button>
   </div>`;
 
+  // Compact summary shown only when collapsed — gives the user enough
+  // signal to decide whether to expand without showing the full body.
+  let collapsedSummary = '';
+  if (!expanded) {
+    const bits = [];
+    if (questions.length > 0) {
+      bits.push(`<span>DD <strong>${confirmedCount}/${questions.length}</strong></span>`);
+    }
+    if (i.target_event) {
+      bits.push(`<span>📅 ${escapeHtml(i.target_event)}</span>`);
+    }
+    if (bits.length) {
+      collapsedSummary = `<div style="margin-top:8px;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text2);">${bits.join('')}</div>`;
+    }
+  }
+
   return `
     <div style="background:var(--surface);border:2px solid ${borderColor};border-radius:var(--radius);padding:16px 18px;margin-bottom:14px;">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+      <div onclick="toggleWatchlistCard(${i.id}, ${defaultOpen})" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;cursor:pointer;user-select:none;" title="${expanded ? 'Click to collapse' : 'Click to expand'}">
         <div style="flex:1;min-width:0;">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <span style="color:var(--text2);font-size:13px;width:14px;display:inline-block;">${chevron}</span>
             <h3 style="font-size:17px;margin:0;">${sym}${name ? ' — ' + name : ''}</h3>
             ${ribbonHtml}
           </div>
         </div>
         ${priceBlock}
       </div>
-      ${catalystHtml}
-      ${thesisHtml}
-      ${snapHtml}
-      ${questionsHtml}
-      ${notesHtml}
-      ${actionsHtml}
+      ${collapsedSummary}
+      ${expanded ? `
+        ${catalystHtml}
+        ${thesisHtml}
+        ${snapHtml}
+        ${questionsHtml}
+        ${notesHtml}
+        ${actionsHtml}
+      ` : ''}
     </div>`;
 }
 
