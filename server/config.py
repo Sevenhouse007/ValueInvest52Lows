@@ -71,6 +71,15 @@ SMTP_PASS = os.getenv("SMTP_PASS", "")
 NOTIFY_FROM = os.getenv("NOTIFY_FROM", "")
 NOTIFY_TO = os.getenv("NOTIFY_TO", "")
 
+# ntfy.sh push notifications for watchlist alerts (price hit + catalyst).
+# The topic is effectively a shared secret — anyone subscribed receives
+# the alerts, so it must be unguessable. Override via env in production.
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "sasfaw-watch-Vq2qQSOuQcxj")
+NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
+# How close to target_date the catalyst reminders fire. Day-of (0) is
+# always sent; the second value is "T-N days" (e.g. day-before).
+WATCHLIST_CATALYST_LEAD_DAYS = [1, 0]
+
 # API settings key (set to protect /api/settings endpoint)
 SETTINGS_API_KEY = os.getenv("SETTINGS_API_KEY", "")
 

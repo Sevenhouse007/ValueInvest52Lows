@@ -165,6 +165,19 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status)")
 
+        # Dedup table for ntfy alerts. alert_key is the natural key the
+        # alert checker constructs (e.g. "price_hit:LULU:130.00" or
+        # "catalyst:LULU:2026-06-05:T-1") — uniqueness is what guarantees
+        # we send each event exactly once.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS watchlist_alerts (
+                alert_key TEXT PRIMARY KEY,
+                watchlist_id INTEGER,
+                kind TEXT NOT NULL,
+                sent_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
 
 def save_scan(result: ScanResult):
     """Persist a scan result, replacing any existing data for that date."""
@@ -732,3 +745,36 @@ def delete_watchlist_item(item_id: int) -> bool:
     with get_db() as conn:
         cur = conn.execute("DELETE FROM watchlist WHERE id = ?", (item_id,))
         return cur.rowcount > 0
+
+
+# ── Watchlist alert dedup ────────────────────────────────────────────
+# alert_key uniqueness guarantees once-and-only-once delivery per event.
+
+def alert_already_sent(alert_key: str) -> bool:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM watchlist_alerts WHERE alert_key = ?", (alert_key,)
+        ).fetchone()
+        return row is not None
+
+
+def record_alert_sent(alert_key: str, watchlist_id: int, kind: str) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO watchlist_alerts (alert_key, watchlist_id, kind) "
+            "VALUES (?, ?, ?)",
+            (alert_key, watchlist_id, kind),
+        )
+
+
+def reset_price_alert(symbol: str, target_price: float) -> int:
+    """Clear the price-hit dedup row when price has risen back ≥3% above
+    target. Lets the alert re-fire on the next dip — prevents one whippy
+    intraday wiggle from silencing the alert forever."""
+    key_prefix = f"price_hit:{symbol}:"
+    with get_db() as conn:
+        cur = conn.execute(
+            "DELETE FROM watchlist_alerts WHERE alert_key LIKE ? AND kind = 'price_hit'",
+            (key_prefix + "%",),
+        )
+        return cur.rowcount

@@ -7,8 +7,8 @@ import logging
 from typing import Optional
 
 from server.config import (
-    NOTIFY_ENABLED, NOTIFY_FROM, NOTIFY_TO, NOTIFY_TOP_N,
-    SLACK_WEBHOOK_URL, SMTP_HOST, SMTP_PASS, SMTP_PORT, SMTP_USER,
+    NOTIFY_ENABLED, NOTIFY_FROM, NOTIFY_TO, NOTIFY_TOP_N, NTFY_SERVER,
+    NTFY_TOPIC, SLACK_WEBHOOK_URL, SMTP_HOST, SMTP_PASS, SMTP_PORT, SMTP_USER,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,49 @@ def _send_email(subject: str, body: str):
         logger.info(f"Daily digest email sent to {NOTIFY_TO}")
     except Exception as e:
         logger.error(f"Failed to send email: {e}")
+
+
+def send_ntfy(title: str, message: str, priority: int = 4, tags: Optional[list] = None,
+              click_url: Optional[str] = None) -> bool:
+    """Send a push notification via ntfy.sh.
+
+    Returns True on HTTP 2xx, False otherwise. Never raises — caller should
+    treat False as "delivery failed, may retry next run". Priority 4 = high
+    (banner + sound on iOS); 5 = max (bypasses silent mode).
+    """
+    if not NTFY_TOPIC:
+        logger.warning("NTFY_TOPIC unset — skipping push")
+        return False
+    try:
+        import urllib.request
+
+        url = f"{NTFY_SERVER.rstrip('/')}/{NTFY_TOPIC}"
+        # Headers must be ASCII — title/tags get encoded; the body carries
+        # the (potentially unicode) message text.
+        headers = {
+            "Title": title.encode("ascii", "replace").decode(),
+            "Priority": str(priority),
+        }
+        if tags:
+            headers["Tags"] = ",".join(tags)
+        if click_url:
+            headers["Click"] = click_url
+        req = urllib.request.Request(
+            url,
+            data=message.encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            ok = 200 <= r.status < 300
+            if ok:
+                logger.info(f"ntfy push sent: {title}")
+            else:
+                logger.warning(f"ntfy returned {r.status}")
+            return ok
+    except Exception as e:
+        logger.error(f"ntfy push failed: {e}")
+        return False
 
 
 def _send_slack(top: list, scan_date: str):

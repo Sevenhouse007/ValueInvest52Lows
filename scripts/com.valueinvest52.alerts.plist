@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd job: run the watchlist alert checker daily at 9am Pacific.
+
+  Install (one-time):
+    cp scripts/com.valueinvest52.alerts.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.valueinvest52.alerts.plist
+
+  Uninstall:
+    launchctl unload -w ~/Library/LaunchAgents/com.valueinvest52.alerts.plist
+    rm ~/Library/LaunchAgents/com.valueinvest52.alerts.plist
+
+  Trigger manually (sanity check):
+    launchctl start com.valueinvest52.alerts
+    tail -f /tmp/valueinvest52-alerts.log
+
+  Note: launchd time is interpreted in the user's local TZ (whatever the
+  Mac's clock is set to). If you're in PT, this fires at 9:00 PT.
+  RunAtLoad=false keeps the job from spamming alerts the moment you
+  install it; first real run is the next 9am.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.valueinvest52.alerts</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/sasfaw/Projects/ValueInvest52Lows/.venv/bin/python</string>
+        <string>-m</string>
+        <string>server.check_watchlist_alerts</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/sasfaw/Projects/ValueInvest52Lows</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/valueinvest52-alerts.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/valueinvest52-alerts.log</string>
+</dict>
+</plist>
