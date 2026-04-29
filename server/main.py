@@ -823,10 +823,12 @@ def _enrich_watchlist_item(item: dict, latest_prices: dict) -> dict:
 def _fetch_latest_prices(symbols: list[str]) -> dict[str, float]:
     """Read latest prices from symbol_latest_price (maintained by scan/fill).
 
-    For symbols not in that table — typically watchlist items the scanner
-    hasn't seen because they aren't at 52W lows — fall back to a quick
-    yfinance fast_info call. Limited to the watchlist size (≤ a few dozen)
-    so per-request latency stays reasonable.
+    For symbols not in that table — typically watchlist or portfolio items
+    the scanner hasn't seen because they aren't at 52W lows — fall back to
+    a single batched yfinance call (yf.Tickers) and persist the results
+    via upsert_latest_price so subsequent reads stay fast. Skipping the
+    persistence + batching here is what made bulk endpoints (16+ symbols)
+    time out behind Render's 30s proxy.
     """
     from server.database import get_db
     out: dict[str, float] = {}
@@ -841,18 +843,31 @@ def _fetch_latest_prices(symbols: list[str]) -> dict[str, float]:
         for r in rows:
             out[r["symbol"]] = r["price"]
     missing = [s for s in symbols if s not in out]
-    if missing:
-        # Fall back to yfinance fast_info — a single regular_market_price
-        # lookup, no full quoteSummary roundtrip.
-        import yfinance as yf
+    if not missing:
+        return out
+
+    # Single batched call instead of N sequential fast_info hits. yf.Tickers
+    # accepts a space-separated string and shares an HTTP session across
+    # tickers, so 16 symbols take roughly the same wall-clock as 1.
+    import yfinance as yf
+    try:
+        bag = yf.Tickers(" ".join(missing))
         for sym in missing:
             try:
-                fi = yf.Ticker(sym).fast_info
+                fi = bag.tickers[sym].fast_info
                 price = float(fi.get("last_price") or fi.get("regular_market_price") or 0) or None
                 if price:
                     out[sym] = price
+                    # Persist so the next request reads from local SQL,
+                    # not yfinance — the daily scan also writes here.
+                    try:
+                        upsert_latest_price(sym, price)
+                    except Exception as e:
+                        logger.debug(f"upsert_latest_price({sym}) failed: {e}")
             except Exception as e:
                 logger.debug(f"fast_info fallback failed for {sym}: {e}")
+    except Exception as e:
+        logger.warning(f"batch yf.Tickers fetch failed: {e}")
     return out
 
 
