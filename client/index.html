@@ -2381,22 +2381,48 @@ function renderWatchlistCard(i) {
   const ready = i.ready_to_buy;
   const isBought = i.status === 'bought';
   const isRejected = i.status === 'rejected';
-  const defaultOpen = !!ready;
+  // Flag set on the snapshot when post-add data confirms or invalidates the
+  // thesis. 'red' = kill switch tripped (stand down), 'yellow' = warning sign
+  // detected (verify before entry), 'green-confirmed' = thesis confirmed by
+  // fresh data. Flag overrides the ready/watching ribbon when red so a user
+  // glancing at the list never sees a green "READY TO BUY" badge on a card
+  // whose thesis is broken.
+  const flag = (i.snapshot && i.snapshot.flag) || null;
+  const defaultOpen = !!ready || flag === 'red' || flag === 'yellow';
   const expanded = window._watchlistExpanded.has(i.id)
     ? window._watchlistExpanded.get(i.id)
     : defaultOpen;
   const chevron = expanded ? '▾' : '▸';
-  const borderColor = ready ? 'var(--green)'
+  const borderColor = flag === 'red' ? 'var(--red)'
+                    : flag === 'yellow' ? 'var(--amber)'
+                    : ready ? 'var(--green)'
                     : isBought ? 'rgba(45,212,191,0.5)'
                     : isRejected ? 'rgba(239,68,68,0.4)'
                     : 'var(--border)';
-  const ribbonHtml = ready
+
+  // Flag ribbon (only when set). Renders alongside the status ribbon below.
+  const flagRibbonHtml =
+    flag === 'red'
+      ? `<span style="background:var(--red);color:#fff;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;">🚨 STAND DOWN</span>`
+      : flag === 'yellow'
+      ? `<span style="background:var(--amber);color:#3a2400;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;">⚠️ YELLOW FLAG</span>`
+      : flag === 'green-confirmed'
+      ? `<span style="background:var(--green);color:#062;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;">✅ THESIS CONFIRMED</span>`
+      : '';
+
+  // When red, suppress "READY TO BUY" — the kill switch overrides price hit.
+  const statusRibbonHtml = (flag === 'red')
+    ? ''
+    : ready
     ? `<span style="background:var(--green);color:#062;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;">READY TO BUY</span>`
     : isBought
     ? `<span style="background:rgba(45,212,191,0.2);color:var(--green);padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;">BOUGHT</span>`
     : isRejected
     ? `<span style="background:rgba(239,68,68,0.2);color:var(--red);padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;">REJECTED</span>`
     : `<span style="background:rgba(148,163,184,0.15);color:var(--text2);padding:3px 10px;border-radius:12px;font-size:11px;">WATCHING</span>`;
+  const ribbonHtml = flagRibbonHtml
+    ? `${flagRibbonHtml}${statusRibbonHtml ? '<span style="margin-left:6px;display:inline-block;">' + statusRibbonHtml + '</span>' : ''}`
+    : statusRibbonHtml;
 
   // Price block — surfaces both the live price and the buy trigger
   // ("Buy ≤ $X") together with the % drop still needed, so the user
