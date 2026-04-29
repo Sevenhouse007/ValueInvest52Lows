@@ -820,15 +820,16 @@ def _enrich_watchlist_item(item: dict, latest_prices: dict) -> dict:
     return item
 
 
-def _fetch_latest_prices(symbols: list[str]) -> dict[str, float]:
+async def _fetch_latest_prices(symbols: list[str]) -> dict[str, float]:
     """Read latest prices from symbol_latest_price (maintained by scan/fill).
 
     For symbols not in that table — typically watchlist or portfolio items
     the scanner hasn't seen because they aren't at 52W lows — fall back to
-    a single batched yfinance call (yf.Tickers) and persist the results
-    via upsert_latest_price so subsequent reads stay fast. Skipping the
-    persistence + batching here is what made bulk endpoints (16+ symbols)
-    time out behind Render's 30s proxy.
+    parallel `YahooClient.fetch_quote_summary` calls (the same path the
+    daily scan and `/api/lookup` use, which is known to work on Render
+    while yfinance fast_info silently fails there). Successful lookups
+    are persisted via upsert_latest_price so the next request reads from
+    SQL instead of paying the network cost again.
     """
     from server.database import get_db
     out: dict[str, float] = {}
@@ -846,28 +847,41 @@ def _fetch_latest_prices(symbols: list[str]) -> dict[str, float]:
     if not missing:
         return out
 
-    # Single batched call instead of N sequential fast_info hits. yf.Tickers
-    # accepts a space-separated string and shares an HTTP session across
-    # tickers, so 16 symbols take roughly the same wall-clock as 1.
-    import yfinance as yf
-    try:
-        bag = yf.Tickers(" ".join(missing))
-        for sym in missing:
+    # Use the same Yahoo HTTP client the daily scan uses — fast_info via
+    # the yfinance library mysteriously fails on Render's egress while
+    # the direct quoteSummary endpoint works fine. Parallelize so 16
+    # symbols cost roughly what 1 does, capped by the client's own
+    # MAX_CONCURRENT_REQUESTS semaphore.
+    global _yahoo_client
+    if _yahoo_client is None:
+        _yahoo_client = YahooClient()
+
+    async def _one(sym: str) -> tuple[str, Optional[float]]:
+        try:
+            data = await _yahoo_client.fetch_quote_summary(sym)
+            if not data:
+                return sym, None
+            # quoteSummary returns price under either summaryDetail.regularMarketPrice
+            # or price.regularMarketPrice — try both, mirroring the pipeline parser.
+            sd = data.get("summaryDetail", {}) or {}
+            pr = data.get("price", {}) or {}
+            raw = (sd.get("regularMarketPrice") or pr.get("regularMarketPrice"))
+            # Yahoo wraps numbers as {"raw": x, "fmt": "..."}; unwrap if needed.
+            if isinstance(raw, dict):
+                raw = raw.get("raw")
+            return sym, (float(raw) if raw else None)
+        except Exception as e:
+            logger.debug(f"price fallback failed for {sym}: {e}")
+            return sym, None
+
+    results = await asyncio.gather(*(_one(s) for s in missing))
+    for sym, price in results:
+        if price:
+            out[sym] = price
             try:
-                fi = bag.tickers[sym].fast_info
-                price = float(fi.get("last_price") or fi.get("regular_market_price") or 0) or None
-                if price:
-                    out[sym] = price
-                    # Persist so the next request reads from local SQL,
-                    # not yfinance — the daily scan also writes here.
-                    try:
-                        upsert_latest_price(sym, price)
-                    except Exception as e:
-                        logger.debug(f"upsert_latest_price({sym}) failed: {e}")
+                upsert_latest_price(sym, price)
             except Exception as e:
-                logger.debug(f"fast_info fallback failed for {sym}: {e}")
-    except Exception as e:
-        logger.warning(f"batch yf.Tickers fetch failed: {e}")
+                logger.debug(f"upsert_latest_price({sym}) failed: {e}")
     return out
 
 
@@ -875,7 +889,7 @@ def _fetch_latest_prices(symbols: list[str]) -> dict[str, float]:
 async def watchlist_list():
     """Return all watchlist items, enriched with current price + ready flag."""
     items = list_watchlist()
-    prices = _fetch_latest_prices([i["symbol"] for i in items])
+    prices = await _fetch_latest_prices([i["symbol"] for i in items])
     return {"items": [_enrich_watchlist_item(i, prices) for i in items]}
 
 
@@ -902,7 +916,7 @@ async def watchlist_create(body: WatchlistCreate):
     except Exception as e:
         logger.exception("watchlist create failed")
         raise HTTPException(500, f"Failed to create watchlist item: {e}")
-    prices = _fetch_latest_prices([symbol])
+    prices = await _fetch_latest_prices([symbol])
     return _enrich_watchlist_item(item, prices)
 
 
@@ -922,7 +936,7 @@ async def watchlist_update(item_id: int, body: WatchlistUpdate):
     item = update_watchlist_item(item_id, fields)
     if not item:
         raise HTTPException(404, f"Watchlist item {item_id} not found")
-    prices = _fetch_latest_prices([item["symbol"]])
+    prices = await _fetch_latest_prices([item["symbol"]])
     return _enrich_watchlist_item(item, prices)
 
 
@@ -976,7 +990,7 @@ async def portfolio_list():
     items = list_portfolio()
     # Pull live prices for everything except CASH, which is always $1.
     syms = [i["symbol"] for i in items if i["symbol"] != "CASH"]
-    prices = _fetch_latest_prices(syms)
+    prices = await _fetch_latest_prices(syms)
     enriched = [_enrich_portfolio_item(i, prices) for i in items]
 
     # Portfolio-level totals. We tolerate missing market_value (price
@@ -1024,7 +1038,7 @@ async def portfolio_create(body: PortfolioCreate):
     except Exception as e:
         logger.exception("portfolio create failed")
         raise HTTPException(500, f"Failed to create portfolio item: {e}")
-    prices = _fetch_latest_prices([symbol]) if symbol != "CASH" else {}
+    prices = await _fetch_latest_prices([symbol]) if symbol != "CASH" else {}
     return _enrich_portfolio_item(item, prices)
 
 
@@ -1038,7 +1052,7 @@ async def portfolio_update(item_id: int, body: PortfolioUpdate):
     if not item:
         raise HTTPException(404, f"Portfolio item {item_id} not found")
     sym = item["symbol"]
-    prices = _fetch_latest_prices([sym]) if sym != "CASH" else {}
+    prices = await _fetch_latest_prices([sym]) if sym != "CASH" else {}
     return _enrich_portfolio_item(item, prices)
 
 
