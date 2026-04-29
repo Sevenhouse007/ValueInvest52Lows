@@ -80,6 +80,13 @@ NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
 # always sent; the second value is "T-N days" (e.g. day-before).
 WATCHLIST_CATALYST_LEAD_DAYS = [1, 0]
 
+# Watchlist alert delivery channel: "imessage" (free, real SMS via Mac
+# Messages.app + iPhone SMS forwarding), "ntfy" (push, requires app),
+# or "both". iMessage requires Mac awake at fire time + iMessage signed
+# in + recipient phone's "Text Message Forwarding" enabled for this Mac.
+WATCHLIST_ALERT_CHANNEL = os.getenv("WATCHLIST_ALERT_CHANNEL", "imessage")
+WATCHLIST_ALERT_PHONE = os.getenv("WATCHLIST_ALERT_PHONE", "+13104255347")
+
 # API settings key (set to protect /api/settings endpoint)
 SETTINGS_API_KEY = os.getenv("SETTINGS_API_KEY", "")
 

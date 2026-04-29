@@ -87,6 +87,52 @@ def _send_email(subject: str, body: str):
         logger.error(f"Failed to send email: {e}")
 
 
+def send_imessage(phone: str, body: str) -> bool:
+    """Send a text via macOS Messages.app to `phone` (E.164, e.g. +13104255347).
+
+    Routes as iMessage if the recipient is on iMessage, otherwise as a
+    real SMS through the iPhone paired via Text Message Forwarding.
+    Requires this Mac to be awake and signed into iMessage.
+
+    Returns True on apparent success (osascript exit 0). Never raises —
+    delivery failures (Mac asleep, iMessage offline) get logged so the
+    next scheduled run can re-attempt.
+    """
+    import subprocess
+
+    # AppleScript-quote the body: escape backslashes and double-quotes.
+    safe_body = body.replace("\\", "\\\\").replace('"', '\\"')
+    script = f'''
+    tell application "Messages"
+        set targetService to 1st service whose service type = iMessage
+        try
+            set targetBuddy to buddy "{phone}" of targetService
+            send "{safe_body}" to targetBuddy
+        on error
+            -- Fallback: SMS via iPhone forwarding (service type "SMS")
+            set smsService to 1st account whose service type = SMS
+            send "{safe_body}" to participant "{phone}" of smsService
+        end try
+    end tell
+    '''
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            logger.info(f"iMessage sent to {phone}")
+            return True
+        logger.error(f"osascript failed (exit {result.returncode}): {result.stderr.strip()}")
+        return False
+    except subprocess.TimeoutExpired:
+        logger.error("osascript timed out (Messages.app unresponsive)")
+        return False
+    except Exception as e:
+        logger.error(f"iMessage send failed: {e}")
+        return False
+
+
 def send_ntfy(title: str, message: str, priority: int = 4, tags: Optional[list] = None,
               click_url: Optional[str] = None) -> bool:
     """Send a push notification via ntfy.sh.

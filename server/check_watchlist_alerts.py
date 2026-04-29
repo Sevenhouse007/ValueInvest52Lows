@@ -21,10 +21,13 @@ import argparse
 import logging
 import sys
 from datetime import date, datetime, timedelta
+from typing import Optional
 
 from server import database as db
-from server.config import WATCHLIST_CATALYST_LEAD_DAYS
-from server.notifications import send_ntfy
+from server.config import (
+    WATCHLIST_ALERT_CHANNEL, WATCHLIST_ALERT_PHONE, WATCHLIST_CATALYST_LEAD_DAYS,
+)
+from server.notifications import send_imessage, send_ntfy
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +42,21 @@ logger = logging.getLogger(__name__)
 REBOUND_FRACTION = 0.03
 
 DASHBOARD_URL = "http://127.0.0.1:8000"
+
+
+def _deliver(title: str, message: str, tags: Optional[list] = None) -> bool:
+    """Route alert through the configured channel(s). Returns True if at
+    least one channel succeeded."""
+    # SMS body = title + message (one combined text), kept short.
+    sms_body = f"{title}\n\n{message}"
+    sent = False
+    if WATCHLIST_ALERT_CHANNEL in ("imessage", "both"):
+        if send_imessage(WATCHLIST_ALERT_PHONE, sms_body):
+            sent = True
+    if WATCHLIST_ALERT_CHANNEL in ("ntfy", "both"):
+        if send_ntfy(title, message, priority=4, tags=tags, click_url=DASHBOARD_URL):
+            sent = True
+    return sent
 
 
 def _fetch_current_price(symbol: str) -> float | None:
@@ -96,7 +114,7 @@ def _check_price(item: dict, dry_run: bool) -> int:
     if dry_run:
         logger.info(f"[dry-run] would send: {title}")
         return 1
-    if send_ntfy(title, msg, priority=4, tags=["chart_with_upwards_trend"], click_url=DASHBOARD_URL):
+    if _deliver(title, msg, tags=["chart_with_upwards_trend"]):
         db.record_alert_sent(key, item["id"], "price_hit")
         return 1
     return 0
@@ -133,7 +151,7 @@ def _check_catalyst(item: dict, today: date, dry_run: bool) -> int:
             logger.info(f"[dry-run] would send: {title}")
             sent += 1
             continue
-        if send_ntfy(title, msg, priority=4, tags=["calendar"], click_url=DASHBOARD_URL):
+        if _deliver(title, msg, tags=["calendar"]):
             db.record_alert_sent(key, item["id"], "catalyst")
             sent += 1
     return sent
@@ -162,14 +180,12 @@ def main():
     db.init_db()  # ensure tables exist (first-run safety)
 
     if args.test:
-        ok = send_ntfy(
-            "ValueInvest52Lows test ping",
-            "If you're reading this, ntfy is wired up correctly. 🎉",
-            priority=4,
+        ok = _deliver(
+            "ValueInvest52Lows test",
+            "If you got this as a text, alerts are wired correctly.",
             tags=["white_check_mark"],
-            click_url=DASHBOARD_URL,
         )
-        print("sent" if ok else "failed")
+        print(f"channel={WATCHLIST_ALERT_CHANNEL} -> {'sent' if ok else 'FAILED'}")
         sys.exit(0)
 
     try:
