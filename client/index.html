@@ -2348,7 +2348,17 @@ function renderWatchlist() {
     return;
   }
 
-  const watching = items.filter(i => i.status === 'watching');
+  // Sort active cards by flag priority so the things you need to look at
+  // first surface first: green-confirmed (act now) → yellow (verify) →
+  // red (stand down) → unflagged (still watching). Within each bucket,
+  // preserve the API's incoming order (watching first, newest by added_at).
+  const FLAG_RANK = { 'green-confirmed': 0, 'yellow': 1, 'red': 2 };
+  const flagOf = (it) => (it.snapshot && it.snapshot.flag) || null;
+  const watching = items
+    .filter(i => i.status === 'watching')
+    .map((i, idx) => ({ i, idx, rank: FLAG_RANK[flagOf(i)] ?? 3 }))
+    .sort((a, b) => a.rank - b.rank || a.idx - b.idx)
+    .map(x => x.i);
   const archived = items.filter(i => i.status !== 'watching');
   let html = '';
   watching.forEach(i => { html += renderWatchlistCard(i); });
