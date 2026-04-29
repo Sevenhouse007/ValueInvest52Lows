@@ -165,6 +165,25 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status)")
 
+        # Portfolio — current holdings the user actually owns. Cash is stored
+        # as a synthetic row with symbol='CASH', shares=$amount, cost_basis=1.0
+        # so the same CRUD path serves positions and cash without a side table.
+        # Market value/P&L are computed at read time from latest prices, not
+        # persisted, so they never drift from the live quote.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS portfolio (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL UNIQUE,
+                short_name TEXT DEFAULT '',
+                shares REAL NOT NULL,
+                cost_basis REAL NOT NULL,
+                notes TEXT DEFAULT '',
+                snapshot_json TEXT DEFAULT '{}',
+                added_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
         # Dedup table for ntfy alerts. alert_key is the natural key the
         # alert checker constructs (e.g. "price_hit:LULU:130.00" or
         # "catalyst:LULU:2026-06-05:T-1") — uniqueness is what guarantees
@@ -778,3 +797,105 @@ def reset_price_alert(symbol: str, target_price: float) -> int:
             (key_prefix + "%",),
         )
         return cur.rowcount
+
+
+# ─────────────────────── Portfolio (Current Holdings) ───────────────────────
+# Same CRUD shape as watchlist. Cash is a synthetic row (symbol='CASH',
+# shares=$, cost_basis=1.0). API layer enriches each row with current price,
+# market value, and P&L; we never persist computed fields so they stay
+# consistent with whatever the latest quote is.
+
+def _portfolio_row_to_dict(r: sqlite3.Row) -> dict:
+    return {
+        "id":         r["id"],
+        "symbol":     r["symbol"],
+        "short_name": r["short_name"] or "",
+        "shares":     r["shares"],
+        "cost_basis": r["cost_basis"],
+        "notes":      r["notes"] or "",
+        "snapshot":   json.loads(r["snapshot_json"] or "{}"),
+        "added_at":   r["added_at"],
+        "updated_at": r["updated_at"],
+    }
+
+
+def list_portfolio() -> list[dict]:
+    """All portfolio rows. CASH first, then positions by largest position size."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM portfolio ORDER BY "
+            "CASE WHEN symbol = 'CASH' THEN 0 ELSE 1 END, "
+            "(shares * cost_basis) DESC"
+        ).fetchall()
+        return [_portfolio_row_to_dict(r) for r in rows]
+
+
+def get_portfolio_item(item_id: int) -> Optional[dict]:
+    with get_db() as conn:
+        r = conn.execute("SELECT * FROM portfolio WHERE id = ?", (item_id,)).fetchone()
+        return _portfolio_row_to_dict(r) if r else None
+
+
+def get_portfolio_by_symbol(symbol: str) -> Optional[dict]:
+    with get_db() as conn:
+        r = conn.execute("SELECT * FROM portfolio WHERE symbol = ?", (symbol,)).fetchone()
+        return _portfolio_row_to_dict(r) if r else None
+
+
+def create_portfolio_item(
+    symbol: str,
+    shares: float,
+    cost_basis: float,
+    short_name: str = "",
+    notes: str = "",
+    snapshot: Optional[dict] = None,
+) -> dict:
+    """Insert a new portfolio row. Raises sqlite3.IntegrityError on duplicate symbol."""
+    with get_db() as conn:
+        cur = conn.execute(
+            """INSERT INTO portfolio
+               (symbol, short_name, shares, cost_basis, notes, snapshot_json)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                symbol,
+                short_name or "",
+                shares,
+                cost_basis,
+                notes or "",
+                json.dumps(snapshot or {}),
+            ),
+        )
+        new_id = cur.lastrowid
+    return get_portfolio_item(new_id)
+
+
+_PORTFOLIO_UPDATABLE = {"short_name", "shares", "cost_basis", "notes"}
+
+
+def update_portfolio_item(item_id: int, fields: dict) -> Optional[dict]:
+    """Partial update. Returns the updated row, or None if not found."""
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in _PORTFOLIO_UPDATABLE:
+            sets.append(f"{k} = ?")
+            vals.append(v)
+        elif k == "snapshot":
+            sets.append("snapshot_json = ?")
+            vals.append(json.dumps(v or {}))
+    if not sets:
+        return get_portfolio_item(item_id)
+    sets.append("updated_at = datetime('now')")
+    vals.append(item_id)
+    with get_db() as conn:
+        cur = conn.execute(
+            f"UPDATE portfolio SET {', '.join(sets)} WHERE id = ?", vals
+        )
+        if cur.rowcount == 0:
+            return None
+    return get_portfolio_item(item_id)
+
+
+def delete_portfolio_item(item_id: int) -> bool:
+    with get_db() as conn:
+        cur = conn.execute("DELETE FROM portfolio WHERE id = ?", (item_id,))
+        return cur.rowcount > 0

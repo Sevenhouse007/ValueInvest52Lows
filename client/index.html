@@ -269,6 +269,7 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
   <div class="tab" data-tab="backtest" onclick="switchTab('backtest')">Backtest</div>
   <div class="tab" data-tab="bounceback" onclick="switchTab('bounceback')">Bounce Back <span class="badge badge-amber" id="tabBounceCount" style="display:none;">0</span></div>
   <div class="tab" data-tab="watchlist" onclick="switchTab('watchlist')">Potential Buys <span class="badge badge-blue" id="tabWatchCount" style="display:none;">0</span></div>
+  <div class="tab" data-tab="portfolio" onclick="switchTab('portfolio')">Portfolio <span class="badge badge-blue" id="tabPortfolioCount" style="display:none;">0</span></div>
   <span id="tabDualCount" class="badge" style="display:none;margin-left:auto;background:rgba(167,139,250,.15);color:#a78bfa;font-size:11px;padding:3px 8px;align-self:center;">0 V+Q</span>
 </div>
 
@@ -431,6 +432,26 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
   <div id="watchlistAddForm" style="display:none;"></div>
   <div id="watchlistContent">
     <p style="color:var(--text2);">Loading watchlist...</p>
+  </div>
+</div>
+
+<div id="portfolioSection" style="display:none;padding:0 24px 24px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;padding:20px 0 12px;gap:16px;flex-wrap:wrap;">
+    <div>
+      <h3 style="font-size:16px;">Portfolio — Current Holdings</h3>
+      <p style="color:var(--text2);font-size:12px;margin-top:4px;">
+        Live positions with cost basis, market value, P&amp;L, and weight. Click a row to edit shares or cost basis.
+      </p>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button class="btn" onclick="openPortfolioAddForm()" style="padding:8px 16px;font-size:13px;">+ Add Position</button>
+      <button onclick="loadPortfolio()" title="Refresh prices" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;">↻ Refresh</button>
+    </div>
+  </div>
+  <div id="portfolioSummary"></div>
+  <div id="portfolioAddForm" style="display:none;"></div>
+  <div id="portfolioContent">
+    <p style="color:var(--text2);">Loading portfolio...</p>
   </div>
 </div>
 
@@ -1907,7 +1928,8 @@ function switchTab(tab) {
   const isBacktest = tab === 'backtest';
   const isBounceback = tab === 'bounceback';
   const isWatchlist = tab === 'watchlist';
-  const isSpecial = isLookup || isBacktest || isBounceback || isWatchlist;
+  const isPortfolio = tab === 'portfolio';
+  const isSpecial = isLookup || isBacktest || isBounceback || isWatchlist || isPortfolio;
   // Show/hide sections
   document.querySelector('.controls').style.display = isSpecial ? 'none' : '';
   document.querySelector('.score-legend').style.display = isSpecial ? 'none' : '';
@@ -1917,6 +1939,7 @@ function switchTab(tab) {
   document.getElementById('backtestSection').style.display = isBacktest ? 'block' : 'none';
   document.getElementById('bouncebackSection').style.display = isBounceback ? 'block' : 'none';
   document.getElementById('watchlistSection').style.display = isWatchlist ? 'block' : 'none';
+  document.getElementById('portfolioSection').style.display = isPortfolio ? 'block' : 'none';
 
   if (isBacktest) {
     loadBacktest();
@@ -1928,6 +1951,10 @@ function switchTab(tab) {
   }
   if (isWatchlist) {
     loadWatchlist();
+    return;
+  }
+  if (isPortfolio) {
+    loadPortfolio();
     return;
   }
   if (isLookup) {
@@ -3234,6 +3261,282 @@ async function saveSettings() {
 // ────────── UI helpers ──────────
 function showLoading(on) { document.getElementById('loadingOverlay').style.display = on ? 'flex' : 'none'; }
 function showEmpty() { document.getElementById('emptyState').style.display = 'block'; }
+
+// ────────── Portfolio (Current Holdings) ──────────
+// Persistent CRUD over /api/portfolio. Each row is a position with shares
+// + cost basis; the API enriches at read time with live price, market
+// value, P&L, and weight. Cash is a synthetic row (symbol='CASH', shares
+// = $ amount, cost_basis=1.0). Top-of-tab summary cards mirror the
+// brokerage-style header (NAV, Total P&L, Day Change-equivalent, Cash).
+
+let _portfolioState = { items: [], totals: null };
+
+async function loadPortfolio() {
+  const c = document.getElementById('portfolioContent');
+  const s = document.getElementById('portfolioSummary');
+  c.innerHTML = '<p style="color:var(--text2);">Loading portfolio...</p>';
+  s.innerHTML = '';
+  try {
+    const r = await fetch('/api/portfolio');
+    const data = await r.json();
+    _portfolioState = data;
+    renderPortfolio();
+  } catch (e) {
+    c.innerHTML = '<p style="color:var(--red);">Failed to load portfolio.</p>';
+  }
+}
+
+function renderPortfolio() {
+  const items = _portfolioState.items || [];
+  const totals = _portfolioState.totals || {};
+
+  // Tab badge — count real positions (excludes CASH).
+  const badge = document.getElementById('tabPortfolioCount');
+  badge.textContent = totals.positions_count || 0;
+  badge.style.display = (totals.positions_count || 0) > 0 ? '' : 'none';
+
+  renderPortfolioSummary(totals);
+
+  const c = document.getElementById('portfolioContent');
+  if (!items.length) {
+    c.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:32px;text-align:center;">
+        <h3 style="margin-bottom:8px;">No positions yet</h3>
+        <p style="color:var(--text2);">Click <strong>+ Add Position</strong> above to add holdings, or seed the portfolio via <code>scripts/add_portfolio.py</code>.</p>
+      </div>`;
+    return;
+  }
+
+  // Two groups: CASH first (sentinel row), then positions sorted by market value desc.
+  const cashRow = items.find(i => i.symbol === 'CASH');
+  const positions = items.filter(i => i.symbol !== 'CASH')
+    .sort((a, b) => (b.market_value || 0) - (a.market_value || 0));
+
+  let html = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="background:var(--surface2);text-align:left;color:var(--text2);font-weight:500;">
+            <th style="padding:10px 12px;">Asset</th>
+            <th style="padding:10px 12px;text-align:right;">Last Price</th>
+            <th style="padding:10px 12px;text-align:right;">Shares</th>
+            <th style="padding:10px 12px;text-align:right;">Avg Cost</th>
+            <th style="padding:10px 12px;text-align:right;">Market Value</th>
+            <th style="padding:10px 12px;text-align:right;">P&amp;L</th>
+            <th style="padding:10px 12px;text-align:right;">Weight</th>
+            <th style="padding:10px 12px;text-align:center;width:50px;"></th>
+          </tr>
+        </thead>
+        <tbody>`;
+
+  positions.forEach(i => { html += renderPortfolioRow(i); });
+  if (cashRow) html += renderPortfolioRow(cashRow);
+
+  html += `</tbody></table></div>`;
+  c.innerHTML = html;
+}
+
+function renderPortfolioSummary(t) {
+  const s = document.getElementById('portfolioSummary');
+  if (!t || t.nav === undefined) { s.innerHTML = ''; return; }
+  const pnlColor = (t.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+  const pnlSign = (t.pnl || 0) >= 0 ? '+' : '';
+  s.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px;">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;">
+        <div style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px;">Net Asset Value</div>
+        <div style="font-size:22px;font-weight:600;">$${fmtNum(t.nav)}</div>
+        <div style="color:var(--text2);font-size:12px;margin-top:2px;">Cost basis: $${fmtNum(t.total_cost)}</div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;">
+        <div style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px;">Total P&amp;L</div>
+        <div style="font-size:22px;font-weight:600;color:${pnlColor};">${pnlSign}$${fmtNum(Math.abs(t.pnl||0))}</div>
+        <div style="color:${pnlColor};font-size:12px;margin-top:2px;">${pnlSign}${(t.pnl_pct||0).toFixed(2)}%</div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;">
+        <div style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px;">Positions</div>
+        <div style="font-size:22px;font-weight:600;">${t.positions_count}</div>
+        <div style="color:var(--text2);font-size:12px;margin-top:2px;">Active holdings</div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;">
+        <div style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px;">Cash</div>
+        <div style="font-size:22px;font-weight:600;">$${fmtNum(t.cash || 0)}</div>
+        <div style="color:var(--text2);font-size:12px;margin-top:2px;">${t.nav > 0 ? ((t.cash||0)/t.nav*100).toFixed(1) : '0'}% of NAV</div>
+      </div>
+    </div>`;
+}
+
+function renderPortfolioRow(i) {
+  const isCash = i.symbol === 'CASH';
+  const sym = escapeHtml(i.symbol);
+  const name = escapeHtml(i.short_name || '');
+  const px = i.current_price;
+  const mv = i.market_value;
+  const pnl = i.pnl;
+  const pnlPct = i.pnl_pct;
+  const wt = i.weight_pct;
+  const pnlColor = (pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+  const pnlSign = (pnl || 0) >= 0 ? '+' : '';
+  const rowBg = isCash ? 'background:rgba(45,212,191,0.06);' : '';
+
+  const priceCell = isCash ? '—' : (px != null ? `$${fmtNum(px)}` : '—');
+  const sharesCell = isCash ? '—' : fmtShares(i.shares);
+  const costCell = isCash ? '—' : `$${fmtNum(i.cost_basis)}`;
+  const mvCell = mv != null ? `$${fmtNum(mv)}` : '—';
+  const pnlCell = isCash ? '—'
+    : (pnl != null
+        ? `<span style="color:${pnlColor};">${pnlSign}$${fmtNum(Math.abs(pnl))}</span>
+           <div style="color:${pnlColor};font-size:11px;">${pnlSign}${(pnlPct||0).toFixed(2)}%</div>`
+        : '—');
+  const wtCell = wt != null ? `${wt.toFixed(1)}%` : '—';
+
+  return `
+    <tr style="border-top:1px solid var(--border);${rowBg}">
+      <td style="padding:10px 12px;">
+        <div style="font-weight:600;">${sym}</div>
+        ${name ? `<div style="color:var(--text2);font-size:11px;">${name}</div>` : ''}
+      </td>
+      <td style="padding:10px 12px;text-align:right;">${priceCell}</td>
+      <td style="padding:10px 12px;text-align:right;">${sharesCell}</td>
+      <td style="padding:10px 12px;text-align:right;">${costCell}</td>
+      <td style="padding:10px 12px;text-align:right;font-weight:500;">${mvCell}</td>
+      <td style="padding:10px 12px;text-align:right;">${pnlCell}</td>
+      <td style="padding:10px 12px;text-align:right;">${wtCell}</td>
+      <td style="padding:10px 12px;text-align:center;">
+        <button onclick="openPortfolioEditForm(${i.id})"
+                title="Edit"
+                style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:14px;">✎</button>
+        <button onclick="deletePortfolioItem(${i.id}, '${sym}')"
+                title="Delete"
+                style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;">×</button>
+      </td>
+    </tr>`;
+}
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return '—';
+  const x = Number(n);
+  if (Math.abs(x) >= 1000) return x.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  return x.toFixed(2);
+}
+
+function fmtShares(n) {
+  if (n === null || n === undefined) return '—';
+  const x = Number(n);
+  // Whole shares as integers; fractional shares get up to 4 decimals.
+  return Number.isInteger(x) ? x.toLocaleString('en-US') : x.toFixed(4);
+}
+
+function openPortfolioAddForm() {
+  const form = document.getElementById('portfolioAddForm');
+  form.style.display = 'block';
+  form.innerHTML = portfolioFormHtml({});
+  form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function openPortfolioEditForm(id) {
+  const item = _portfolioState.items.find(i => i.id === id);
+  if (!item) return;
+  const form = document.getElementById('portfolioAddForm');
+  form.style.display = 'block';
+  form.innerHTML = portfolioFormHtml(item);
+  form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function portfolioFormHtml(item) {
+  const isEdit = !!item.id;
+  const isCash = item.symbol === 'CASH';
+  return `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:16px;">
+      <h4 style="margin-bottom:12px;">${isEdit ? 'Edit position' : 'Add position'}</h4>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;">
+        <label>Symbol
+          <input id="pfSymbol" value="${escapeHtml(item.symbol||'')}" ${isEdit ? 'disabled' : ''}
+                 placeholder="AAPL or CASH" style="width:100%;padding:8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+        </label>
+        <label>Short Name
+          <input id="pfName" value="${escapeHtml(item.short_name||'')}"
+                 style="width:100%;padding:8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+        </label>
+        <label>${isCash ? 'Cash $' : 'Shares'}
+          <input id="pfShares" type="number" step="any" value="${item.shares ?? ''}"
+                 style="width:100%;padding:8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+        </label>
+        <label>Cost Basis ${isCash ? '(set 1.0 for cash)' : '(per share)'}
+          <input id="pfCost" type="number" step="any" value="${item.cost_basis ?? ''}"
+                 style="width:100%;padding:8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+        </label>
+      </div>
+      <label style="display:block;margin-top:12px;">Notes
+        <textarea id="pfNotes" rows="2" style="width:100%;padding:8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">${escapeHtml(item.notes||'')}</textarea>
+      </label>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button class="btn" onclick="${isEdit ? `savePortfolioEdit(${item.id})` : 'savePortfolioNew()'}" style="padding:8px 16px;font-size:13px;">${isEdit ? 'Save' : 'Add'}</button>
+        <button onclick="document.getElementById('portfolioAddForm').style.display='none';"
+                style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;">Cancel</button>
+      </div>
+    </div>`;
+}
+
+async function savePortfolioNew() {
+  const symbol = document.getElementById('pfSymbol').value.trim().toUpperCase();
+  const short_name = document.getElementById('pfName').value.trim();
+  const shares = parseFloat(document.getElementById('pfShares').value);
+  const cost_basis = parseFloat(document.getElementById('pfCost').value);
+  const notes = document.getElementById('pfNotes').value.trim();
+  if (!symbol || isNaN(shares) || isNaN(cost_basis)) {
+    alert('Symbol, shares, and cost basis are required.');
+    return;
+  }
+  try {
+    const r = await fetch('/api/portfolio', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ symbol, short_name, shares, cost_basis, notes }),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      alert(`Failed: ${e.detail || r.status}`);
+      return;
+    }
+    document.getElementById('portfolioAddForm').style.display = 'none';
+    loadPortfolio();
+  } catch (e) { alert('Save failed: ' + e); }
+}
+
+async function savePortfolioEdit(id) {
+  const short_name = document.getElementById('pfName').value.trim();
+  const shares = parseFloat(document.getElementById('pfShares').value);
+  const cost_basis = parseFloat(document.getElementById('pfCost').value);
+  const notes = document.getElementById('pfNotes').value.trim();
+  if (isNaN(shares) || isNaN(cost_basis)) {
+    alert('Shares and cost basis must be numbers.');
+    return;
+  }
+  try {
+    const r = await fetch(`/api/portfolio/${id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ short_name, shares, cost_basis, notes }),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      alert(`Failed: ${e.detail || r.status}`);
+      return;
+    }
+    document.getElementById('portfolioAddForm').style.display = 'none';
+    loadPortfolio();
+  } catch (e) { alert('Save failed: ' + e); }
+}
+
+async function deletePortfolioItem(id, symbol) {
+  if (!confirm(`Delete ${symbol} from portfolio?`)) return;
+  try {
+    const r = await fetch(`/api/portfolio/${id}`, { method: 'DELETE' });
+    if (!r.ok) { alert(`Failed: ${r.status}`); return; }
+    loadPortfolio();
+  } catch (e) { alert('Delete failed: ' + e); }
+}
 </script>
 </body>
 </html>

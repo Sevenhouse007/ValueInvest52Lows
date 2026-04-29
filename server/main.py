@@ -20,12 +20,15 @@ from pydantic import BaseModel, Field, ValidationError
 from server import config
 from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HOST, PORT
 from server.database import (
-    create_watchlist_item, delete_scan, delete_watchlist_item, get_backtest_details,
-    get_backtest_summary, get_bounce_back_candidates, get_latest_good_scan, get_latest_scan,
-    get_latest_scan_averages, get_performance_rows_needing_update, get_recent_tracked_symbols,
+    create_portfolio_item, create_watchlist_item, delete_portfolio_item, delete_scan,
+    delete_watchlist_item, get_backtest_details, get_backtest_summary,
+    get_bounce_back_candidates, get_latest_good_scan, get_latest_scan,
+    get_latest_scan_averages, get_performance_rows_needing_update,
+    get_portfolio_by_symbol, get_portfolio_item, get_recent_tracked_symbols,
     get_scan_by_date, get_scan_history, get_stock_history, get_watchlist_by_symbol,
-    get_watchlist_item, init_db, list_watchlist, save_performance_tracking, save_scan,
-    update_forward_price, update_watchlist_item, upsert_latest_price,
+    get_watchlist_item, init_db, list_portfolio, list_watchlist,
+    save_performance_tracking, save_scan, update_forward_price, update_portfolio_item,
+    update_watchlist_item, upsert_latest_price,
 )
 from server.models import ScanResult, ScanSummary
 from server.pipeline import merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
@@ -131,6 +134,35 @@ class WatchlistUpdate(BaseModel):
     questions: Optional[list[WatchlistQuestion]] = Field(default=None, max_length=50)
     status: Optional[str] = Field(default=None, pattern=r"^(watching|bought|rejected)$")
     notes: Optional[str] = Field(default=None, max_length=10_000)
+    snapshot: Optional[dict] = None
+
+    model_config = {"extra": "forbid"}
+
+
+# ──────────────── PORTFOLIO SCHEMAS ────────────────
+# A portfolio row is a current holding (or the synthetic CASH row). Cost
+# basis is per-share avg; for CASH it's 1.0 and `shares` is the dollar
+# amount. Bounds are generous — leave room for share-counts up to 10M and
+# costs up to $1M/share — but reject negatives and absurd magnitudes.
+
+class PortfolioCreate(BaseModel):
+    """POST body for adding a position to the portfolio."""
+    symbol: str = Field(..., min_length=1, max_length=15)
+    short_name: str = Field(default="", max_length=200)
+    shares: float = Field(..., ge=0, le=10_000_000)
+    cost_basis: float = Field(..., ge=0, le=1_000_000)
+    notes: str = Field(default="", max_length=4000)
+    snapshot: dict = Field(default_factory=dict)
+
+    model_config = {"extra": "forbid"}
+
+
+class PortfolioUpdate(BaseModel):
+    """PATCH body — every field optional; only provided fields are written."""
+    short_name: Optional[str] = Field(default=None, max_length=200)
+    shares: Optional[float] = Field(default=None, ge=0, le=10_000_000)
+    cost_basis: Optional[float] = Field(default=None, ge=0, le=1_000_000)
+    notes: Optional[str] = Field(default=None, max_length=4000)
     snapshot: Optional[dict] = None
 
     model_config = {"extra": "forbid"}
@@ -885,6 +917,122 @@ async def watchlist_delete(item_id: int):
         raise HTTPException(400, "item_id must be positive")
     if not delete_watchlist_item(item_id):
         raise HTTPException(404, f"Watchlist item {item_id} not found")
+    return {"deleted": item_id}
+
+
+# ──────────────── PORTFOLIO ENDPOINTS ────────────────
+# CRUD over the `portfolio` table. List endpoint enriches each row with
+# current price + market value + P&L, and computes portfolio-level totals
+# (NAV, cost basis, P&L %, weights). CASH is a synthetic row treated with
+# price=1.0 so it flows through the same math without special cases above.
+
+def _enrich_portfolio_item(item: dict, latest_prices: dict) -> dict:
+    """Compute current_price, market_value, and P&L on a portfolio row."""
+    sym = item["symbol"]
+    if sym == "CASH":
+        # Cash: shares are dollars, price is always $1, no P&L.
+        item["current_price"] = 1.0
+        item["market_value"] = float(item["shares"])
+        item["total_cost"] = float(item["shares"])
+        item["pnl"] = 0.0
+        item["pnl_pct"] = 0.0
+        return item
+    cur = latest_prices.get(sym)
+    item["current_price"] = cur
+    shares = float(item["shares"])
+    cost = float(item["cost_basis"])
+    item["total_cost"] = round(shares * cost, 2)
+    if cur is None:
+        # No quote available yet — surface the row but skip the math.
+        item["market_value"] = None
+        item["pnl"] = None
+        item["pnl_pct"] = None
+    else:
+        mv = shares * cur
+        item["market_value"] = round(mv, 2)
+        item["pnl"] = round(mv - shares * cost, 2)
+        item["pnl_pct"] = round((cur / cost - 1) * 100, 2) if cost > 0 else None
+    return item
+
+
+@app.get("/api/portfolio")
+async def portfolio_list():
+    """Return all portfolio rows + totals, enriched with current prices."""
+    items = list_portfolio()
+    # Pull live prices for everything except CASH, which is always $1.
+    syms = [i["symbol"] for i in items if i["symbol"] != "CASH"]
+    prices = _fetch_latest_prices(syms)
+    enriched = [_enrich_portfolio_item(i, prices) for i in items]
+
+    # Portfolio-level totals. We tolerate missing market_value (price
+    # lookup failed) by treating it as null — the UI shows the position
+    # row but skips it from totals so weights still sum cleanly.
+    nav = sum(i["market_value"] for i in enriched if i.get("market_value") is not None)
+    total_cost = sum(i["total_cost"] for i in enriched if i.get("total_cost") is not None)
+    pnl = nav - total_cost
+    pnl_pct = (pnl / total_cost * 100) if total_cost > 0 else 0.0
+    # Position weights vs total NAV (cash included).
+    for i in enriched:
+        mv = i.get("market_value")
+        i["weight_pct"] = round(mv / nav * 100, 2) if (mv is not None and nav > 0) else None
+
+    return {
+        "items": enriched,
+        "totals": {
+            "nav": round(nav, 2),
+            "total_cost": round(total_cost, 2),
+            "pnl": round(pnl, 2),
+            "pnl_pct": round(pnl_pct, 2),
+            "positions_count": sum(1 for i in enriched if i["symbol"] != "CASH"),
+            "cash": next(
+                (i["market_value"] for i in enriched if i["symbol"] == "CASH"), 0.0
+            ),
+        },
+    }
+
+
+@app.post("/api/portfolio")
+async def portfolio_create(body: PortfolioCreate):
+    """Add a position. 409 if symbol already present (use PATCH to edit)."""
+    symbol = validate_symbol(body.symbol)
+    if get_portfolio_by_symbol(symbol):
+        raise HTTPException(409, f"{symbol} is already in the portfolio")
+    try:
+        item = create_portfolio_item(
+            symbol=symbol,
+            shares=body.shares,
+            cost_basis=body.cost_basis,
+            short_name=body.short_name,
+            notes=body.notes,
+            snapshot=body.snapshot,
+        )
+    except Exception as e:
+        logger.exception("portfolio create failed")
+        raise HTTPException(500, f"Failed to create portfolio item: {e}")
+    prices = _fetch_latest_prices([symbol]) if symbol != "CASH" else {}
+    return _enrich_portfolio_item(item, prices)
+
+
+@app.patch("/api/portfolio/{item_id}")
+async def portfolio_update(item_id: int, body: PortfolioUpdate):
+    """Partial update — change shares, cost basis, notes."""
+    if item_id <= 0:
+        raise HTTPException(400, "item_id must be positive")
+    fields = body.model_dump(exclude_unset=True)
+    item = update_portfolio_item(item_id, fields)
+    if not item:
+        raise HTTPException(404, f"Portfolio item {item_id} not found")
+    sym = item["symbol"]
+    prices = _fetch_latest_prices([sym]) if sym != "CASH" else {}
+    return _enrich_portfolio_item(item, prices)
+
+
+@app.delete("/api/portfolio/{item_id}")
+async def portfolio_delete(item_id: int):
+    if item_id <= 0:
+        raise HTTPException(400, "item_id must be positive")
+    if not delete_portfolio_item(item_id):
+        raise HTTPException(404, f"Portfolio item {item_id} not found")
     return {"deleted": item_id}
 
 
