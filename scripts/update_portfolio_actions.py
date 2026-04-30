@@ -122,15 +122,49 @@ ACTIONS = {
     },
     "OXY": {
         "action": "hold",
+        "margin_of_safety": "high",
         "notes": (
-            "HOLD at current 2.7% weight.\n\n"
-            "Buffett's largest oil holding (~27% stake), Permian-focused with low-cost "
-            "production. Currently +7.86% on cost — working. Provides energy exposure "
-            "different from AMR (oil & gas vs met coal) and EPD (E&P vs midstream).\n\n"
-            "Pending deeper deep-dive — until done, sized at modest weight. Buffett's stake "
-            "alone is reasonable conviction; size up only if independent thesis confirms.\n\n"
-            "Watch: oil price dynamics, OXY's debt paydown progress, low-carbon ventures "
-            "monetization (Stratos DAC), preferred-share retirement schedule."
+            "HOLD at current 2.7% weight. MoS upgraded to HIGH (was medium) on oil spike + "
+            "improved capital structure. Don't add at war-driven oil prices; don't trim a "
+            "Buffett-anchored position with thesis confirming.\n\n"
+            "WHAT CHANGED SINCE BUY ($56.33 → $60.28, +7%):\n"
+            "  • Berkshire bought OxyChem for ~$9.7B (closed Jan 2, 2026) — price-discovers\n"
+            "    the chemical segment; remaining E&P + 1PointFive trades at ~7-8x EV/EBITDA\n"
+            "    on backed-out math, cheaper than peer pure-play E&Ps\n"
+            "  • Principal debt $23B → $15B in 12 months ($5.8B paydown from OxyChem proceeds\n"
+            "    + $7.5B repaid since July 2024 from divestitures + FCF)\n"
+            "  • Quarterly dividend +8% to $0.26\n"
+            "  • Berkshire stake 26.7% (slight trim from ~28% but still anchor position)\n"
+            "  • Stratos DAC operational target: 500k metric tons this quarter\n"
+            "  • CrownRock integration smoothing — Permian breakevens mid-$30s\n\n"
+            "GEOPOLITICAL CONTEXT (Apr 30, 2026): WTI ~$105-108, Brent ~$115 (touched $126),\n"
+            "both up ~60% since US/Israel-Iran war began Feb 28. At $100+ oil, OXY's 2026 FCF\n"
+            "trajectory is $10-12B (vs $5-6B at $70 oil). EV/FCF compresses to 6-7x. Implied\n"
+            "per-share fair value $80-95 at sustained $100 oil. BUT — geopolitical premium\n"
+            "is volatile; Iran de-escalation = $70-80 oil fast and 15-20% give-back on the\n"
+            "stock. Don't chase the war-driven move.\n\n"
+            "MARGIN OF SAFETY (HIGH):\n"
+            "  ✅ Asset-backed: OxyChem sale validates ~1/3 of EV; Permian reserves at low\n"
+            "     breakeven justify the rest\n"
+            "  ✅ Cash flow durable: at $80 oil ~$7B FCF; at $100 ~$10-12B; cushion is huge\n"
+            "  ✅ Balance sheet improving fast: $15B debt heading to $13B target by EOY\n"
+            "  ✅ Owner-aligned: Buffett 26.7% + $10B preferred = quasi-controlling shareholder\n"
+            "  ⚠️ Volatility: 5-10% intraday on geopolitical headlines is normal\n\n"
+            "CATALYST: Q1 2026 earnings May 5/6. Analyst consensus adj EPS $0.70. Watch for:\n"
+            "  • FY26 guidance revision upward\n"
+            "  • Buyback re-authorization (debt now near target)\n"
+            "  • Stratos commissioning update\n"
+            "  • Berkshire 13F (mid-May) — were they buying through the Feb dip?\n\n"
+            "KILL SWITCHES (refreshed):\n"
+            "  • WTI averages below $55 for 2 consecutive quarters\n"
+            "  • Berkshire reduces stake below 23% (currently 26.7%)\n"
+            "  • Stratos DAC misses 500k metric ton target by >50%\n"
+            "  • 45Q tax credit reduced or eliminated by Trump admin/Congress\n"
+            "  • Principal debt fails to reach ~$13B by end of 2026\n"
+            "  • Berkshire preferred retirement schedule paused without explanation\n"
+            "  • CrownRock production guidance cut by >10% (integration failure)\n"
+            "  • OXY adds significant non-US debt-funded acquisition (capital-allocation\n"
+            "    discipline broken)"
         ),
     },
     "IWM": {
@@ -317,11 +351,19 @@ def main() -> int:
             print(f"⏭️  {sym}: not in portfolio (skipping)")
             counts["missing"] += 1
             continue
+        # Merge into snapshot: action is required; margin_of_safety is
+        # optional — when set on a plan entry it's stamped on the snapshot
+        # so the UI can render the MoS pill on portfolio rows the same way
+        # it does on watchlist cards.
         new_snap = {**(it.get("snapshot") or {}), "action": plan["action"]}
+        if plan.get("margin_of_safety"):
+            new_snap["margin_of_safety"] = plan["margin_of_safety"]
         body = {"snapshot": new_snap, "notes": plan["notes"]}
         ok, msg = patch(api_url, it["id"], body)
         icon = "✅" if ok else "❌"
-        print(f"{icon} {sym:5} action={plan['action']:7} {msg}")
+        mos = plan.get("margin_of_safety", "")
+        mos_str = f" mos={mos}" if mos else ""
+        print(f"{icon} {sym:5} action={plan['action']:7}{mos_str} {msg}")
         if ok:
             counts["updated"] += 1
         else:
