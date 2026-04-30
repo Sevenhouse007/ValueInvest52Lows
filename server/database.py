@@ -179,6 +179,22 @@ def init_db():
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_method TEXT")
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_business TEXT")
 
+        # Migration: Klarman-style composite adjustments —
+        #   raw_score        = composite before adjustments (peer/DCF/asset only)
+        #   buyback_credit   = +pp added for shareholder yield via buybacks
+        #   quality_penalty  = -pp subtracted for accounting/distress flags
+        #   quality_reasons  = JSON list explaining the penalty
+        #   implied_growth   = reverse-DCF growth rate that justifies current price
+        # Net composite = raw_score + buyback_credit - quality_penalty
+        try:
+            conn.execute("SELECT mos_raw_score FROM symbol_latest_price LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_raw_score INTEGER")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_buyback_credit REAL")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_quality_penalty REAL")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_quality_reasons TEXT")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_implied_growth REAL")
+
         # Migration: add market_sector_averages_json if not present
         try:
             conn.execute("SELECT market_sector_averages_json FROM scans LIMIT 1")
@@ -579,6 +595,11 @@ def upsert_mos_score(
     axes_used: Optional[list] = None,
     method: Optional[str] = None,
     business: Optional[str] = None,
+    raw_score: Optional[int] = None,
+    buyback_credit: Optional[float] = None,
+    quality_penalty: Optional[float] = None,
+    quality_reasons: Optional[list] = None,
+    implied_growth: Optional[float] = None,
 ) -> None:
     """Persist the Klarman-style MoS = % discount to intrinsic value.
 
@@ -591,15 +612,18 @@ def upsert_mos_score(
         return
     updated_at = datetime.now(timezone.utc).isoformat()
     axes_json = json.dumps(axes_used) if axes_used is not None else None
+    reasons_json = json.dumps(quality_reasons) if quality_reasons else None
     with get_db() as conn:
         conn.execute("""
             INSERT INTO symbol_latest_price (
                 symbol, price, updated_at, mos_score, mos_updated_at,
                 mos_peer_discount, mos_dcf_discount, mos_asset_coverage, mos_intrinsic,
                 mos_dcf_bull, mos_dcf_base, mos_dcf_bear,
-                mos_quality_flag, mos_axes_used, mos_method, mos_business
+                mos_quality_flag, mos_axes_used, mos_method, mos_business,
+                mos_raw_score, mos_buyback_credit, mos_quality_penalty,
+                mos_quality_reasons, mos_implied_growth
             )
-            VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol) DO UPDATE SET
                 mos_score = excluded.mos_score,
                 mos_updated_at = excluded.mos_updated_at,
@@ -613,11 +637,18 @@ def upsert_mos_score(
                 mos_quality_flag = excluded.mos_quality_flag,
                 mos_axes_used = excluded.mos_axes_used,
                 mos_method = excluded.mos_method,
-                mos_business = excluded.mos_business
+                mos_business = excluded.mos_business,
+                mos_raw_score = excluded.mos_raw_score,
+                mos_buyback_credit = excluded.mos_buyback_credit,
+                mos_quality_penalty = excluded.mos_quality_penalty,
+                mos_quality_reasons = excluded.mos_quality_reasons,
+                mos_implied_growth = excluded.mos_implied_growth
         """, (symbol, updated_at, mos_score, updated_at,
               peer_discount, dcf_discount, asset_coverage, intrinsic,
               dcf_bull, dcf_base, dcf_bear,
-              quality_flag, axes_json, method, business))
+              quality_flag, axes_json, method, business,
+              raw_score, buyback_credit, quality_penalty,
+              reasons_json, implied_growth))
 
 
 def get_mos_score(symbol: str) -> Optional[dict]:
@@ -627,7 +658,9 @@ def get_mos_score(symbol: str) -> Optional[dict]:
         r = conn.execute(
             "SELECT mos_score, mos_updated_at, mos_peer_discount, mos_dcf_discount, "
             "mos_asset_coverage, mos_intrinsic, mos_dcf_bull, mos_dcf_base, mos_dcf_bear, "
-            "mos_quality_flag, mos_axes_used, mos_method, mos_business "
+            "mos_quality_flag, mos_axes_used, mos_method, mos_business, "
+            "mos_raw_score, mos_buyback_credit, mos_quality_penalty, "
+            "mos_quality_reasons, mos_implied_growth "
             "FROM symbol_latest_price WHERE symbol = ?",
             (symbol,),
         ).fetchone()
@@ -639,6 +672,12 @@ def get_mos_score(symbol: str) -> Optional[dict]:
                 axes = json.loads(r["mos_axes_used"])
             except Exception:
                 axes = None
+        reasons = None
+        if r["mos_quality_reasons"]:
+            try:
+                reasons = json.loads(r["mos_quality_reasons"])
+            except Exception:
+                reasons = None
         return {
             "mos_score": r["mos_score"],
             "mos_updated_at": r["mos_updated_at"],
@@ -653,6 +692,11 @@ def get_mos_score(symbol: str) -> Optional[dict]:
             "mos_axes_used": axes,
             "mos_method": r["mos_method"],
             "mos_business": r["mos_business"],
+            "mos_raw_score": r["mos_raw_score"],
+            "mos_buyback_credit": r["mos_buyback_credit"],
+            "mos_quality_penalty": r["mos_quality_penalty"],
+            "mos_quality_reasons": reasons,
+            "mos_implied_growth": r["mos_implied_growth"],
         }
 
 

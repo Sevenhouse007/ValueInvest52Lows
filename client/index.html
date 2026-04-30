@@ -2450,6 +2450,11 @@ function renderWatchlistCard(i) {
     axes_used: i.mos_axes_used,
     method: i.mos_method,
     business: i.mos_business,
+    raw_score: i.mos_raw_score,
+    buyback_credit: i.mos_buyback_credit,
+    quality_penalty: i.mos_quality_penalty,
+    quality_reasons: i.mos_quality_reasons,
+    implied_growth: i.mos_implied_growth,
   };
   const mosBadgeHtml = renderMosPill(i.mos_score, wlBreakdown);
 
@@ -3520,6 +3525,33 @@ function renderMosPill(score, breakdown) {
     } else if (breakdown.intrinsic) {
       tooltip += `\n\nDCF intrinsic: $${Number(breakdown.intrinsic).toFixed(2)}/sh`;
     }
+    // Klarman-style adjustments to the raw composite — surface the math
+    // so the score isn't a black box.
+    if (breakdown.raw_score !== undefined && breakdown.raw_score !== null
+        && (breakdown.buyback_credit || breakdown.quality_penalty)) {
+      tooltip += `\n\nComposite adjustments:`;
+      tooltip += `\n  Raw composite     ${breakdown.raw_score > 0 ? '+' : ''}${breakdown.raw_score}%`;
+      if (breakdown.buyback_credit) {
+        tooltip += `\n  + Buyback credit  +${breakdown.buyback_credit}pp  (capital returned via repurchases)`;
+      }
+      if (breakdown.quality_penalty) {
+        tooltip += `\n  − Quality penalty −${breakdown.quality_penalty}pp  (accounting/distress flags)`;
+      }
+      tooltip += `\n  = Net composite   ${score > 0 ? '+' : ''}${score}%`;
+      if (breakdown.quality_reasons && breakdown.quality_reasons.length) {
+        tooltip += `\n  Reasons: ${breakdown.quality_reasons.join('; ')}`;
+      }
+    }
+    // Reverse-DCF: what growth rate justifies the current price?
+    if (breakdown.implied_growth !== null && breakdown.implied_growth !== undefined) {
+      const ig = (breakdown.implied_growth * 100).toFixed(1);
+      const speculative = breakdown.implied_growth > 0.20;
+      tooltip += `\n\nReverse-DCF check:`;
+      tooltip += `\n  Implied growth: ${ig}%/yr to justify current price`;
+      if (speculative) {
+        tooltip += `\n  ⚠️ Priced for hyper-growth — narrative-dependent`;
+      }
+    }
     // Data quality footer — explicit when the score is built on thin data
     if (breakdown.quality_flag) {
       const axes = (breakdown.axes_used || []).join(', ') || 'none';
@@ -3630,6 +3662,11 @@ function renderPortfolioRow(i) {
     axes_used: i.mos_axes_used,
     method: i.mos_method,
     business: i.mos_business,
+    raw_score: i.mos_raw_score,
+    buyback_credit: i.mos_buyback_credit,
+    quality_penalty: i.mos_quality_penalty,
+    quality_reasons: i.mos_quality_reasons,
+    implied_growth: i.mos_implied_growth,
   };
   const mosPillHtml = renderMosPill(i.mos_score, breakdown);
   const reviewedAt = i.snapshot && i.snapshot.mos_reviewed_at;

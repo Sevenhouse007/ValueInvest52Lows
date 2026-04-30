@@ -384,6 +384,7 @@ def parse_fundamentals(symbol: str, data: dict) -> StockFundamentals:
         ev_to_revenue=_safe_raw(stats, "enterpriseToRevenue"),
         debt_to_equity=_safe_raw(fin, "debtToEquity"),
         free_cash_flow=_safe_raw(fin, "freeCashflow") or yf_fin.get("cf_free"),
+        historical_fcf=yf_fin.get("cf_free_history") or [],
         operating_cashflow=ocf,
         enterprise_value=ev,
         roic=roic,
@@ -910,6 +911,7 @@ def merge_quote_and_fundamentals(
         s.return_on_equity = fundamentals.return_on_equity
         s.return_on_assets = fundamentals.return_on_assets
         s.free_cash_flow = fundamentals.free_cash_flow
+        s.historical_fcf = fundamentals.historical_fcf or []
         s.operating_cashflow = fundamentals.operating_cashflow
         s.enterprise_value = fundamentals.enterprise_value
         s.roic = fundamentals.roic

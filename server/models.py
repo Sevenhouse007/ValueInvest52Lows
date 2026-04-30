@@ -28,6 +28,7 @@ class StockFundamentals(BaseModel):
     ev_to_revenue: Optional[float] = None
     debt_to_equity: Optional[float] = None
     free_cash_flow: Optional[float] = None
+    historical_fcf: list[float] = Field(default_factory=list)  # Multi-year FCF history for cyclical normalization
     return_on_equity: Optional[float] = None
     return_on_assets: Optional[float] = None
     revenue_growth: Optional[float] = None
@@ -146,6 +147,7 @@ class ScoredStock(BaseModel):
     return_on_equity: Optional[float] = None
     return_on_assets: Optional[float] = None
     free_cash_flow: Optional[float] = None
+    historical_fcf: list[float] = Field(default_factory=list)  # Multi-year FCF history for cyclical normalization
     operating_cashflow: Optional[float] = None
     enterprise_value: Optional[float] = None
     roic: Optional[float] = None

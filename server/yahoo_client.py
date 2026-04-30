@@ -112,6 +112,26 @@ def _fetch_yf_financials(symbol: str) -> Optional[dict]:
             )
             result["cf_free"] = _get(cf, "Free Cash Flow")
             result["cf_capex"] = _get(cf, "Capital Expenditure")
+            # Multi-year FCF history for cyclical normalization. Most-recent
+            # year first; up to 5 years. Skip None entries — gappy histories
+            # still beat single-year TTM for cycle smoothing.
+            cf_history: list[float] = []
+            if cf is not None and not cf.empty:
+                col_count = len(cf.columns)
+                for yr in range(min(5, col_count)):
+                    val = _get(cf, "Free Cash Flow", yr)
+                    if val is None:
+                        # Fall back to OCF - capex when FCF row is missing
+                        ocf_y = _get(cf, "Operating Cash Flow", yr) or _get(
+                            cf, "Cash Flow From Continuing Operating Activities", yr
+                        )
+                        capex_y = _get(cf, "Capital Expenditure", yr)
+                        if ocf_y is not None and capex_y is not None:
+                            val = ocf_y + capex_y  # capex is negative in Yahoo
+                    if val is not None:
+                        cf_history.append(float(val))
+            if cf_history:
+                result["cf_free_history"] = cf_history
         except Exception as e:
             logger.debug(f"cashflow fetch failed for {symbol}: {e}")
 

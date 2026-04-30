@@ -354,6 +354,11 @@ async def recompute_mos_scores():
                     axes_used=r.get("axes_used"),
                     method=r.get("method"),
                     business=r.get("business"),
+                    raw_score=r.get("raw_score"),
+                    buyback_credit=r.get("buyback_credit"),
+                    quality_penalty=r.get("quality_penalty"),
+                    quality_reasons=r.get("quality_reasons"),
+                    implied_growth=r.get("implied_growth"),
                 )
             except Exception as e:
                 logger.warning(f"upsert_mos_score({sym}) failed: {e}")
@@ -1080,32 +1085,144 @@ def _is_cyclical(stock) -> bool:
 
 
 def _normalized_fcf(stock) -> Optional[float]:
-    """Return a smoothed FCF for cyclical names. We don't have multi-year
-    history in the model right now, so the heuristic is:
+    """Return a smoothed FCF for cyclical names. Three-tier preference:
 
-      - Use TTM FCF if positive and at least 30% of EBITDA — that suggests
-        we're not at a depressed trough quarter
-      - Otherwise blend TTM FCF (50%) with a peer-normalized estimate
-        derived from the company's own EBITDA × an industry-typical
-        FCF/EBITDA conversion ratio (50%)
+      Tier 1 (best) — multi-year average from historical_fcf, weighted
+                      to favor positive years (Klarman uses through-cycle
+                      average; weighting up positives doesn't double-count
+                      losses but anchors on earnings power).
 
-    This is a stop-gap until we wire 5-year history. It's enough to keep
-    the DCF from being silly on AMR/CNR at trough met-coal pricing."""
+      Tier 2 — when only TTM is available, blend with EBITDA × 0.35
+              if TTM looks depressed (FCF/EBITDA < 30%, i.e. trough
+              compression).
+
+      Tier 3 — fallback to TTM as-is.
+
+    Klarman's principle: cyclical companies should be valued on
+    normalized earnings, not point-in-time TTM. This function gets the
+    inputs as right as the data lets us.
+    """
     fcf = getattr(stock, "free_cash_flow", None)
-    ebitda = getattr(stock, "ebitda", None)
+    history = getattr(stock, "historical_fcf", None) or []
+
+    # Tier 1: multi-year average if we have at least 3 years
+    valid_history = [v for v in history if v is not None]
+    if len(valid_history) >= 3:
+        # Mean of available years; if we have ≥4 years, drop the worst
+        # outlier (often a single bad year that doesn't represent power)
+        if len(valid_history) >= 4:
+            outlier = min(valid_history)
+            cleaned = [v for v in valid_history if v != outlier]
+            avg = sum(cleaned) / len(cleaned)
+        else:
+            avg = sum(valid_history) / len(valid_history)
+        # Sanity check: don't trust history that's way different from TTM
+        # without a TTM cross-check
+        if fcf is not None and fcf > 0 and avg > 0:
+            return 0.6 * avg + 0.4 * fcf  # weighted blend toward history
+        return avg if avg > 0 else None
+
+    # Tier 2: TTM with EBITDA-blend if depressed
     if fcf is None or fcf <= 0:
         return None
+    ebitda = getattr(stock, "ebitda", None)
     if not ebitda or ebitda <= 0:
         return fcf
-    # If TTM FCF/EBITDA ratio is healthy (>30%), TTM is the right number
     fcf_ratio = fcf / ebitda
     if fcf_ratio >= 0.30:
         return fcf
-    # Otherwise we're in a compressed-margin period; blend toward a
-    # normalized estimate at 35% FCF/EBITDA conversion (rough industrial
-    # average — Damodaran data puts most cyclicals at 30-40% through-cycle)
-    normalized = ebitda * 0.35
-    return 0.5 * fcf + 0.5 * normalized
+    # Compressed-margin period; blend toward EBITDA × 35% conversion
+    return 0.5 * fcf + 0.5 * (ebitda * 0.35)
+
+
+def _buyback_yield_credit(stock) -> float:
+    """Return the buyback-yield contribution to MoS, in percentage points.
+
+    Klarman recognizes that capital returned to shareholders via buyback
+    creates value the FCF DCF doesn't fully capture (especially when the
+    company is buying back stock below its own intrinsic value). We add
+    the trailing buyback yield × 5 (5-yr forward credit) as a discount-
+    adjustment, capped at +12pp to prevent gaming.
+
+    Yahoo's buyback_yield can be reported as ratio (0.05) or % (5);
+    normalize then cap.
+    """
+    bb = getattr(stock, "buyback_yield", None)
+    if bb is None:
+        return 0.0
+    bb_pct = bb if abs(bb) > 0.5 else (bb * 100)
+    # Only credit positive (net buyback). Net dilution gets 0 — we don't
+    # double-penalize because the dilution shows up in lower per-share FCF.
+    if bb_pct <= 0:
+        return 0.0
+    return min(12.0, bb_pct * 5)
+
+
+def _reverse_dcf_implied_growth(stock) -> Optional[float]:
+    """Solve for the growth rate implied by the current price = intrinsic.
+    If implied growth is unsustainable (>20% perpetuity-equivalent), the
+    stock is priced for narrative growth — flag accordingly.
+
+    Reverse-DCF: P × shares = Σ FCF × (1+g)^n / (1+r)^n + terminal
+    Solved iteratively for g given everything else.
+    """
+    price = getattr(stock, "price", None)
+    fcf = getattr(stock, "free_cash_flow", None)
+    shares = getattr(stock, "shares_outstanding", None)
+    if not price or not fcf or fcf <= 0 or not shares or shares <= 0:
+        return None
+    target_intrinsic = price  # solve for g such that intrinsic == price
+    wacc = getattr(stock, "sector_wacc", None)
+    r = wacc if (wacc and 0.06 < wacc < 0.18) else 0.10
+    g_term = 0.025
+    # Binary search for implied growth in [0%, 25%]
+    lo, hi = 0.0, 0.25
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        intrinsic = _dcf_value(fcf, shares, mid, r, g_term)
+        if intrinsic < target_intrinsic:
+            lo = mid
+        else:
+            hi = mid
+    return round(lo, 4)
+
+
+def _earnings_quality_penalty(stock) -> tuple[float, list[str]]:
+    """Klarman-style earnings-quality flags. Returns (penalty_pp, reasons).
+    Penalty subtracts from the composite MoS — distressed or accounting-
+    flagged businesses need MORE margin of safety, not less.
+
+      Beneish M-Score > -1.78 → −10pp (manipulation flag)
+      Altman Z-Score < 1.81   → −15pp (financial distress)
+      Piotroski F-Score < 4   → −10pp (weak fundamentals)
+      Accruals ratio > 10%    → −5pp  (earnings quality concern)
+
+    Capped at −25pp total to prevent stacking from killing every score.
+    """
+    penalty = 0.0
+    reasons: list[str] = []
+
+    beneish = getattr(stock, "beneish_m_score", None)
+    if beneish is not None and beneish > -1.78:
+        penalty += 10
+        reasons.append(f"Beneish M-Score {beneish:.2f} (manipulation flag)")
+
+    altman = getattr(stock, "altman_z_score", None)
+    if altman is not None and altman < 1.81:
+        penalty += 15
+        reasons.append(f"Altman Z {altman:.2f} (distress zone)")
+
+    piotroski = getattr(stock, "piotroski_f_score", None)
+    if piotroski is not None and piotroski < 4:
+        penalty += 10
+        reasons.append(f"Piotroski F {piotroski}/9 (weak fundamentals)")
+
+    accruals = getattr(stock, "accruals_ratio", None)
+    if accruals is not None and accruals > 0.10:
+        penalty += 5
+        reasons.append(f"Accruals ratio {accruals*100:.1f}% (earnings quality)")
+
+    return min(25.0, penalty), reasons
 
 
 def _dcf_value(fcf: float, shares: float, g: float, r: float, g_term: float) -> float:
@@ -1764,7 +1881,22 @@ def compute_mos_subscore(stock) -> Optional[dict]:
     # balance sheet → DCF and asset both fail; only peer-relative survives).
     if not have:
         return None
-    composite = weighted_sum / weight_total
+    raw_composite = weighted_sum / weight_total
+
+    # ── Klarman-style adjustments ──────────────────────────────────────
+    # Buyback credit: capital returned to shareholders that the FCF DCF
+    # under-counts (especially when company is buying below intrinsic).
+    # Quality penalty: distressed/manipulated/weak fundamentals require
+    # MORE margin of safety, not less. Both surface in the breakdown so
+    # the UI shows the full math, not a black-box number.
+    buyback_credit = _buyback_yield_credit(stock)
+    quality_penalty, quality_reasons = _earnings_quality_penalty(stock)
+    composite = raw_composite + buyback_credit - quality_penalty
+
+    # Reverse-DCF sanity check: what growth rate is implied by the current
+    # price? When implied growth > 20%, the stock is priced for narrative
+    # growth that's hard to underwrite — flag in the tooltip.
+    implied_growth = _reverse_dcf_implied_growth(stock)
 
     # Data-quality flag — surfaced on the UI as a ⚠️ icon when the score is
     # built on thin signals. The tooltip explains which axes are missing
@@ -1784,6 +1916,11 @@ def compute_mos_subscore(stock) -> Optional[dict]:
 
     return {
         "score": round(composite),
+        "raw_score": round(raw_composite),
+        "buyback_credit": round(buyback_credit, 1) if buyback_credit else 0.0,
+        "quality_penalty": round(quality_penalty, 1) if quality_penalty else 0.0,
+        "quality_reasons": quality_reasons,
+        "implied_growth": implied_growth,
         "peer_discount": round(peer_discount) if peer_discount is not None else None,
         "dcf_discount": round(dcf_discount) if dcf_discount is not None else None,
         "asset_coverage": round(coverage_pct) if coverage_pct is not None else None,
@@ -1999,6 +2136,11 @@ def _attach_mos_score(item: dict) -> dict:
             item["mos_axes_used"] = m.get("mos_axes_used")
             item["mos_method"] = m.get("mos_method")
             item["mos_business"] = m.get("mos_business")
+            item["mos_raw_score"] = m.get("mos_raw_score")
+            item["mos_buyback_credit"] = m.get("mos_buyback_credit")
+            item["mos_quality_penalty"] = m.get("mos_quality_penalty")
+            item["mos_quality_reasons"] = m.get("mos_quality_reasons")
+            item["mos_implied_growth"] = m.get("mos_implied_growth")
     return item
 
 
