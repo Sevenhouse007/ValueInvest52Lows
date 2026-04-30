@@ -21,12 +21,13 @@ from server import config
 from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HOST, PORT
 from server.database import (
     create_portfolio_item, create_watchlist_item, delete_portfolio_item, delete_scan,
-    delete_watchlist_item, get_backtest_details, get_backtest_summary,
-    get_bounce_back_candidates, get_latest_good_scan, get_latest_scan,
-    get_latest_scan_averages, get_mos_score, get_performance_rows_needing_update,
+    delete_watchlist_item, fill_mos_forward_return, get_backtest_details,
+    get_backtest_summary, get_bounce_back_candidates, get_latest_good_scan,
+    get_latest_scan, get_latest_scan_averages, get_mos_backtest_summary,
+    get_mos_history_needing_fill, get_mos_score, get_performance_rows_needing_update,
     get_portfolio_by_symbol, get_portfolio_item, get_recent_tracked_symbols,
     get_scan_by_date, get_scan_history, get_stock_history, get_watchlist_by_symbol,
-    get_watchlist_item, init_db, list_portfolio, list_watchlist,
+    get_watchlist_item, init_db, insert_mos_snapshot, list_portfolio, list_watchlist,
     save_performance_tracking, save_scan, update_forward_price, update_portfolio_item,
     update_watchlist_item, upsert_latest_price, upsert_mos_score,
 )
@@ -337,6 +338,10 @@ async def recompute_mos_scores():
 
     results = await asyncio.gather(*(_one(s) for s in symbols))
     written = sum(1 for _, r in results if r is not None)
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    # Fetch current prices once for snapshot pricing — same call shape as
+    # the portfolio/watchlist enrichment uses.
+    prices = await _fetch_latest_prices(symbols)
     for sym, r in results:
         if r is not None:
             try:
@@ -360,9 +365,52 @@ async def recompute_mos_scores():
                     quality_reasons=r.get("quality_reasons"),
                     implied_growth=r.get("implied_growth"),
                 )
+                # Snapshot for backtest tracking — pairs today's MoS with
+                # today's price so the daily forward-fill job can compute
+                # realized returns 15/30/90/180 days from now.
+                px_info = prices.get(sym) or {}
+                snap_price = px_info.get("price") if isinstance(px_info, dict) else px_info
+                insert_mos_snapshot(
+                    sym, today_iso,
+                    mos_score=r["score"],
+                    raw_score=r.get("raw_score"),
+                    intrinsic=r.get("intrinsic"),
+                    price_at_snapshot=snap_price,
+                    business=r.get("business"),
+                    method=r.get("method"),
+                    quality_flag=r.get("data_quality"),
+                )
             except Exception as e:
-                logger.warning(f"upsert_mos_score({sym}) failed: {e}")
-    logger.info(f"MoS recompute done: {written}/{len(symbols)} scores written")
+                logger.warning(f"MoS persist failed for {sym}: {e}")
+    logger.info(f"MoS recompute done: {written}/{len(symbols)} scores written + snapshotted")
+
+
+async def fill_mos_forward_returns():
+    """Daily job — for each MoS snapshot that's now 15/30/90/180 days old
+    and doesn't have a forward return yet, look up the current price and
+    record the realized return. Lets the backtest validate whether the
+    MoS framework actually has signal."""
+    global _yahoo_client
+    if _yahoo_client is None:
+        _yahoo_client = YahooClient()
+    total_filled = 0
+    for window in (15, 30, 90, 180):
+        rows = get_mos_history_needing_fill(window)
+        if not rows:
+            continue
+        # Get current prices for all symbols needing fill in this window
+        syms = sorted({r["symbol"] for r in rows})
+        prices = await _fetch_latest_prices(syms)
+        for r in rows:
+            info = prices.get(r["symbol"]) or {}
+            cur = info.get("price") if isinstance(info, dict) else info
+            if cur and cur > 0:
+                try:
+                    fill_mos_forward_return(r["id"], window, cur)
+                    total_filled += 1
+                except Exception as e:
+                    logger.debug(f"forward-fill {r['symbol']} {window}d failed: {e}")
+    logger.info(f"MoS forward-return fill: {total_filled} rows updated")
 
 
 async def premarket_refresh():
@@ -513,6 +561,19 @@ async def lifespan(app: FastAPI):
             timezone="US/Eastern",
         ),
         id="mos_recompute",
+        replace_existing=True,
+    )
+    # Forward-fill MoS realized returns at 1 AM ET so 15/30/90/180-day
+    # windows tick over each calendar day. Runs after the daily recompute
+    # so all snapshots are present.
+    scheduler.add_job(
+        fill_mos_forward_returns,
+        CronTrigger(
+            hour=1,
+            minute=0,
+            timezone="US/Eastern",
+        ),
+        id="mos_forward_fill",
         replace_existing=True,
     )
     scheduler.start()
@@ -2151,6 +2212,24 @@ async def recompute_mos_endpoint():
     seeding new positions so the pills aren't blank until the next cron."""
     await recompute_mos_scores()
     return {"status": "ok"}
+
+
+@app.post("/api/fill-mos-returns")
+async def fill_mos_returns_endpoint():
+    """Manual trigger for the MoS forward-return fill (otherwise runs
+    daily at 1 AM ET). Pairs each matured snapshot with today's price."""
+    await fill_mos_forward_returns()
+    return {"status": "ok"}
+
+
+@app.get("/api/backtest/mos")
+async def backtest_mos():
+    """Bucket MoS history by score and report average forward returns
+    per bucket. Validates whether the framework actually has signal —
+    Klarman zone (≥30%) should outperform; heavy premium (<-30%) should
+    underperform. Until enough data accumulates the response includes a
+    progress message instead of buckets."""
+    return get_mos_backtest_summary()
 
 
 @app.get("/api/portfolio")

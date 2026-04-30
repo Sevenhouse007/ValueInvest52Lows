@@ -3067,16 +3067,104 @@ async function loadBacktest() {
   const container = document.getElementById('backtestContent');
   container.innerHTML = '<p style="color:var(--text2);">Loading backtest data...</p>';
   try {
-    const [sumR, detR] = await Promise.all([
+    const [sumR, detR, mosR] = await Promise.all([
       fetch('/api/backtest/summary'),
       fetch('/api/backtest/details'),
+      fetch('/api/backtest/mos'),
     ]);
     const summary = await sumR.json();
     const details = await detR.json();
-    renderBacktest(summary, details);
+    const mosBt = await mosR.json();
+    renderBacktest(summary, details, mosBt);
   } catch (e) {
     container.innerHTML = '<p style="color:var(--red);">Failed to load backtest data.</p>';
   }
+}
+
+// Render the MoS backtest panel — a separate section above the existing
+// value-score backtest. Shows progress when data hasn't accumulated yet
+// (15 days minimum), then bucket-by-bucket forward returns once it has.
+function renderMosBacktest(mos) {
+  if (!mos) return '';
+  if (!mos.has_data) {
+    const days = mos.days_collected || 0;
+    const need = days < 15 ? 15 - days : days < 30 ? 30 - days : days < 90 ? 90 - days : 180 - days;
+    return `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:20px;">
+        <h3 style="font-size:16px;margin-bottom:8px;">MoS Backtest — Collecting Data</h3>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:12px;">
+          The Klarman MoS framework is recorded in <code>mos_history</code> daily.
+          Forward returns are paired automatically once 15/30/90/180 days pass.
+        </p>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;">
+          <div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Snapshots</div>
+            <div style="font-size:20px;font-weight:600;">${mos.total_snapshots || 0}</div>
+          </div>
+          <div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Symbols</div>
+            <div style="font-size:20px;font-weight:600;">${mos.unique_symbols || 0}</div>
+          </div>
+          <div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Days collected</div>
+            <div style="font-size:20px;font-weight:600;">${days}</div>
+          </div>
+          <div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Next window</div>
+            <div style="font-size:20px;font-weight:600;">${mos.next_window || '—'}</div>
+            <div style="color:var(--text2);font-size:11px;margin-top:2px;">${need} days to go</div>
+          </div>
+        </div>
+        <p style="color:var(--text2);font-size:12px;margin-top:12px;">
+          ${escapeHtml(mos.message || '')}
+        </p>
+      </div>`;
+  }
+  // Has data — render bucket table
+  const buckets = mos.buckets || {};
+  const bucketColors = {
+    "Klarman zone (≥30%)":           'var(--green)',
+    "Modest cushion (10–30%)":       'var(--text)',
+    "Fair value (-10 to 10%)":       'var(--text2)',
+    "Slight premium (-30 to -10%)":  'var(--amber)',
+    "Heavy premium (<-30%)":         'var(--red)',
+  };
+  let rows = '';
+  for (const [name, b] of Object.entries(buckets)) {
+    const color = bucketColors[name] || 'var(--text)';
+    const fmt = (v) => v === null || v === undefined ? '—'
+      : `<span style="color:${v >= 0 ? 'var(--green)' : 'var(--red)'};">${v > 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
+    rows += `
+      <tr style="border-top:1px solid var(--border);">
+        <td style="padding:8px 12px;color:${color};font-weight:600;">${name}</td>
+        <td style="padding:8px 12px;text-align:right;">${b.count}</td>
+        <td style="padding:8px 12px;text-align:right;">${fmt(b.avg_return_15d)}</td>
+        <td style="padding:8px 12px;text-align:right;">${fmt(b.avg_return_30d)}</td>
+        <td style="padding:8px 12px;text-align:right;">${fmt(b.avg_return_90d)}</td>
+        <td style="padding:8px 12px;text-align:right;">${fmt(b.avg_return_180d)}</td>
+      </tr>`;
+  }
+  return `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:20px;">
+      <h3 style="font-size:16px;margin-bottom:4px;">MoS Backtest — Forward Returns by Bucket</h3>
+      <p style="color:var(--text2);font-size:13px;margin-bottom:12px;">
+        ${mos.matured_observations} matured observations across ${mos.total_snapshots} total snapshots.
+        Klarman's prediction: ≥30% MoS bucket should outperform; ≤-30% bucket should underperform.
+      </p>
+      <div style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead><tr style="background:var(--surface2);text-align:left;color:var(--text2);">
+            <th style="padding:8px 12px;">MoS Bucket</th>
+            <th style="padding:8px 12px;text-align:right;">N</th>
+            <th style="padding:8px 12px;text-align:right;">15d</th>
+            <th style="padding:8px 12px;text-align:right;">30d</th>
+            <th style="padding:8px 12px;text-align:right;">90d</th>
+            <th style="padding:8px 12px;text-align:right;">180d</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`;
 }
 
 async function triggerFill() {
@@ -3166,9 +3254,14 @@ function renderBounceBack(data) {
   c.innerHTML = html;
 }
 
-function renderBacktest(summary, details) {
+function renderBacktest(summary, details, mosBt) {
   const c = document.getElementById('backtestContent');
   let html = '';
+
+  // Render the MoS backtest panel first — it's the newer (more important)
+  // framework. Either shows progress (collecting data) or actual bucket
+  // returns once 15+ days have passed.
+  html += renderMosBacktest(mosBt);
 
   if (!summary.has_data) {
     html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;text-align:center;">`;

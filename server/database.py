@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -178,6 +178,38 @@ def init_db():
         except sqlite3.OperationalError:
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_method TEXT")
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_business TEXT")
+
+        # MoS history — daily snapshots of (symbol, mos_score, intrinsic,
+        # price_at_snapshot) for portfolio + watchlist symbols. Used to
+        # validate whether MoS readings predict forward returns: each
+        # snapshot is paired with the price N days later to compute
+        # forward returns. Klarman emphasizes track-record validation —
+        # without this, we don't know if the framework actually works.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS mos_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                snapshot_date TEXT NOT NULL,
+                mos_score INTEGER,
+                raw_score INTEGER,
+                intrinsic REAL,
+                price_at_snapshot REAL,
+                business TEXT,
+                method TEXT,
+                quality_flag TEXT,
+                price_15d REAL,
+                price_30d REAL,
+                price_90d REAL,
+                price_180d REAL,
+                return_15d REAL,
+                return_30d REAL,
+                return_90d REAL,
+                return_180d REAL,
+                UNIQUE(symbol, snapshot_date)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mos_history_date ON mos_history(snapshot_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mos_history_symbol ON mos_history(symbol)")
 
         # Migration: Klarman-style composite adjustments —
         #   raw_score        = composite before adjustments (peer/DCF/asset only)
@@ -698,6 +730,170 @@ def get_mos_score(symbol: str) -> Optional[dict]:
             "mos_quality_reasons": reasons,
             "mos_implied_growth": r["mos_implied_growth"],
         }
+
+
+def insert_mos_snapshot(
+    symbol: str,
+    snapshot_date: str,  # YYYY-MM-DD
+    mos_score: Optional[int],
+    raw_score: Optional[int],
+    intrinsic: Optional[float],
+    price_at_snapshot: Optional[float],
+    business: Optional[str] = None,
+    method: Optional[str] = None,
+    quality_flag: Optional[str] = None,
+) -> None:
+    """Record a daily MoS reading for forward-return tracking. UNIQUE
+    constraint on (symbol, snapshot_date) means re-running the recompute
+    same day overwrites the previous snapshot rather than accumulating."""
+    if not symbol or mos_score is None:
+        return
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO mos_history
+                (symbol, snapshot_date, mos_score, raw_score, intrinsic,
+                 price_at_snapshot, business, method, quality_flag)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol, snapshot_date) DO UPDATE SET
+                mos_score = excluded.mos_score,
+                raw_score = excluded.raw_score,
+                intrinsic = excluded.intrinsic,
+                price_at_snapshot = excluded.price_at_snapshot,
+                business = excluded.business,
+                method = excluded.method,
+                quality_flag = excluded.quality_flag
+        """, (symbol, snapshot_date, mos_score, raw_score, intrinsic,
+              price_at_snapshot, business, method, quality_flag))
+
+
+def get_mos_history_needing_fill(window_days: int) -> list[dict]:
+    """Return mos_history rows whose snapshot_date is exactly window_days
+    ago (or older) and whose price_{window}d hasn't been filled yet. Used
+    by the daily forward-fill job to compute realized returns once enough
+    time has passed."""
+    col_price = f"price_{window_days}d"
+    col_return = f"return_{window_days}d"
+    cutoff = (date.today() - timedelta(days=window_days)).isoformat()
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT id, symbol, snapshot_date, price_at_snapshot
+            FROM mos_history
+            WHERE snapshot_date <= ?
+              AND {col_price} IS NULL
+              AND price_at_snapshot IS NOT NULL
+        """, (cutoff,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def fill_mos_forward_return(history_id: int, window_days: int, price: float) -> None:
+    """Once we know the price N days after a snapshot, fill the price_{N}d
+    and return_{N}d columns. Called by the daily forward-fill job."""
+    if not price or price <= 0:
+        return
+    col_price = f"price_{window_days}d"
+    col_return = f"return_{window_days}d"
+    with get_db() as conn:
+        # Get the snapshot price for return calc
+        r = conn.execute(
+            f"SELECT price_at_snapshot FROM mos_history WHERE id = ?",
+            (history_id,),
+        ).fetchone()
+        if not r or not r["price_at_snapshot"]:
+            return
+        ret = (price - r["price_at_snapshot"]) / r["price_at_snapshot"]
+        conn.execute(
+            f"UPDATE mos_history SET {col_price} = ?, {col_return} = ? WHERE id = ?",
+            (price, ret, history_id),
+        )
+
+
+def get_mos_backtest_summary() -> dict:
+    """Bucket MoS history by score and report average forward returns per
+    bucket. Klarman's zones:
+      Klarman zone   ≥ +30%   (deep margin of safety)
+      Modest cushion +10..30%
+      Fair value     -10..+10%
+      Slight premium -10..-30%
+      Heavy premium  ≤ -30%
+    """
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT mos_score, business,
+                   return_15d, return_30d, return_90d, return_180d
+            FROM mos_history
+            WHERE mos_score IS NOT NULL
+              AND (return_15d IS NOT NULL
+                   OR return_30d IS NOT NULL
+                   OR return_90d IS NOT NULL
+                   OR return_180d IS NOT NULL)
+        """).fetchall()
+
+        total_snapshots = conn.execute(
+            "SELECT COUNT(*) FROM mos_history"
+        ).fetchone()[0]
+
+        if not rows:
+            # No matured snapshots yet — show progress so user knows when
+            # to expect first results.
+            symbol_count = conn.execute(
+                "SELECT COUNT(DISTINCT symbol) FROM mos_history"
+            ).fetchone()[0]
+            oldest = conn.execute(
+                "SELECT MIN(snapshot_date) FROM mos_history"
+            ).fetchone()[0]
+            days_collected = 0
+            if oldest:
+                days_collected = (date.today() - date.fromisoformat(oldest)).days
+            return {
+                "has_data": False,
+                "total_snapshots": total_snapshots,
+                "unique_symbols": symbol_count,
+                "days_collected": days_collected,
+                "next_window": "15 days" if days_collected < 15 else "30 days" if days_collected < 30 else "90 days",
+                "message": (
+                    f"Collecting MoS history — {total_snapshots} snapshots across "
+                    f"{symbol_count} symbols over {days_collected} days. "
+                    f"First validated returns available after 15 days; "
+                    f"meaningful sample after 30+ days."
+                ),
+            }
+
+        def bucket_of(score: int) -> str:
+            if score >= 30: return "Klarman zone (≥30%)"
+            if score >= 10: return "Modest cushion (10–30%)"
+            if score >= -10: return "Fair value (-10 to 10%)"
+            if score >= -30: return "Slight premium (-30 to -10%)"
+            return "Heavy premium (<-30%)"
+
+        buckets: dict[str, list[dict]] = {}
+        for r in rows:
+            b = bucket_of(r["mos_score"])
+            buckets.setdefault(b, []).append(dict(r))
+
+        def _avg(vals):
+            valid = [v for v in vals if v is not None]
+            return round(sum(valid) / len(valid) * 100, 2) if valid else None
+
+        result = {
+            "has_data": True,
+            "total_snapshots": total_snapshots,
+            "matured_observations": len(rows),
+            "buckets": {},
+        }
+        bucket_order = [
+            "Klarman zone (≥30%)", "Modest cushion (10–30%)", "Fair value (-10 to 10%)",
+            "Slight premium (-30 to -10%)", "Heavy premium (<-30%)",
+        ]
+        for b in bucket_order:
+            stocks = buckets.get(b, [])
+            result["buckets"][b] = {
+                "count": len(stocks),
+                "avg_return_15d": _avg([s["return_15d"] for s in stocks]),
+                "avg_return_30d": _avg([s["return_30d"] for s in stocks]),
+                "avg_return_90d": _avg([s["return_90d"] for s in stocks]),
+                "avg_return_180d": _avg([s["return_180d"] for s in stocks]),
+            }
+        return result
 
 
 def get_recent_tracked_symbols(lookback_days: int = 365) -> list[str]:
