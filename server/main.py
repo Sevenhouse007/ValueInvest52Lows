@@ -952,6 +952,40 @@ _REIT_INDUSTRIES = {
     "reit - diversified",
 }
 
+# P&C / Life insurance — like banks but with combined-ratio overlay.
+# Different from managed care (which is health insurance) because P&C
+# losses (property, auto, casualty) follow different actuarial dynamics.
+_INSURANCE_INDUSTRIES = {
+    "insurance - property & casualty", "insurance - life",
+    "insurance - reinsurance", "insurance - specialty",
+    "insurance - diversified", "insurance brokers",
+}
+
+# Asset managers — fee-on-AUM businesses. Real FCF but cyclical with
+# markets. Use a DDM-flavored DCF since payout ratios are high (40-60%).
+_ASSET_MANAGER_INDUSTRIES = {
+    "asset management", "capital markets",
+    "financial data & stock exchanges", "shell companies",
+}
+
+# Utilities — regulated rate base × allowed ROE. DDM is the primary
+# anchor since utilities distribute 60-80% of earnings.
+_UTILITY_INDUSTRIES = {
+    "utilities - regulated electric", "utilities - regulated gas",
+    "utilities - regulated water", "utilities - diversified",
+    "utilities - independent power producers", "utilities - renewable",
+}
+
+# Mature pharma — positive FCF, predictable cash flows from existing drug
+# portfolios. Standard DCF works but with elevated discount rate (patent
+# cliff risk). Biotech without revenue routes through pre_profit.
+_PHARMA_INDUSTRIES = {
+    "drug manufacturers - general", "drug manufacturers - specialty & generic",
+}
+_BIOTECH_INDUSTRIES = {
+    "biotechnology",
+}
+
 # Cyclical-but-not-commodity (auto, transports). Standard DCF with FCF
 # smoothing is enough — these aren't pure commodity exposure.
 _CYCLICAL_INDUSTRIES = {
@@ -986,20 +1020,35 @@ def classify_business(stock) -> str:
         return "bank"
     if industry in _MANAGED_CARE_INDUSTRIES:
         return "managed_care"
+    if industry in _INSURANCE_INDUSTRIES:
+        return "insurance"
+    if industry in _ASSET_MANAGER_INDUSTRIES:
+        return "asset_manager"
+    if industry in _UTILITY_INDUSTRIES or "utilities" in industry:
+        return "utility"
     if industry in _ENERGY_COMMODITY_INDUSTRIES:
         return "energy_commodity"
     if industry in _ENERGY_MIDSTREAM_INDUSTRIES:
         return "energy_midstream"
     if industry in _REIT_INDUSTRIES or "reit" in industry:
         return "reit"
+    if industry in _PHARMA_INDUSTRIES:
+        return "pharma"
+    if industry in _BIOTECH_INDUSTRIES:
+        # Biotech without FCF routes pre_profit; with FCF gets pharma DCF.
+        fcf = getattr(stock, "free_cash_flow", None)
+        return "pharma" if (fcf and fcf > 0) else "pre_profit"
     if industry in _CYCLICAL_INDUSTRIES:
         return "cyclical"
 
     # Pre-profit detection — TTM FCF deeply negative or null AND no
     # earnings. We can't run a DCF on a name that doesn't make money yet.
+    # Tightened to require both signals genuinely negative (so JD-style
+    # large-cap with one bad quarter doesn't get mis-routed).
     fcf = getattr(stock, "free_cash_flow", None)
     eg = getattr(stock, "earnings_growth", None)
-    if (fcf is None or fcf < 0) and (eg is None or eg < -0.30):
+    mc = getattr(stock, "market_cap", None) or 0
+    if (fcf is None or fcf < 0) and (eg is None or eg < -0.30) and mc < 5_000_000_000:
         return "pre_profit"
 
     # Sector-level fallback (catches industries we haven't enumerated)
@@ -1266,6 +1315,175 @@ def _reit_intrinsic_per_share(stock) -> Optional[dict]:
     }
 
 
+def _insurance_intrinsic_per_share(stock) -> Optional[dict]:
+    """Klarman-style intrinsic for P&C / life insurers. Same residual-income
+    framework as banks (underwriting capital ≈ banking equity), but with
+    insurance-specific priors:
+
+      - ROE for P&C: 10-15% in good cycle, 5-10% in soft cycle
+      - Cost of equity: 9% baseline (capital is required, similar to banks)
+      - Book growth 4% (slower than managed care, faster than banks)
+
+    Future enhancement: combined ratio overlay — penalize fair P/B when
+    CR > 100% (underwriting unprofitable). For now, the bear scenario
+    captures the soft-cycle case via 30% ROE haircut.
+    """
+    pb = getattr(stock, "price_to_book", None)
+    price = getattr(stock, "price", None)
+    roe = getattr(stock, "return_on_equity", None)
+    if not pb or pb <= 0 or not price or price <= 0:
+        return None
+    book_per_share = price / pb
+
+    coe = getattr(stock, "sector_wacc", None)
+    coe = coe if (coe and 0.07 < coe < 0.13) else 0.09
+
+    if not roe or roe <= 0:
+        fpe = getattr(stock, "forward_pe", None)
+        if fpe and fpe > 0:
+            roe = pb / fpe
+        else:
+            return None
+    if abs(roe) > 1.5:
+        roe = roe / 100
+
+    g_book = 0.04
+
+    def fair_pb(roe_, coe_, g_):
+        if coe_ <= g_: coe_ = g_ + 0.04
+        if roe_ <= g_: return 1.0
+        return (roe_ - g_) / (coe_ - g_)
+
+    bear = book_per_share * fair_pb(max(0.04, roe * 0.7), coe + 0.015, g_book)
+    base = book_per_share * fair_pb(roe, coe, g_book)
+    bull = book_per_share * fair_pb(min(0.20, roe * 1.25), max(0.07, coe - 0.005), g_book)
+    weighted = 0.25 * bull + 0.50 * base + 0.25 * bear
+    return {
+        "bull": round(bull, 2),
+        "base": round(base, 2),
+        "bear": round(bear, 2),
+        "weighted": round(weighted, 2),
+    }
+
+
+def _asset_manager_intrinsic_per_share(stock) -> Optional[dict]:
+    """Klarman-style intrinsic for asset managers (BLK, BX, T. Rowe Price).
+    Real FCF businesses, but cyclical with market AUM. Use a hybrid:
+
+      - Standard DCF on smoothed FCF (markets-cyclical, like cyclicals)
+      - Cross-check via P/E vs sector to catch over-paying for fee revenue
+
+    Differs from standard DCF by using a wider scenario band on growth
+    (asset manager AUM growth is volatile) and a higher discount rate
+    (12% bear / 11% base / 10% bull) to reflect market sensitivity.
+    """
+    fcf = getattr(stock, "free_cash_flow", None)
+    shares = getattr(stock, "shares_outstanding", None)
+    if not fcf or fcf <= 0 or not shares or shares <= 0:
+        return None
+
+    growth = getattr(stock, "revenue_growth", None) or 0.03
+    if abs(growth) > 1.5: growth = growth / 100
+    g_base = max(0.0, min(0.15, growth))
+
+    # Market-cyclical hurdle rates
+    bear = _dcf_value(fcf, shares, max(0.0, g_base * 0.5), 0.12, 0.020)
+    base = _dcf_value(fcf, shares, g_base, 0.11, 0.025)
+    bull = _dcf_value(fcf, shares, min(0.18, g_base * 1.5), 0.10, 0.030)
+    weighted = 0.25 * bull + 0.50 * base + 0.25 * bear
+    return {
+        "bull": round(bull, 2),
+        "base": round(base, 2),
+        "bear": round(bear, 2),
+        "weighted": round(weighted, 2),
+    }
+
+
+def _utility_intrinsic_per_share(stock) -> Optional[dict]:
+    """Klarman-style intrinsic for utilities. Regulated rate base × allowed
+    ROE drives earnings; DDM is the primary anchor since utilities pay out
+    60-80% of earnings as dividends.
+
+      Intrinsic = D₀ × (1 + g) / (r - g)    (Gordon growth)
+
+    Where:
+      D₀ = current annual dividend per share
+      g  = sustainable dividend growth (use 5yr avg, clamp 2-6%)
+      r  = cost of equity (use sector_wacc, fall back to 8%)
+
+    Falls back to a low-rate DCF (8.5% discount, 3% terminal) when
+    dividend data is missing.
+    """
+    price = getattr(stock, "price", None)
+    div_yield = getattr(stock, "dividend_yield", None)
+    if not price or price <= 0:
+        return None
+
+    # Annual dividend per share = price × dividend_yield (Yahoo gives yield)
+    if div_yield and div_yield > 0:
+        # Yahoo dividend_yield can be decimal (0.045) or percent (4.5)
+        dy = div_yield if div_yield < 0.30 else div_yield / 100
+        d0 = price * dy
+    else:
+        d0 = None
+
+    coe = getattr(stock, "sector_wacc", None)
+    r_base = coe if (coe and 0.06 < coe < 0.12) else 0.08
+
+    def gordon(d, r, g):
+        if r <= g: r = g + 0.03
+        return d * (1 + g) / (r - g)
+
+    if d0 and d0 > 0:
+        # Three growth scenarios: 2% bear / 4% base / 6% bull
+        bear = gordon(d0, r_base + 0.005, 0.02)
+        base = gordon(d0, r_base, 0.04)
+        bull = gordon(d0, max(0.06, r_base - 0.005), 0.055)
+        weighted = 0.25 * bull + 0.50 * base + 0.25 * bear
+        return {
+            "bull": round(bull, 2),
+            "base": round(base, 2),
+            "bear": round(bear, 2),
+            "weighted": round(weighted, 2),
+        }
+    # Fallback to standard DCF with utility-friendly discount
+    return _dcf_scenarios(stock)
+
+
+def _pharma_intrinsic_per_share(stock) -> Optional[dict]:
+    """Klarman-style intrinsic for mature pharma. Standard FCF DCF but with
+    elevated discount rate to reflect patent-cliff risk and the fact that
+    pharma R&D returns are highly variable. Biotech without product revenue
+    is routed through pre_profit and never reaches this function.
+
+    Discount-rate stack:
+      bear: 13% (heavy patent erosion)
+      base: 11% (typical pharma cost of equity)
+      bull: 9.5% (durable franchise, e.g. Lilly post-GLP-1)
+    """
+    fcf = getattr(stock, "free_cash_flow", None)
+    shares = getattr(stock, "shares_outstanding", None)
+    if not fcf or fcf <= 0 or not shares or shares <= 0:
+        return None
+
+    growth = getattr(stock, "revenue_growth", None)
+    if growth is None: growth = getattr(stock, "earnings_growth", None)
+    if growth is not None and abs(growth) > 1.5: growth = growth / 100
+    g_base = max(0.0, min(0.10, growth or 0.02))
+
+    # Pharma growth scenarios reflect pipeline uncertainty
+    bear = _dcf_value(fcf, shares, max(0.0, g_base * 0.4), 0.13, 0.020)
+    base = _dcf_value(fcf, shares, g_base, 0.11, 0.025)
+    bull = _dcf_value(fcf, shares, min(0.12, g_base * 1.4), 0.095, 0.030)
+    weighted = 0.25 * bull + 0.50 * base + 0.25 * bear
+    return {
+        "bull": round(bull, 2),
+        "base": round(base, 2),
+        "bear": round(bear, 2),
+        "weighted": round(weighted, 2),
+    }
+
+
 def _dcf_scenarios(stock) -> Optional[dict]:
     """Klarman-style scenario DCF — runs three independent valuations with
     different growth/discount/terminal assumptions, returns all three plus
@@ -1402,12 +1620,24 @@ def compute_mos_subscore(stock) -> Optional[dict]:
     elif business == "managed_care":
         scenarios = _managed_care_intrinsic_per_share(stock)
         method = "Fair P/B (managed care)"
+    elif business == "insurance":
+        scenarios = _insurance_intrinsic_per_share(stock)
+        method = "Fair P/B (P&C insurance)"
+    elif business == "asset_manager":
+        scenarios = _asset_manager_intrinsic_per_share(stock)
+        method = "DCF (markets-cyclical)"
+    elif business == "utility":
+        scenarios = _utility_intrinsic_per_share(stock)
+        method = "DDM (Gordon growth)"
     elif business == "energy_commodity":
         scenarios = _energy_commodity_intrinsic_per_share(stock)
         method = "Mid-cycle EV/EBITDA"
     elif business == "reit":
         scenarios = _reit_intrinsic_per_share(stock)
         method = "P/FFO (REIT)"
+    elif business == "pharma":
+        scenarios = _pharma_intrinsic_per_share(stock)
+        method = "DCF (pharma, elevated discount)"
     elif business in {"etf", "pre_profit"}:
         scenarios = None
         method = "n/a (ETF or pre-profit)"
