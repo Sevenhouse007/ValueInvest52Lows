@@ -3370,6 +3370,7 @@ function renderPortfolio() {
       <table style="width:100%;border-collapse:collapse;font-size:13px;">
         <thead>
           <tr style="background:var(--surface2);text-align:left;color:var(--text2);font-weight:500;">
+            <th style="padding:10px 4px;width:24px;"></th>
             <th style="padding:10px 12px;">Asset</th>
             <th style="padding:10px 12px;text-align:right;">Last Price</th>
             <th style="padding:10px 12px;text-align:right;">Shares</th>
@@ -3420,6 +3421,14 @@ function renderPortfolioSummary(t) {
     </div>`;
 }
 
+// Per-row expand/collapse state for the portfolio table. Lives on window so
+// it survives renderPortfolio() rebuilds (e.g. after a price refresh).
+window._portfolioExpanded = window._portfolioExpanded || new Map();
+function togglePortfolioRow(id) {
+  window._portfolioExpanded.set(id, !window._portfolioExpanded.get(id));
+  renderPortfolio();
+}
+
 function renderPortfolioRow(i) {
   const isCash = i.symbol === 'CASH';
   const sym = escapeHtml(i.symbol);
@@ -3445,10 +3454,10 @@ function renderPortfolioRow(i) {
   const wtCell = wt != null ? `${wt.toFixed(1)}%` : '—';
 
   // Action chip — derived from snapshot.action (set per the master action
-  // plan from the portfolio review). Hover surfaces the full notes so the
-  // user gets the rationale without expanding the row.
+  // plan from the portfolio review). Notes are surfaced via the expand
+  // chevron now (not the chip tooltip) so the full rationale + sizing +
+  // kill-switches read cleanly inline rather than in a hover bubble.
   const action = (i.snapshot && i.snapshot.action) || null;
-  const notesText = (i.notes || '').replace(/"/g, '&quot;');
   const actionStyles = {
     exit:    { bg: 'rgba(239,68,68,0.18)',  fg: 'var(--red)',   border: 'rgba(239,68,68,0.45)',  label: 'EXIT' },
     trim:    { bg: 'rgba(245,158,11,0.15)', fg: 'var(--amber)', border: 'rgba(245,158,11,0.4)',  label: 'TRIM' },
@@ -3459,11 +3468,27 @@ function renderPortfolioRow(i) {
     deploy:  { bg: 'rgba(45,212,191,0.18)', fg: 'var(--green)', border: 'rgba(45,212,191,0.45)', label: 'DEPLOY' },
   };
   const actionCell = action && actionStyles[action]
-    ? `<span title="${notesText}" style="background:${actionStyles[action].bg};color:${actionStyles[action].fg};border:1px solid ${actionStyles[action].border};padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;cursor:help;">${actionStyles[action].label}</span>`
+    ? `<span style="background:${actionStyles[action].bg};color:${actionStyles[action].fg};border:1px solid ${actionStyles[action].border};padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;">${actionStyles[action].label}</span>`
     : '<span style="color:var(--text2);font-size:11px;">—</span>';
 
-  return `
+  // Expand chevron — only rendered when there are notes worth reading.
+  // CASH always has a deploy plan; positions tagged with a non-hold action
+  // typically carry the most useful notes. Hold rows still get the chevron
+  // if notes are non-empty.
+  const hasNotes = !!(i.notes && i.notes.trim());
+  const expanded = !!window._portfolioExpanded.get(i.id);
+  const chevron = hasNotes
+    ? `<button onclick="togglePortfolioRow(${i.id})"
+              title="${expanded ? 'Hide' : 'Show'} action notes"
+              style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:13px;padding:2px 6px;line-height:1;">${expanded ? '▾' : '▸'}</button>`
+    : '<span style="display:inline-block;width:24px;"></span>';
+
+  // Main data row + (if expanded) a second row that spans all columns to
+  // render the notes block. Pre-wrap preserves the bullets + paragraph
+  // breaks the action plan was authored with.
+  let html = `
     <tr style="border-top:1px solid var(--border);${rowBg}">
+      <td style="padding:10px 4px;text-align:center;vertical-align:middle;">${chevron}</td>
       <td style="padding:10px 12px;">
         <div style="font-weight:600;">${sym}</div>
         ${name ? `<div style="color:var(--text2);font-size:11px;">${name}</div>` : ''}
@@ -3477,13 +3502,33 @@ function renderPortfolioRow(i) {
       <td style="padding:10px 12px;text-align:center;">${actionCell}</td>
       <td style="padding:10px 12px;text-align:center;">
         <button onclick="openPortfolioEditForm(${i.id})"
-                title="Edit"
+                title="Edit position / notes"
                 style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:14px;">✎</button>
         <button onclick="deletePortfolioItem(${i.id}, '${sym}')"
                 title="Delete"
                 style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;">×</button>
       </td>
     </tr>`;
+
+  if (expanded && hasNotes) {
+    const notesEsc = escapeHtml(i.notes);
+    const updatedAt = i.updated_at ? `Last updated ${escapeHtml(i.updated_at)}` : '';
+    html += `
+      <tr style="${rowBg}">
+        <td></td>
+        <td colspan="9" style="padding:0 12px 14px 12px;">
+          <div style="background:var(--surface2);border:1px solid var(--border);border-left:3px solid ${(actionStyles[action]||{}).border || 'var(--border)'};border-radius:6px;padding:14px 16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:.04em;">
+              <span>Action plan — ${sym}</span>
+              <span>${updatedAt}</span>
+            </div>
+            <div style="white-space:pre-wrap;font-size:13px;line-height:1.55;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${notesEsc}</div>
+          </div>
+        </td>
+      </tr>`;
+  }
+
+  return html;
 }
 
 function fmtNum(n) {
