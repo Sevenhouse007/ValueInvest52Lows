@@ -97,6 +97,16 @@ def init_db():
             )
         """)
 
+        # Migration: add prev_close so the portfolio/watchlist endpoints can
+        # surface daily $ and % change without a second yfinance roundtrip.
+        # quoteSummary returns regularMarketPreviousClose alongside the live
+        # price; we cache it here next to the existing price column so reads
+        # stay fast even when a position isn't in the daily-scan universe.
+        try:
+            conn.execute("SELECT prev_close FROM symbol_latest_price LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN prev_close REAL")
+
         # Migration: add market_sector_averages_json if not present
         try:
             conn.execute("SELECT market_sector_averages_json FROM scans LIMIT 1")
@@ -447,18 +457,40 @@ def get_backtest_details() -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def upsert_latest_price(symbol: str, price: float, updated_at: Optional[str] = None):
-    """Record the latest known price for a symbol (UPSERT)."""
+def upsert_latest_price(
+    symbol: str,
+    price: float,
+    updated_at: Optional[str] = None,
+    prev_close: Optional[float] = None,
+):
+    """Record the latest known price for a symbol (UPSERT). When prev_close
+    is provided it's persisted too so day-change math comes from cache; when
+    omitted, any existing prev_close is preserved (the daily scan only knows
+    the latest scan price, not the prior close)."""
     if not symbol or price is None or price <= 0:
         return
     if updated_at is None:
         updated_at = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
-        conn.execute("""
-            INSERT INTO symbol_latest_price (symbol, price, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(symbol) DO UPDATE SET price = excluded.price, updated_at = excluded.updated_at
-        """, (symbol, price, updated_at))
+        if prev_close is not None and prev_close > 0:
+            conn.execute("""
+                INSERT INTO symbol_latest_price (symbol, price, updated_at, prev_close)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    price = excluded.price,
+                    updated_at = excluded.updated_at,
+                    prev_close = excluded.prev_close
+            """, (symbol, price, updated_at, prev_close))
+        else:
+            # Don't clobber an existing prev_close just because the caller
+            # didn't have it (e.g. legacy daily-scan path).
+            conn.execute("""
+                INSERT INTO symbol_latest_price (symbol, price, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    price = excluded.price,
+                    updated_at = excluded.updated_at
+            """, (symbol, price, updated_at))
 
 
 def get_recent_tracked_symbols(lookback_days: int = 365) -> list[str]:

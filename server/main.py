@@ -802,7 +802,8 @@ def _build_response(result: ScanResult) -> dict:
 def _enrich_watchlist_item(item: dict, latest_prices: dict) -> dict:
     """Add current_price + ready_to_buy flag in place of pure DB fields."""
     sym = item["symbol"]
-    cur = latest_prices.get(sym)
+    info = latest_prices.get(sym) or {}
+    cur = info.get("price") if isinstance(info, dict) else info
     item["current_price"] = cur
     target = item.get("target_price")
     questions = item.get("questions") or []
@@ -820,66 +821,72 @@ def _enrich_watchlist_item(item: dict, latest_prices: dict) -> dict:
     return item
 
 
-async def _fetch_latest_prices(symbols: list[str]) -> dict[str, float]:
+def _unwrap_yahoo(v):
+    """Yahoo wraps numbers as {"raw": x, "fmt": "..."}; pull the float."""
+    if isinstance(v, dict):
+        v = v.get("raw")
+    return float(v) if v is not None else None
+
+
+async def _fetch_latest_prices(symbols: list[str]) -> dict[str, dict]:
     """Read latest prices from symbol_latest_price (maintained by scan/fill).
 
-    For symbols not in that table — typically watchlist or portfolio items
-    the scanner hasn't seen because they aren't at 52W lows — fall back to
-    parallel `YahooClient.fetch_quote_summary` calls (the same path the
-    daily scan and `/api/lookup` use, which is known to work on Render
-    while yfinance fast_info silently fails there). Successful lookups
-    are persisted via upsert_latest_price so the next request reads from
-    SQL instead of paying the network cost again.
+    Returns a dict per symbol with {price, prev_close} so callers can compute
+    day-change without a second roundtrip. For symbols not in cache — typically
+    watchlist or portfolio items the scanner hasn't seen because they aren't
+    at 52W lows — fall back to parallel `YahooClient.fetch_quote_summary` calls
+    (the same path the daily scan and `/api/lookup` use; yfinance fast_info
+    silently fails on Render's egress while the direct quoteSummary endpoint
+    works fine). Successful lookups are persisted via upsert_latest_price so
+    the next request reads from SQL instead of paying the network cost again.
     """
     from server.database import get_db
-    out: dict[str, float] = {}
+    out: dict[str, dict] = {}
     if not symbols:
         return out
     placeholders = ",".join("?" * len(symbols))
     with get_db() as conn:
         rows = conn.execute(
-            f"SELECT symbol, price FROM symbol_latest_price WHERE symbol IN ({placeholders})",
+            f"SELECT symbol, price, prev_close FROM symbol_latest_price "
+            f"WHERE symbol IN ({placeholders})",
             symbols,
         ).fetchall()
         for r in rows:
-            out[r["symbol"]] = r["price"]
-    missing = [s for s in symbols if s not in out]
+            out[r["symbol"]] = {"price": r["price"], "prev_close": r["prev_close"]}
+    # Two reasons to refetch: missing entirely, or cached but no prev_close
+    # yet (older rows written before the column existed).
+    missing = [s for s in symbols if s not in out or out[s].get("prev_close") is None]
     if not missing:
         return out
 
-    # Use the same Yahoo HTTP client the daily scan uses — fast_info via
-    # the yfinance library mysteriously fails on Render's egress while
-    # the direct quoteSummary endpoint works fine. Parallelize so 16
-    # symbols cost roughly what 1 does, capped by the client's own
-    # MAX_CONCURRENT_REQUESTS semaphore.
     global _yahoo_client
     if _yahoo_client is None:
         _yahoo_client = YahooClient()
 
-    async def _one(sym: str) -> tuple[str, Optional[float]]:
+    async def _one(sym: str) -> tuple[str, Optional[float], Optional[float]]:
         try:
             data = await _yahoo_client.fetch_quote_summary(sym)
             if not data:
-                return sym, None
-            # quoteSummary returns price under either summaryDetail.regularMarketPrice
-            # or price.regularMarketPrice — try both, mirroring the pipeline parser.
+                return sym, None, None
             sd = data.get("summaryDetail", {}) or {}
             pr = data.get("price", {}) or {}
-            raw = (sd.get("regularMarketPrice") or pr.get("regularMarketPrice"))
-            # Yahoo wraps numbers as {"raw": x, "fmt": "..."}; unwrap if needed.
-            if isinstance(raw, dict):
-                raw = raw.get("raw")
-            return sym, (float(raw) if raw else None)
+            price = _unwrap_yahoo(sd.get("regularMarketPrice") or pr.get("regularMarketPrice"))
+            prev = _unwrap_yahoo(
+                sd.get("regularMarketPreviousClose")
+                or sd.get("previousClose")
+                or pr.get("regularMarketPreviousClose")
+            )
+            return sym, price, prev
         except Exception as e:
             logger.debug(f"price fallback failed for {sym}: {e}")
-            return sym, None
+            return sym, None, None
 
     results = await asyncio.gather(*(_one(s) for s in missing))
-    for sym, price in results:
+    for sym, price, prev in results:
         if price:
-            out[sym] = price
+            out[sym] = {"price": price, "prev_close": prev}
             try:
-                upsert_latest_price(sym, price)
+                upsert_latest_price(sym, price, prev_close=prev)
             except Exception as e:
                 logger.debug(f"upsert_latest_price({sym}) failed: {e}")
     return out
@@ -956,18 +963,24 @@ async def watchlist_delete(item_id: int):
 # price=1.0 so it flows through the same math without special cases above.
 
 def _enrich_portfolio_item(item: dict, latest_prices: dict) -> dict:
-    """Compute current_price, market_value, and P&L on a portfolio row."""
+    """Compute current_price, market_value, P&L, and day-change on a row."""
     sym = item["symbol"]
     if sym == "CASH":
-        # Cash: shares are dollars, price is always $1, no P&L.
+        # Cash: shares are dollars, price is always $1, no P&L or day move.
         item["current_price"] = 1.0
+        item["prev_close"] = 1.0
         item["market_value"] = float(item["shares"])
         item["total_cost"] = float(item["shares"])
         item["pnl"] = 0.0
         item["pnl_pct"] = 0.0
+        item["day_change"] = 0.0
+        item["day_change_pct"] = 0.0
         return item
-    cur = latest_prices.get(sym)
+    info = latest_prices.get(sym) or {}
+    cur = info.get("price") if isinstance(info, dict) else info
+    prev = info.get("prev_close") if isinstance(info, dict) else None
     item["current_price"] = cur
+    item["prev_close"] = prev
     shares = float(item["shares"])
     cost = float(item["cost_basis"])
     item["total_cost"] = round(shares * cost, 2)
@@ -976,11 +989,20 @@ def _enrich_portfolio_item(item: dict, latest_prices: dict) -> dict:
         item["market_value"] = None
         item["pnl"] = None
         item["pnl_pct"] = None
+        item["day_change"] = None
+        item["day_change_pct"] = None
     else:
         mv = shares * cur
         item["market_value"] = round(mv, 2)
         item["pnl"] = round(mv - shares * cost, 2)
         item["pnl_pct"] = round((cur / cost - 1) * 100, 2) if cost > 0 else None
+        if prev and prev > 0:
+            day_chg_per_share = cur - prev
+            item["day_change"] = round(shares * day_chg_per_share, 2)
+            item["day_change_pct"] = round((cur / prev - 1) * 100, 2)
+        else:
+            item["day_change"] = None
+            item["day_change_pct"] = None
     return item
 
 
@@ -1000,6 +1022,16 @@ async def portfolio_list():
     total_cost = sum(i["total_cost"] for i in enriched if i.get("total_cost") is not None)
     pnl = nav - total_cost
     pnl_pct = (pnl / total_cost * 100) if total_cost > 0 else 0.0
+
+    # Day-level totals: $ summed across positions where we have prev_close.
+    # The % uses NAV-minus-day-change as the denominator so it represents
+    # "how much did NAV move today" relative to yesterday's NAV.
+    day_change_total = sum(
+        i["day_change"] for i in enriched if i.get("day_change") is not None
+    )
+    nav_yday = nav - day_change_total
+    day_change_pct = (day_change_total / nav_yday * 100) if nav_yday > 0 else 0.0
+
     # Position weights vs total NAV (cash included).
     for i in enriched:
         mv = i.get("market_value")
@@ -1012,6 +1044,8 @@ async def portfolio_list():
             "total_cost": round(total_cost, 2),
             "pnl": round(pnl, 2),
             "pnl_pct": round(pnl_pct, 2),
+            "day_change": round(day_change_total, 2),
+            "day_change_pct": round(day_change_pct, 2),
             "positions_count": sum(1 for i in enriched if i["symbol"] != "CASH"),
             "cash": next(
                 (i["market_value"] for i in enriched if i["symbol"] == "CASH"), 0.0

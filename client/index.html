@@ -3373,6 +3373,7 @@ function renderPortfolio() {
             <th style="padding:10px 4px;width:24px;"></th>
             <th style="padding:10px 12px;">Asset</th>
             <th style="padding:10px 12px;text-align:right;">Last Price</th>
+            <th style="padding:10px 12px;text-align:right;">Day Change</th>
             <th style="padding:10px 12px;text-align:right;">Shares</th>
             <th style="padding:10px 12px;text-align:right;">Avg Cost</th>
             <th style="padding:10px 12px;text-align:right;">Market Value</th>
@@ -3396,12 +3397,27 @@ function renderPortfolioSummary(t) {
   if (!t || t.nav === undefined) { s.innerHTML = ''; return; }
   const pnlColor = (t.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
   const pnlSign = (t.pnl || 0) >= 0 ? '+' : '';
+  // Day-change card mirrors brokerage convention: green when up, red when
+  // down, single sign in front of both $ and %. Falls back to dashes when
+  // we have no prev_close (e.g. very first request after wiping cache).
+  const dayChg = t.day_change;
+  const dayPct = t.day_change_pct;
+  const haveDay = (dayChg !== null && dayChg !== undefined);
+  const dayColor = haveDay ? (dayChg >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text2)';
+  const daySign = haveDay ? (dayChg >= 0 ? '+' : '−') : '';
+  const dayMain = haveDay ? `${daySign}$${fmtNum(Math.abs(dayChg))}` : '—';
+  const daySub = haveDay ? `${daySign}${Math.abs(dayPct||0).toFixed(2)}% today` : 'no prior close';
   s.innerHTML = `
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px;">
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;">
         <div style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px;">Net Asset Value</div>
         <div style="font-size:22px;font-weight:600;">$${fmtNum(t.nav)}</div>
         <div style="color:var(--text2);font-size:12px;margin-top:2px;">Cost basis: $${fmtNum(t.total_cost)}</div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;">
+        <div style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px;">Day Change</div>
+        <div style="font-size:22px;font-weight:600;color:${dayColor};">${dayMain}</div>
+        <div style="color:${dayColor};font-size:12px;margin-top:2px;">${daySub}</div>
       </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;">
         <div style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px;">Total P&amp;L</div>
@@ -3452,6 +3468,19 @@ function renderPortfolioRow(i) {
            <div style="color:${pnlColor};font-size:11px;">${pnlSign}${(pnlPct||0).toFixed(2)}%</div>`
         : '—');
   const wtCell = wt != null ? `${wt.toFixed(1)}%` : '—';
+
+  // Day-change cell — $ amount on top, % below, mirrors the P&L column
+  // styling but for today's move only. Cash row stays blank since cash
+  // doesn't move.
+  const dayChg = i.day_change;
+  const dayPct = i.day_change_pct;
+  let dayCell = '—';
+  if (!isCash && dayChg !== null && dayChg !== undefined) {
+    const dayColor = dayChg >= 0 ? 'var(--green)' : 'var(--red)';
+    const daySign = dayChg >= 0 ? '+' : '−';
+    dayCell = `<span style="color:${dayColor};">${daySign}$${fmtNum(Math.abs(dayChg))}</span>
+               <div style="color:${dayColor};font-size:11px;">${daySign}${Math.abs(dayPct||0).toFixed(2)}%</div>`;
+  }
 
   // Action chip — derived from snapshot.action (set per the master action
   // plan from the portfolio review). Notes are surfaced via the expand
@@ -3504,6 +3533,7 @@ function renderPortfolioRow(i) {
         ${name ? `<div style="color:var(--text2);font-size:11px;">${name}</div>` : ''}
       </td>
       <td style="padding:10px 12px;text-align:right;">${priceCell}</td>
+      <td style="padding:10px 12px;text-align:right;">${dayCell}</td>
       <td style="padding:10px 12px;text-align:right;">${sharesCell}</td>
       <td style="padding:10px 12px;text-align:right;">${costCell}</td>
       <td style="padding:10px 12px;text-align:right;font-weight:500;">${mvCell}</td>
@@ -3526,7 +3556,7 @@ function renderPortfolioRow(i) {
     html += `
       <tr style="${rowBg}">
         <td></td>
-        <td colspan="9" style="padding:0 12px 14px 12px;">
+        <td colspan="10" style="padding:0 12px 14px 12px;">
           <div style="background:var(--surface2);border:1px solid var(--border);border-left:3px solid ${(actionStyles[action]||{}).border || 'var(--border)'};border-radius:6px;padding:14px 16px;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:.04em;">
               <span>Action plan — ${sym}</span>
