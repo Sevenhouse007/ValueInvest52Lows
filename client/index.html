@@ -3471,23 +3471,33 @@ function renderPortfolioRow(i) {
     ? `<span style="background:${actionStyles[action].bg};color:${actionStyles[action].fg};border:1px solid ${actionStyles[action].border};padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;">${actionStyles[action].label}</span>`
     : '<span style="color:var(--text2);font-size:11px;">—</span>';
 
-  // Expand chevron — only rendered when there are notes worth reading.
-  // CASH always has a deploy plan; positions tagged with a non-hold action
-  // typically carry the most useful notes. Hold rows still get the chevron
-  // if notes are non-empty.
+  // Expand chevron — purely visual now; the entire row is clickable. We
+  // still render it so the user has an obvious affordance for "this row
+  // expands," and so collapsed/expanded state is visible at a glance.
   const hasNotes = !!(i.notes && i.notes.trim());
   const expanded = !!window._portfolioExpanded.get(i.id);
   const chevron = hasNotes
-    ? `<button onclick="togglePortfolioRow(${i.id})"
-              title="${expanded ? 'Hide' : 'Show'} action notes"
-              style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:13px;padding:2px 6px;line-height:1;">${expanded ? '▾' : '▸'}</button>`
-    : '<span style="display:inline-block;width:24px;"></span>';
+    ? `<span style="color:var(--text2);font-size:13px;line-height:1;user-select:none;">${expanded ? '▾' : '▸'}</span>`
+    : '<span style="display:inline-block;width:12px;"></span>';
+
+  // Whole row toggles the notes panel. Action buttons (✎ Edit, × Delete)
+  // stopPropagation so they don't double-fire the toggle. Hover gets a
+  // subtle background change as the click affordance — only when the row
+  // actually has notes worth showing.
+  const rowCursor = hasNotes ? 'cursor:pointer;' : '';
+  const rowOnClick = hasNotes ? `onclick="togglePortfolioRow(${i.id})"` : '';
+  const hoverIn = hasNotes
+    ? `onmouseover="this.style.background='rgba(148,163,184,0.08)'"`
+    : '';
+  const hoverOut = hasNotes
+    ? `onmouseout="this.style.background='${isCash ? 'rgba(45,212,191,0.06)' : ''}'"`
+    : '';
 
   // Main data row + (if expanded) a second row that spans all columns to
   // render the notes block. Pre-wrap preserves the bullets + paragraph
   // breaks the action plan was authored with.
   let html = `
-    <tr style="border-top:1px solid var(--border);${rowBg}">
+    <tr style="border-top:1px solid var(--border);${rowBg}${rowCursor}" ${rowOnClick} ${hoverIn} ${hoverOut}>
       <td style="padding:10px 4px;text-align:center;vertical-align:middle;">${chevron}</td>
       <td style="padding:10px 12px;">
         <div style="font-weight:600;">${sym}</div>
@@ -3501,10 +3511,10 @@ function renderPortfolioRow(i) {
       <td style="padding:10px 12px;text-align:right;">${wtCell}</td>
       <td style="padding:10px 12px;text-align:center;">${actionCell}</td>
       <td style="padding:10px 12px;text-align:center;">
-        <button onclick="openPortfolioEditForm(${i.id})"
+        <button onclick="event.stopPropagation(); openPortfolioEditForm(${i.id})"
                 title="Edit position / notes"
                 style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:14px;">✎</button>
-        <button onclick="deletePortfolioItem(${i.id}, '${sym}')"
+        <button onclick="event.stopPropagation(); deletePortfolioItem(${i.id}, '${sym}')"
                 title="Delete"
                 style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;">×</button>
       </td>
