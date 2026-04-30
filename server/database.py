@@ -169,6 +169,16 @@ def init_db():
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_quality_flag TEXT")
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_axes_used TEXT")
 
+        # Migration: business-classification + valuation-method labels so
+        # the UI can show "DCF" vs "Fair P/B" vs "Mid-cycle EV/EBITDA" etc.
+        # This is purely cosmetic — composite math doesn't depend on it —
+        # but it lets the user verify the right framework is being used.
+        try:
+            conn.execute("SELECT mos_method FROM symbol_latest_price LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_method TEXT")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_business TEXT")
+
         # Migration: add market_sector_averages_json if not present
         try:
             conn.execute("SELECT market_sector_averages_json FROM scans LIMIT 1")
@@ -567,11 +577,15 @@ def upsert_mos_score(
     dcf_bear: Optional[float] = None,
     quality_flag: Optional[str] = None,
     axes_used: Optional[list] = None,
+    method: Optional[str] = None,
+    business: Optional[str] = None,
 ) -> None:
     """Persist the Klarman-style MoS = % discount to intrinsic value.
 
     quality_flag  = 'high' | 'medium' | 'low' — confidence in the composite
     axes_used     = which of [peer, dcf, asset] actually contributed (json)
+    method        = label of valuation framework ("DCF", "Fair P/B", etc.)
+    business      = sector bucket (bank/managed_care/energy_commodity/...)
     """
     if not symbol:
         return
@@ -583,9 +597,9 @@ def upsert_mos_score(
                 symbol, price, updated_at, mos_score, mos_updated_at,
                 mos_peer_discount, mos_dcf_discount, mos_asset_coverage, mos_intrinsic,
                 mos_dcf_bull, mos_dcf_base, mos_dcf_bear,
-                mos_quality_flag, mos_axes_used
+                mos_quality_flag, mos_axes_used, mos_method, mos_business
             )
-            VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol) DO UPDATE SET
                 mos_score = excluded.mos_score,
                 mos_updated_at = excluded.mos_updated_at,
@@ -597,11 +611,13 @@ def upsert_mos_score(
                 mos_dcf_base = excluded.mos_dcf_base,
                 mos_dcf_bear = excluded.mos_dcf_bear,
                 mos_quality_flag = excluded.mos_quality_flag,
-                mos_axes_used = excluded.mos_axes_used
+                mos_axes_used = excluded.mos_axes_used,
+                mos_method = excluded.mos_method,
+                mos_business = excluded.mos_business
         """, (symbol, updated_at, mos_score, updated_at,
               peer_discount, dcf_discount, asset_coverage, intrinsic,
               dcf_bull, dcf_base, dcf_bear,
-              quality_flag, axes_json))
+              quality_flag, axes_json, method, business))
 
 
 def get_mos_score(symbol: str) -> Optional[dict]:
@@ -611,7 +627,7 @@ def get_mos_score(symbol: str) -> Optional[dict]:
         r = conn.execute(
             "SELECT mos_score, mos_updated_at, mos_peer_discount, mos_dcf_discount, "
             "mos_asset_coverage, mos_intrinsic, mos_dcf_bull, mos_dcf_base, mos_dcf_bear, "
-            "mos_quality_flag, mos_axes_used "
+            "mos_quality_flag, mos_axes_used, mos_method, mos_business "
             "FROM symbol_latest_price WHERE symbol = ?",
             (symbol,),
         ).fetchone()
@@ -635,6 +651,8 @@ def get_mos_score(symbol: str) -> Optional[dict]:
             "mos_dcf_bear": r["mos_dcf_bear"],
             "mos_quality_flag": r["mos_quality_flag"],
             "mos_axes_used": axes,
+            "mos_method": r["mos_method"],
+            "mos_business": r["mos_business"],
         }
 
 

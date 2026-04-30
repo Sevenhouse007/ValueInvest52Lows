@@ -2448,6 +2448,8 @@ function renderWatchlistCard(i) {
     dcf_bear: i.mos_dcf_bear,
     quality_flag: i.mos_quality_flag,
     axes_used: i.mos_axes_used,
+    method: i.mos_method,
+    business: i.mos_business,
   };
   const mosBadgeHtml = renderMosPill(i.mos_score, wlBreakdown);
 
@@ -3489,6 +3491,12 @@ function renderMosPill(score, breakdown) {
   };
   const $$ = (v) => (v === null || v === undefined) ? '—' : `$${Number(v).toFixed(2)}`;
   let tooltip = `Klarman-style Margin of Safety: ${sign}${score}% discount to intrinsic value.`;
+  if (breakdown && breakdown.method) {
+    tooltip += `\n\nValuation method: ${breakdown.method}`;
+    if (breakdown.business && breakdown.business !== 'standard') {
+      tooltip += ` (sector bucket: ${breakdown.business})`;
+    }
+  }
   if (breakdown) {
     tooltip += `\n\nBreakdown:`;
     tooltip += `\n  Peer-relative   ${fmt(breakdown.peer_discount)}  (vs sector multiples)`;
@@ -3620,6 +3628,8 @@ function renderPortfolioRow(i) {
     dcf_bear: i.mos_dcf_bear,
     quality_flag: i.mos_quality_flag,
     axes_used: i.mos_axes_used,
+    method: i.mos_method,
+    business: i.mos_business,
   };
   const mosPillHtml = renderMosPill(i.mos_score, breakdown);
   const reviewedAt = i.snapshot && i.snapshot.mos_reviewed_at;

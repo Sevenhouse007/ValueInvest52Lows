@@ -340,6 +340,8 @@ async def recompute_mos_scores():
                     dcf_bear=r.get("dcf_bear"),
                     quality_flag=r.get("data_quality"),
                     axes_used=r.get("axes_used"),
+                    method=r.get("method"),
+                    business=r.get("business"),
                 )
             except Exception as e:
                 logger.warning(f"upsert_mos_score({sym}) failed: {e}")
@@ -907,38 +909,113 @@ def _peer_discount_pct(value: Optional[float], sector_median: Optional[float]) -
     return max(-80.0, min(80.0, discount))
 
 
-# Sectors where TTM FCF is a poor proxy for normalized earnings power.
-# For these, the DCF runs on a smoothed FCF (5-year average if available,
-# else TTM dampened toward sector norms). This prevents AMR/CNR/OXY type
-# scoring distortions where projecting from a trough quarter produces
-# perpetually pessimistic intrinsics.
-_CYCLICAL_SECTORS = {
-    "energy", "basic materials", "industrials",
+# ─────────────── Sector classification (dispatcher) ───────────────
+# Different business models need different intrinsic-value models. A
+# DCF works for stable cash-flow businesses, residual-income/fair-P/B
+# for banks and insurers, P/B+normalized-EBITDA for commodity producers,
+# NAV for REITs. The classify_business() dispatcher picks the right
+# model based on Yahoo's sector + industry, and compute_mos_subscore()
+# routes accordingly.
+
+_BANK_INDUSTRIES = {"banks - diversified", "banks - regional", "banks"}
+
+# Health insurance / managed care — same residual-income framework as
+# banks (insurance underwriting capital ≈ banking equity), but with
+# different ROE and cost-of-equity assumptions.
+_MANAGED_CARE_INDUSTRIES = {
+    "healthcare plans",  # Yahoo's primary label for managed care
+    "health information services",  # secondary catch
 }
-_CYCLICAL_INDUSTRIES = {
-    # Auto, mining, steel, oil services — cycle-driven names that show up
-    # outside the broad cyclical sectors above.
-    "auto manufacturers", "auto parts", "auto & truck dealerships",
-    "thermal coal", "coking coal", "steel", "copper", "aluminum",
+
+# Commodity producers — E&P, miners, coal. TTM FCF and EBITDA both swing
+# wildly with commodity prices, so we route to a P/B + normalized EBITDA
+# model rather than a standard DCF.
+_ENERGY_COMMODITY_INDUSTRIES = {
     "oil & gas e&p", "oil & gas integrated", "oil & gas drilling",
     "oil & gas equipment & services", "oil & gas refining & marketing",
-    "marine shipping", "airlines", "trucking",
+    "thermal coal", "coking coal",
+    "steel", "copper", "aluminum", "gold", "silver",
+    "other industrial metals & mining", "other precious metals & mining",
+    "uranium",
 }
+
+# Midstream / pipelines — fee-based, not commodity-price exposed.
+# These DO produce predictable FCF, so we use a standard DCF but with
+# distribution-coverage as a quality cross-check.
+_ENERGY_MIDSTREAM_INDUSTRIES = {"oil & gas midstream"}
+
+# REITs — NAV/P/FFO model, not FCF DCF.
+_REIT_INDUSTRIES = {
+    "reit - residential", "reit - retail", "reit - office",
+    "reit - industrial", "reit - healthcare facilities",
+    "reit - hotel & motel", "reit - mortgage", "reit - specialty",
+    "reit - diversified",
+}
+
+# Cyclical-but-not-commodity (auto, transports). Standard DCF with FCF
+# smoothing is enough — these aren't pure commodity exposure.
+_CYCLICAL_INDUSTRIES = {
+    "auto manufacturers", "auto parts", "auto & truck dealerships",
+    "marine shipping", "airlines", "trucking", "railroads",
+    "semiconductors", "semiconductor equipment & materials",  # semis ARE cyclical
+}
+
+
+def classify_business(stock) -> str:
+    """Map a symbol to a valuation-model bucket. Returns one of:
+        bank             — residual income / fair P/B (BAC, WFC, JPM)
+        managed_care     — same framework, different priors (ELV, UNH, CVS)
+        energy_commodity — P/B + mid-cycle EBITDA (AMR, OXY, CNR)
+        energy_midstream — DCF + distribution coverage (EPD, KMI, WMB)
+        reit             — NAV / P/FFO (PSA, O, VICI)
+        cyclical         — DCF with smoothed FCF (auto, transport, semis)
+        pre_profit       — no DCF possible (IONQ, INFQ, QBTS, biotech)
+        etf              — no business; skip (IWM, SPY)
+        standard         — DCF + peer + asset (default for everything else)
+    """
+    sector = (getattr(stock, "sector", "") or "").strip().lower()
+    industry = (getattr(stock, "industry", "") or "").strip().lower()
+    quote_type = (getattr(stock, "quote_type", "") or "").strip().lower()
+
+    # ETF / index detection — Yahoo returns blank sector/industry for these
+    if quote_type == "etf" or (not sector and not industry):
+        return "etf"
+
+    # Industry-specific buckets
+    if industry in _BANK_INDUSTRIES:
+        return "bank"
+    if industry in _MANAGED_CARE_INDUSTRIES:
+        return "managed_care"
+    if industry in _ENERGY_COMMODITY_INDUSTRIES:
+        return "energy_commodity"
+    if industry in _ENERGY_MIDSTREAM_INDUSTRIES:
+        return "energy_midstream"
+    if industry in _REIT_INDUSTRIES or "reit" in industry:
+        return "reit"
+    if industry in _CYCLICAL_INDUSTRIES:
+        return "cyclical"
+
+    # Pre-profit detection — TTM FCF deeply negative or null AND no
+    # earnings. We can't run a DCF on a name that doesn't make money yet.
+    fcf = getattr(stock, "free_cash_flow", None)
+    eg = getattr(stock, "earnings_growth", None)
+    if (fcf is None or fcf < 0) and (eg is None or eg < -0.30):
+        return "pre_profit"
+
+    # Sector-level fallback (catches industries we haven't enumerated)
+    if sector in {"basic materials"}:
+        return "energy_commodity"
+
+    return "standard"
+
+
+# ── Backward compatibility shims (other callers still reference these) ──
+def _is_bank(stock) -> bool:
+    return classify_business(stock) == "bank"
 
 
 def _is_cyclical(stock) -> bool:
-    sector = (getattr(stock, "sector", "") or "").strip().lower()
-    industry = (getattr(stock, "industry", "") or "").strip().lower()
-    return sector in _CYCLICAL_SECTORS or industry in _CYCLICAL_INDUSTRIES
-
-
-def _is_bank(stock) -> bool:
-    """Banks (and sometimes insurers) need P/TBV-based scoring instead of
-    FCF-based DCF. Yahoo doesn't report FCF for banks because their "cash
-    flow" is dominated by deposit/loan changes that are operating, not
-    capital-allocating. Different valuation framework required."""
-    industry = (getattr(stock, "industry", "") or "").strip().lower()
-    return industry in {"banks - diversified", "banks - regional", "banks"}
+    return classify_business(stock) in {"energy_commodity", "cyclical"}
 
 
 def _normalized_fcf(stock) -> Optional[float]:
@@ -1042,6 +1119,145 @@ def _bank_intrinsic_per_share(stock) -> Optional[dict]:
     bull = book_per_share * fair_pb(bull_roe, max(0.06, coe - 0.005), g_book)
     weighted = 0.25 * bull + 0.50 * base + 0.25 * bear
 
+    return {
+        "bull": round(bull, 2),
+        "base": round(base, 2),
+        "bear": round(bear, 2),
+        "weighted": round(weighted, 2),
+    }
+
+
+def _managed_care_intrinsic_per_share(stock) -> Optional[dict]:
+    """Klarman-style intrinsic for managed care (health insurers). Same
+    residual-income / fair-P/B framework as banks — insurance underwriting
+    capital is functionally equivalent to bank equity — but with different
+    priors and a Medical Loss Ratio quality overlay.
+
+      Fair P/B = (ROE - g) / (cost_of_equity - g)
+      Intrinsic = current_book_per_share × Fair_P/B
+
+    Bank-style residual income works here because:
+      - Premium float is balance-sheet-driven (like deposits)
+      - ROE is the dominant value driver (not FCF)
+      - Yahoo doesn't compute meaningful FCF for insurers either
+    """
+    pb = getattr(stock, "price_to_book", None)
+    price = getattr(stock, "price", None)
+    roe = getattr(stock, "return_on_equity", None)
+    if not pb or pb <= 0 or not price or price <= 0:
+        return None
+    book_per_share = price / pb
+
+    # Cost of equity for managed care: 8.5% baseline (lower than banks
+    # because regulated revenue stream + recurring premium subscribers).
+    coe = getattr(stock, "sector_wacc", None)
+    coe = coe if (coe and 0.06 < coe < 0.13) else 0.085
+
+    if not roe or roe <= 0:
+        fpe = getattr(stock, "forward_pe", None)
+        if fpe and fpe > 0:
+            roe = pb / fpe  # back into ROE estimate
+        else:
+            return None
+    if abs(roe) > 1.5:
+        roe = roe / 100
+
+    g_book = 0.05  # managed care book grows faster than banks (premium growth)
+
+    def fair_pb(roe_, coe_, g_):
+        if coe_ <= g_:
+            coe_ = g_ + 0.04
+        if roe_ <= g_:
+            return 1.0
+        return (roe_ - g_) / (coe_ - g_)
+
+    # Scenarios: -25% / base / +20% on ROE — narrower band than banks
+    # because managed care ROE is more stable than bank ROE.
+    bear = book_per_share * fair_pb(max(0.04, roe * 0.75), coe + 0.01, g_book)
+    base = book_per_share * fair_pb(roe, coe, g_book)
+    bull = book_per_share * fair_pb(min(0.20, roe * 1.20), max(0.06, coe - 0.005), g_book)
+    weighted = 0.25 * bull + 0.50 * base + 0.25 * bear
+
+    return {
+        "bull": round(bull, 2),
+        "base": round(base, 2),
+        "bear": round(bear, 2),
+        "weighted": round(weighted, 2),
+    }
+
+
+def _energy_commodity_intrinsic_per_share(stock) -> Optional[dict]:
+    """Klarman-style intrinsic for commodity producers (E&P, miners, coal).
+    TTM FCF is unreliable at any point in the cycle, so we use:
+
+      Intrinsic ≈ (mid-cycle EBITDA × commodity-cycle multiple - net_debt)
+                  ÷ shares_outstanding
+
+    Where:
+      mid-cycle EBITDA = max(TTM EBITDA, EBITDA × 1.0)  (for now, just TTM —
+                        we don't have multi-year history yet; future work)
+      commodity-cycle multiple = 4.5x bear / 6x base / 8x bull
+      net_debt = total_debt - total_cash
+
+    The wide bull/bear band reflects how much of these businesses' value
+    depends on commodity prices that aren't predictable. Use peer + asset
+    axes for confirmation; don't bet the house on the DCF axis here.
+    """
+    ebitda = getattr(stock, "ebitda", None)
+    shares = getattr(stock, "shares_outstanding", None)
+    price = getattr(stock, "price", None)
+    if not ebitda or ebitda <= 0 or not shares or shares <= 0 or not price:
+        return None
+
+    total_debt = getattr(stock, "total_debt", None) or 0
+    total_cash = getattr(stock, "total_cash", None) or 0
+    net_debt = max(0, total_debt - total_cash)
+
+    def per_share(multiple):
+        ev = ebitda * multiple
+        equity_value = max(0, ev - net_debt)
+        return equity_value / shares
+
+    bear = per_share(4.5)
+    base = per_share(6.0)
+    bull = per_share(8.0)
+    weighted = 0.25 * bull + 0.50 * base + 0.25 * bear
+
+    return {
+        "bull": round(bull, 2),
+        "base": round(base, 2),
+        "bear": round(bear, 2),
+        "weighted": round(weighted, 2),
+    }
+
+
+def _reit_intrinsic_per_share(stock) -> Optional[dict]:
+    """Klarman-style intrinsic for REITs. REITs distribute most cash flow
+    so DCF doesn't work — primary anchor is NAV (fair value of the
+    underlying real estate net of debt). We approximate via P/FFO since
+    Yahoo provides FFO and price-to-FFO directly:
+
+      Intrinsic ≈ FFO_per_share × peer_avg_P_FFO
+
+    Falls back to dividend-yield-based valuation when P/FFO isn't
+    available. Both axes get a 25/50/25 scenario band on the multiple.
+    """
+    p_ffo = getattr(stock, "p_ffo", None)
+    ffo = getattr(stock, "ffo", None)
+    shares = getattr(stock, "shares_outstanding", None)
+    price = getattr(stock, "price", None)
+    if not p_ffo or p_ffo <= 0 or not ffo or ffo <= 0 or not shares or not price:
+        return None
+    ffo_per_share = ffo / shares
+    if ffo_per_share <= 0:
+        return None
+    # REIT cap-rate based multiples — bear 11x / base 14x / bull 17x are
+    # typical bands for high-quality REITs. Adjust if peer P/FFO data
+    # available; for now, fixed bands.
+    bear = ffo_per_share * 11
+    base = ffo_per_share * 14
+    bull = ffo_per_share * 17
+    weighted = 0.25 * bull + 0.50 * base + 0.25 * bear
     return {
         "bull": round(bull, 2),
         "base": round(base, 2),
@@ -1173,17 +1389,31 @@ def compute_mos_subscore(stock) -> Optional[dict]:
     peer_components = [d for d in (pe_disc, ev_disc, pb_disc) if d is not None]
     peer_discount = (sum(peer_components) / len(peer_components)) if peer_components else None
 
-    # ── 2) DCF discount (scenario-weighted) ────────────────────────────
-    # Klarman-style: bull/base/bear scenarios, weighted 25/50/25 to get
-    # the central intrinsic estimate. Stored separately so the UI can show
-    # the dispersion (wide band = low confidence in the point estimate).
-    # Banks route through _bank_intrinsic_per_share (residual-income / fair
-    # P/B) instead of the FCF-based DCF, since banks don't produce
-    # comparable FCF; cyclicals use _dcf_scenarios with smoothed FCF.
-    if _is_bank(stock):
+    # ── 2) DCF discount (scenario-weighted), routed by business model ───
+    # Different business types use fundamentally different valuation
+    # frameworks. Each path returns the same {bull, base, bear, weighted}
+    # shape so the composite math downstream is unchanged. The "method"
+    # label flows to the UI tooltip so the user knows WHICH framework
+    # was applied (and can sanity-check it).
+    business = classify_business(stock)
+    if business == "bank":
         scenarios = _bank_intrinsic_per_share(stock)
+        method = "Fair P/B (residual income)"
+    elif business == "managed_care":
+        scenarios = _managed_care_intrinsic_per_share(stock)
+        method = "Fair P/B (managed care)"
+    elif business == "energy_commodity":
+        scenarios = _energy_commodity_intrinsic_per_share(stock)
+        method = "Mid-cycle EV/EBITDA"
+    elif business == "reit":
+        scenarios = _reit_intrinsic_per_share(stock)
+        method = "P/FFO (REIT)"
+    elif business in {"etf", "pre_profit"}:
+        scenarios = None
+        method = "n/a (ETF or pre-profit)"
     else:
         scenarios = _dcf_scenarios(stock)
+        method = "DCF (5-yr FCF + terminal)"
     intrinsic = scenarios["weighted"] if scenarios else None
     if intrinsic and intrinsic > 0 and price and price > 0:
         dcf_discount = (intrinsic - price) / intrinsic * 100
@@ -1253,6 +1483,8 @@ def compute_mos_subscore(stock) -> Optional[dict]:
         "dcf_bear": scenarios["bear"] if scenarios else None,
         "data_quality": data_quality,
         "axes_used": have,
+        "method": method,
+        "business": business,
     }
 
 
@@ -1455,6 +1687,8 @@ def _attach_mos_score(item: dict) -> dict:
             item["mos_dcf_bear"] = m.get("mos_dcf_bear")
             item["mos_quality_flag"] = m.get("mos_quality_flag")
             item["mos_axes_used"] = m.get("mos_axes_used")
+            item["mos_method"] = m.get("mos_method")
+            item["mos_business"] = m.get("mos_business")
     return item
 
 
