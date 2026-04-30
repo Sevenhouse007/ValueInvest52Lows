@@ -315,6 +315,18 @@ async def recompute_mos_scores():
             raw = await _yahoo_client.fetch_quote_summary(sym)
             if not raw:
                 return sym, None
+            # Enrich with yfinance financials so balance-sheet items, FCF
+            # for some symbols (REITs, midstream, asset managers), and
+            # accruals/F-Score-driving line items flow through. Same
+            # enrichment the /api/lookup endpoint uses — without it,
+            # MoS for EPD/PLD/BLK degrades to peer-only.
+            try:
+                loop = asyncio.get_event_loop()
+                fin = await loop.run_in_executor(_executor, _fetch_yf_financials, sym)
+                if fin:
+                    raw["_yf_financials"] = fin
+            except Exception as e:
+                logger.debug(f"yf financials fallback failed for {sym}: {e}")
             quote = parse_quote_from_summary(sym, raw)
             fundamentals = parse_fundamentals(sym, raw)
             stock = merge_quote_and_fundamentals(quote, fundamentals)
@@ -1098,17 +1110,48 @@ def _normalized_fcf(stock) -> Optional[float]:
 
 def _dcf_value(fcf: float, shares: float, g: float, r: float, g_term: float) -> float:
     """Mechanical 5-year DCF + terminal value → per-share intrinsic.
-    All inputs validated by the caller; this is just the arithmetic."""
+    Two-stage growth: linearly fades from g (year 1) to g_term (year 5)
+    so high-growth names aren't projected to compound at hyper rates
+    forever, but get credit for near-term momentum. All inputs validated
+    by the caller; this is just the arithmetic."""
     if r <= g_term:
         r = g_term + 0.04  # need r > g_term for terminal-value math
     pv_total = 0.0
+    fcf_yr = fcf
     for yr in range(1, 6):
-        fcf_yr = fcf * ((1 + g) ** yr)
+        # Linear fade from initial growth to terminal growth over 5 years
+        g_yr = g + (g_term - g) * (yr - 1) / 4
+        fcf_yr = fcf_yr * (1 + g_yr)
         pv_total += fcf_yr / ((1 + r) ** yr)
-    fcf_yr5 = fcf * ((1 + g) ** 5)
-    terminal = fcf_yr5 * (1 + g_term) / (r - g_term)
+    terminal = fcf_yr * (1 + g_term) / (r - g_term)
     pv_total += terminal / ((1 + r) ** 5)
     return pv_total / shares
+
+
+def _adaptive_growth_cap(stock) -> float:
+    """Pick a max growth rate for the DCF based on whether the symbol
+    looks like a real compounder. Genuine high-growth names get up to
+    18% (decayed to terminal over 5 years via _dcf_value's two-stage
+    growth); average-growth names stay capped at 12%; otherwise 10%.
+
+    Heuristic: revenue_growth + earnings_growth must both clear the bar
+    to qualify for the higher cap — single-quarter spikes don't promote.
+    """
+    rg = getattr(stock, "revenue_growth", None)
+    eg = getattr(stock, "earnings_growth", None)
+    # Normalize ratio vs %
+    if rg is not None and abs(rg) > 1.5: rg = rg / 100
+    if eg is not None and abs(eg) > 1.5: eg = eg / 100
+    rg = rg or 0.0
+    eg = eg or 0.0
+    # Both signals high → genuine compounder (LLY, NVDA-era, AAPL pre-iPhone-saturation)
+    if rg >= 0.15 and eg >= 0.15:
+        return 0.18
+    # One strong signal → cautious upside
+    if rg >= 0.10 or eg >= 0.10:
+        return 0.15
+    # Stable business → standard cap
+    return 0.12
 
 
 def _bank_intrinsic_per_share(stock) -> Optional[dict]:
@@ -1235,20 +1278,44 @@ def _managed_care_intrinsic_per_share(stock) -> Optional[dict]:
     }
 
 
+# Mid-cycle EV/EBITDA multiples by commodity sub-industry. Integrated oil
+# majors trade at premium because of refining + chemicals + downstream
+# diversification; pure E&P at a discount because they're price-takers;
+# coal at deeper discount because of secular ESG + demand decline. These
+# come from long-term Damodaran sector data and trading-comp analysis.
+_COMMODITY_EBITDA_MULTIPLES = {
+    # (bear, base, bull) — wider bands for higher-volatility sub-sectors
+    "oil & gas integrated":            (6.0, 7.5, 9.0),   # XOM, CVX, BP, SHEL
+    "oil & gas e&p":                   (4.0, 5.5, 7.0),   # OXY, EOG, FANG
+    "oil & gas drilling":              (3.5, 5.0, 6.5),
+    "oil & gas equipment & services":  (5.0, 6.5, 8.0),   # SLB, HAL
+    "oil & gas refining & marketing":  (4.5, 6.0, 7.5),   # VLO, MPC, PSX
+    "thermal coal":                    (3.0, 4.5, 6.0),   # CNR thermal exposure
+    "coking coal":                     (3.5, 5.0, 6.5),   # AMR, CNR met
+    "steel":                           (4.0, 5.5, 7.0),   # NUE, X, STLD
+    "copper":                          (5.0, 6.5, 8.5),   # FCX
+    "aluminum":                        (4.5, 6.0, 7.5),
+    "gold":                            (6.0, 8.0, 10.0),  # NEM, GOLD — premium for safe-haven
+    "silver":                          (5.5, 7.5, 9.5),
+    "uranium":                         (5.5, 7.0, 9.0),
+    "other industrial metals & mining": (4.5, 6.0, 7.5),
+    "other precious metals & mining":  (5.5, 7.0, 9.0),
+}
+_COMMODITY_DEFAULT_MULTIPLES = (4.5, 6.0, 8.0)
+
+
 def _energy_commodity_intrinsic_per_share(stock) -> Optional[dict]:
     """Klarman-style intrinsic for commodity producers (E&P, miners, coal).
     TTM FCF is unreliable at any point in the cycle, so we use:
 
-      Intrinsic ≈ (mid-cycle EBITDA × commodity-cycle multiple - net_debt)
-                  ÷ shares_outstanding
+      Intrinsic ≈ (TTM EBITDA × cycle multiple − net_debt) / shares
 
-    Where:
-      mid-cycle EBITDA = max(TTM EBITDA, EBITDA × 1.0)  (for now, just TTM —
-                        we don't have multi-year history yet; future work)
-      commodity-cycle multiple = 4.5x bear / 6x base / 8x bull
-      net_debt = total_debt - total_cash
+    Cycle multiples are tuned per sub-industry — integrated oil majors
+    (7.5x base) trade at premium to pure E&P (5.5x) and coal (4.5x) for
+    diversification, refining margins, and durability reasons. See
+    _COMMODITY_EBITDA_MULTIPLES for the per-industry stack.
 
-    The wide bull/bear band reflects how much of these businesses' value
+    Wide bull/bear band reflects how much of these businesses' value
     depends on commodity prices that aren't predictable. Use peer + asset
     axes for confirmation; don't bet the house on the DCF axis here.
     """
@@ -1257,6 +1324,11 @@ def _energy_commodity_intrinsic_per_share(stock) -> Optional[dict]:
     price = getattr(stock, "price", None)
     if not ebitda or ebitda <= 0 or not shares or shares <= 0 or not price:
         return None
+
+    industry = (getattr(stock, "industry", "") or "").strip().lower()
+    bear_mult, base_mult, bull_mult = _COMMODITY_EBITDA_MULTIPLES.get(
+        industry, _COMMODITY_DEFAULT_MULTIPLES
+    )
 
     total_debt = getattr(stock, "total_debt", None) or 0
     total_cash = getattr(stock, "total_cash", None) or 0
@@ -1267,9 +1339,9 @@ def _energy_commodity_intrinsic_per_share(stock) -> Optional[dict]:
         equity_value = max(0, ev - net_debt)
         return equity_value / shares
 
-    bear = per_share(4.5)
-    base = per_share(6.0)
-    bull = per_share(8.0)
+    bear = per_share(bear_mult)
+    base = per_share(base_mult)
+    bull = per_share(bull_mult)
     weighted = 0.25 * bull + 0.50 * base + 0.25 * bear
 
     return {
@@ -1517,7 +1589,13 @@ def _dcf_scenarios(stock) -> Optional[dict]:
         growth = getattr(stock, "earnings_growth", None)
     if growth is not None and abs(growth) > 1.5:
         growth = growth / 100  # normalize % → decimal
-    g_base = max(0.0, min(0.12, growth or 0.03))
+
+    # Adaptive cap — genuine compounders get up to 18%, normal businesses
+    # stay at 12%. The two-stage growth in _dcf_value fades to terminal
+    # over 5 years so high-growth names don't compound at hyper rates
+    # forever — they just get credit for near-term momentum.
+    g_cap = _adaptive_growth_cap(stock)
+    g_base = max(0.0, min(g_cap, growth or 0.03))
 
     wacc = getattr(stock, "sector_wacc", None)
     r_base = wacc if (wacc and 0.05 < wacc < 0.20) else 0.10
@@ -1530,8 +1608,10 @@ def _dcf_scenarios(stock) -> Optional[dict]:
     # Base: as is
     base = _dcf_value(fcf, shares, g_base, r_base, 0.025)
 
-    # Bull: 1.5x growth (cap at 15%), 100 bps lower discount, 3% terminal
-    g_bull = min(0.15, g_base * 1.5)
+    # Bull: 1.5x growth (cap at adaptive limit + 3pp), 100 bps lower
+    # discount, 3% terminal. Bull case allows a touch more headroom
+    # (g_cap + 0.03) since two-stage decay tames the impact.
+    g_bull = min(g_cap + 0.03, g_base * 1.5)
     r_bull = max(0.06, r_base - 0.01)
     bull = _dcf_value(fcf, shares, g_bull, r_bull, 0.030)
 
