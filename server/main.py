@@ -335,6 +335,9 @@ async def recompute_mos_scores():
                     dcf_discount=r.get("dcf_discount"),
                     asset_coverage=r.get("asset_coverage"),
                     intrinsic=r.get("intrinsic"),
+                    dcf_bull=r.get("dcf_bull"),
+                    dcf_base=r.get("dcf_base"),
+                    dcf_bear=r.get("dcf_bear"),
                 )
             except Exception as e:
                 logger.warning(f"upsert_mos_score({sym}) failed: {e}")
@@ -902,18 +905,38 @@ def _peer_discount_pct(value: Optional[float], sector_median: Optional[float]) -
     return max(-80.0, min(80.0, discount))
 
 
-def _dcf_intrinsic_per_share(stock) -> Optional[float]:
-    """Klarman-style conservative 5-year DCF + terminal value, returning
-    intrinsic value per share. Inputs from quoteSummary fundamentals:
+def _dcf_value(fcf: float, shares: float, g: float, r: float, g_term: float) -> float:
+    """Mechanical 5-year DCF + terminal value → per-share intrinsic.
+    All inputs validated by the caller; this is just the arithmetic."""
+    if r <= g_term:
+        r = g_term + 0.04  # need r > g_term for terminal-value math
+    pv_total = 0.0
+    for yr in range(1, 6):
+        fcf_yr = fcf * ((1 + g) ** yr)
+        pv_total += fcf_yr / ((1 + r) ** yr)
+    fcf_yr5 = fcf * ((1 + g) ** 5)
+    terminal = fcf_yr5 * (1 + g_term) / (r - g_term)
+    pv_total += terminal / ((1 + r) ** 5)
+    return pv_total / shares
 
-      base_fcf      = trailing FCF (positive only; negative FCF → no DCF)
-      growth_rate   = clamp(revenue_growth, 0%, 12%) — capped to avoid
-                      extrapolating hyper-growth that won't repeat
-      discount_rate = sector WACC if available, else 10% (typical equity
-                      hurdle for Klarman-style conservative valuation)
-      terminal_g    = 2.5% (long-run inflation-ish perpetuity)
 
-    Returns None when any required input is missing.
+def _dcf_scenarios(stock) -> Optional[dict]:
+    """Klarman-style scenario DCF — runs three independent valuations with
+    different growth/discount/terminal assumptions, returns all three plus
+    the weighted middle (25% bull + 50% base + 25% bear).
+
+      Bear  — 0.5x base growth, +200 bps higher hurdle, 2.0% terminal
+              ("things go wrong; assume premium for risk")
+      Base  — clamped revenue/earnings growth, sector WACC (or 10% default),
+              2.5% terminal (current methodology)
+      Bull  — 1.5x base growth, -100 bps lower hurdle, 3.0% terminal
+              ("things go right; modest optimism")
+
+    Klarman's principle: triangulating intrinsic with multiple scenarios
+    gives a band rather than a single point estimate. The dispersion itself
+    is information — wide band = low confidence in the central estimate.
+
+    Returns None when any required input is missing (FCF, shares, etc.).
     """
     fcf = getattr(stock, "free_cash_flow", None)
     shares = getattr(stock, "shares_outstanding", None)
@@ -923,31 +946,34 @@ def _dcf_intrinsic_per_share(stock) -> Optional[float]:
     growth = getattr(stock, "revenue_growth", None)
     if growth is None:
         growth = getattr(stock, "earnings_growth", None)
-    # Yahoo returns growth as decimal (0.07 = 7%)
     if growth is not None and abs(growth) > 1.5:
-        growth = growth / 100  # already % – normalize
-    g = max(0.0, min(0.12, growth or 0.03))  # clamp 0-12%, default 3%
+        growth = growth / 100  # normalize % → decimal
+    g_base = max(0.0, min(0.12, growth or 0.03))
 
     wacc = getattr(stock, "sector_wacc", None)
-    r = wacc if (wacc and 0.05 < wacc < 0.20) else 0.10  # 10% fallback
-    g_term = 0.025
-    if r <= g_term:
-        r = g_term + 0.04  # need r > g_term for terminal-value math
+    r_base = wacc if (wacc and 0.05 < wacc < 0.20) else 0.10
 
-    # Project 5 years of FCF, discount each, plus terminal value at year 5
-    pv_total = 0.0
-    for yr in range(1, 6):
-        fcf_yr = fcf * ((1 + g) ** yr)
-        pv_total += fcf_yr / ((1 + r) ** yr)
-    fcf_yr5 = fcf * ((1 + g) ** 5)
-    terminal = fcf_yr5 * (1 + g_term) / (r - g_term)
-    pv_total += terminal / ((1 + r) ** 5)
+    # Bear: half the growth (floor at 0), 200 bps higher discount, 2% terminal
+    g_bear = max(0.0, g_base * 0.5)
+    r_bear = min(0.20, r_base + 0.02)
+    bear = _dcf_value(fcf, shares, g_bear, r_bear, 0.020)
 
-    # Equity value = enterprise-style PV of FCF, then divide by shares.
-    # We don't subtract net debt here because base_fcf is unlevered-ish for
-    # most names from Yahoo; an explicit net-debt subtraction would require
-    # parsing total_debt + total_cash separately. Adequate for this purpose.
-    return pv_total / shares
+    # Base: as is
+    base = _dcf_value(fcf, shares, g_base, r_base, 0.025)
+
+    # Bull: 1.5x growth (cap at 15%), 100 bps lower discount, 3% terminal
+    g_bull = min(0.15, g_base * 1.5)
+    r_bull = max(0.06, r_base - 0.01)
+    bull = _dcf_value(fcf, shares, g_bull, r_bull, 0.030)
+
+    weighted = 0.25 * bull + 0.50 * base + 0.25 * bear
+
+    return {
+        "bull": round(bull, 2),
+        "base": round(base, 2),
+        "bear": round(bear, 2),
+        "weighted": round(weighted, 2),
+    }
 
 
 def _asset_coverage_pct(stock, price: Optional[float]) -> Optional[float]:
@@ -1012,11 +1038,14 @@ def compute_mos_subscore(stock) -> Optional[dict]:
     peer_components = [d for d in (pe_disc, ev_disc, pb_disc) if d is not None]
     peer_discount = (sum(peer_components) / len(peer_components)) if peer_components else None
 
-    # ── 2) DCF discount ────────────────────────────────────────────────
-    intrinsic = _dcf_intrinsic_per_share(stock)
-    if intrinsic and price and price > 0:
+    # ── 2) DCF discount (scenario-weighted) ────────────────────────────
+    # Klarman-style: bull/base/bear scenarios, weighted 25/50/25 to get
+    # the central intrinsic estimate. Stored separately so the UI can show
+    # the dispersion (wide band = low confidence in the point estimate).
+    scenarios = _dcf_scenarios(stock)
+    intrinsic = scenarios["weighted"] if scenarios else None
+    if intrinsic and intrinsic > 0 and price and price > 0:
         dcf_discount = (intrinsic - price) / intrinsic * 100
-        # Cap at ±80% so one extreme estimate doesn't swamp the composite.
         dcf_discount = max(-80.0, min(80.0, dcf_discount))
     else:
         dcf_discount = None
@@ -1060,6 +1089,9 @@ def compute_mos_subscore(stock) -> Optional[dict]:
         "dcf_discount": round(dcf_discount) if dcf_discount is not None else None,
         "asset_coverage": round(coverage_pct) if coverage_pct is not None else None,
         "intrinsic": round(intrinsic, 2) if intrinsic else None,
+        "dcf_bull": scenarios["bull"] if scenarios else None,
+        "dcf_base": scenarios["base"] if scenarios else None,
+        "dcf_bear": scenarios["bear"] if scenarios else None,
     }
 
 
@@ -1257,6 +1289,9 @@ def _attach_mos_score(item: dict) -> dict:
             item["mos_dcf_discount"] = m.get("mos_dcf_discount")
             item["mos_asset_coverage"] = m.get("mos_asset_coverage")
             item["mos_intrinsic"] = m.get("mos_intrinsic")
+            item["mos_dcf_bull"] = m.get("mos_dcf_bull")
+            item["mos_dcf_base"] = m.get("mos_dcf_base")
+            item["mos_dcf_bear"] = m.get("mos_dcf_bear")
     return item
 
 

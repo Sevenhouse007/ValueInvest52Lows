@@ -145,6 +145,18 @@ def init_db():
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_asset_coverage INTEGER")
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_intrinsic REAL")
 
+        # Migration: scenario-analysis DCF — store the bull/base/bear
+        # intrinsic-per-share values so the UI tooltip can show the full
+        # dispersion. mos_intrinsic above now holds the weighted middle
+        # (25% bull + 50% base + 25% bear); these three columns hold the
+        # raw scenarios so the user can see how wide the band is.
+        try:
+            conn.execute("SELECT mos_dcf_bull FROM symbol_latest_price LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_dcf_bull REAL")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_dcf_base REAL")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_dcf_bear REAL")
+
         # Migration: add market_sector_averages_json if not present
         try:
             conn.execute("SELECT market_sector_averages_json FROM scans LIMIT 1")
@@ -538,19 +550,19 @@ def upsert_mos_score(
     dcf_discount: Optional[int] = None,
     asset_coverage: Optional[int] = None,
     intrinsic: Optional[float] = None,
+    dcf_bull: Optional[float] = None,
+    dcf_base: Optional[float] = None,
+    dcf_bear: Optional[float] = None,
 ) -> None:
     """Persist the Klarman-style MoS = % discount to intrinsic value.
 
-    mos_score = composite discount (positive = stock trades below intrinsic,
-                                    negative = trades at premium)
-    peer_discount = % below peer/sector multiples
-    dcf_discount  = % below 5-yr DCF intrinsic value
+    mos_score      = composite discount (positive = below intrinsic)
+    peer_discount  = % below peer/sector multiples
+    dcf_discount   = % below DCF intrinsic (computed against weighted middle)
     asset_coverage = price as % of tangible book (>100 = above book)
-    intrinsic    = composite intrinsic per share $
-
-    Recomputed daily by the scheduler from sector medians, FCF projections,
-    and balance-sheet items. No manual override — UI shows the number and
-    the breakdown, full stop.
+    intrinsic      = weighted-middle DCF intrinsic per share (25/50/25)
+    dcf_bull/base/bear = the three scenario DCFs — surface the dispersion
+                         so the user can see how wide the estimate band is.
     """
     if not symbol:
         return
@@ -559,26 +571,31 @@ def upsert_mos_score(
         conn.execute("""
             INSERT INTO symbol_latest_price (
                 symbol, price, updated_at, mos_score, mos_updated_at,
-                mos_peer_discount, mos_dcf_discount, mos_asset_coverage, mos_intrinsic
+                mos_peer_discount, mos_dcf_discount, mos_asset_coverage, mos_intrinsic,
+                mos_dcf_bull, mos_dcf_base, mos_dcf_bear
             )
-            VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol) DO UPDATE SET
                 mos_score = excluded.mos_score,
                 mos_updated_at = excluded.mos_updated_at,
                 mos_peer_discount = excluded.mos_peer_discount,
                 mos_dcf_discount = excluded.mos_dcf_discount,
                 mos_asset_coverage = excluded.mos_asset_coverage,
-                mos_intrinsic = excluded.mos_intrinsic
+                mos_intrinsic = excluded.mos_intrinsic,
+                mos_dcf_bull = excluded.mos_dcf_bull,
+                mos_dcf_base = excluded.mos_dcf_base,
+                mos_dcf_bear = excluded.mos_dcf_bear
         """, (symbol, updated_at, mos_score, updated_at,
-              peer_discount, dcf_discount, asset_coverage, intrinsic))
+              peer_discount, dcf_discount, asset_coverage, intrinsic,
+              dcf_bull, dcf_base, dcf_bear))
 
 
 def get_mos_score(symbol: str) -> Optional[dict]:
-    """Read the stored Klarman MoS composite + 3 components for a symbol."""
+    """Read the stored Klarman MoS composite + 3 components + scenario DCFs."""
     with get_db() as conn:
         r = conn.execute(
             "SELECT mos_score, mos_updated_at, mos_peer_discount, mos_dcf_discount, "
-            "mos_asset_coverage, mos_intrinsic "
+            "mos_asset_coverage, mos_intrinsic, mos_dcf_bull, mos_dcf_base, mos_dcf_bear "
             "FROM symbol_latest_price WHERE symbol = ?",
             (symbol,),
         ).fetchone()
@@ -591,6 +608,9 @@ def get_mos_score(symbol: str) -> Optional[dict]:
             "mos_dcf_discount": r["mos_dcf_discount"],
             "mos_asset_coverage": r["mos_asset_coverage"],
             "mos_intrinsic": r["mos_intrinsic"],
+            "mos_dcf_bull": r["mos_dcf_bull"],
+            "mos_dcf_base": r["mos_dcf_base"],
+            "mos_dcf_bear": r["mos_dcf_bear"],
         }
 
 

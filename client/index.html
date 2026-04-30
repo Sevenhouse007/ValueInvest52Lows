@@ -2443,6 +2443,9 @@ function renderWatchlistCard(i) {
     dcf_discount: i.mos_dcf_discount,
     asset_coverage: i.mos_asset_coverage,
     intrinsic: i.mos_intrinsic,
+    dcf_bull: i.mos_dcf_bull,
+    dcf_base: i.mos_dcf_base,
+    dcf_bear: i.mos_dcf_bear,
   };
   const mosBadgeHtml = renderMosPill(i.mos_score, wlBreakdown);
 
@@ -3468,23 +3471,39 @@ function renderMosPill(score, breakdown) {
   const sign = score > 0 ? '+' : '';
   const label = `MoS ${sign}${score}%`;
 
-  // Tooltip: surface the 3-component breakdown + the implied intrinsic so
-  // the user can see HOW the composite was derived. Title attribute is the
-  // simplest cross-browser line-break carrier.
+  // Tooltip: surface the 3-component breakdown + the scenario DCF band
+  // (bear/base/bull → 25/50/25 weighted middle) so the user can see HOW the
+  // composite was derived AND how wide the estimate band is. A tight band
+  // (low dispersion) means the central estimate is reliable; a wide band
+  // means low confidence — same number, different conviction.
   const fmt = (v) => {
     if (v === null || v === undefined) return '—';
     const s = v > 0 ? '+' : '';
     return `${s}${v}%`;
   };
+  const $$ = (v) => (v === null || v === undefined) ? '—' : `$${Number(v).toFixed(2)}`;
   let tooltip = `Klarman-style Margin of Safety: ${sign}${score}% discount to intrinsic value.`;
   if (breakdown) {
     tooltip += `\n\nBreakdown:`;
     tooltip += `\n  Peer-relative   ${fmt(breakdown.peer_discount)}  (vs sector multiples)`;
-    tooltip += `\n  DCF discount    ${fmt(breakdown.dcf_discount)}  (vs 5-yr DCF intrinsic)`;
+    tooltip += `\n  DCF discount    ${fmt(breakdown.dcf_discount)}  (vs scenario-weighted DCF)`;
     if (breakdown.asset_coverage !== null && breakdown.asset_coverage !== undefined) {
       tooltip += `\n  Price/TBV       ${breakdown.asset_coverage}%  (asset floor)`;
     }
-    if (breakdown.intrinsic) {
+    // Scenario DCF band — bear / base / bull / weighted middle
+    if (breakdown.dcf_bear || breakdown.dcf_base || breakdown.dcf_bull) {
+      tooltip += `\n\nDCF Scenarios (per share):`;
+      tooltip += `\n  Bear (25%)  ${$$(breakdown.dcf_bear)}`;
+      tooltip += `\n  Base (50%)  ${$$(breakdown.dcf_base)}`;
+      tooltip += `\n  Bull (25%)  ${$$(breakdown.dcf_bull)}`;
+      tooltip += `\n  Weighted    ${$$(breakdown.intrinsic)}  ← used for DCF discount`;
+      // Compute and surface dispersion as a confidence proxy
+      if (breakdown.dcf_bear && breakdown.dcf_bull && breakdown.intrinsic) {
+        const dispersion = ((breakdown.dcf_bull - breakdown.dcf_bear) / breakdown.intrinsic) * 100;
+        const conf = dispersion < 50 ? 'tight' : dispersion < 80 ? 'moderate' : 'wide';
+        tooltip += `\n\nEstimate band: ${dispersion.toFixed(0)}% (${conf} — ${conf === 'tight' ? 'high confidence' : conf === 'moderate' ? 'moderate confidence' : 'low confidence'} in central estimate)`;
+      }
+    } else if (breakdown.intrinsic) {
       tooltip += `\n\nDCF intrinsic: $${Number(breakdown.intrinsic).toFixed(2)}/sh`;
     }
     tooltip += `\n\nPositive = trades below intrinsic (Klarman MoS).\nKlarman zone: ≥30% discount. Recomputed daily.`;
@@ -3573,12 +3592,16 @@ function renderPortfolioRow(i) {
   //      the manual rating can't quietly drift forever.
   // Klarman MoS — strictly numerical, recomputed daily. The categorical
   // pill (snapshot.margin_of_safety) is no longer surfaced; the % discount
-  // to intrinsic value IS the rating.
+  // to intrinsic value IS the rating. Scenario DCFs (bear/base/bull) come
+  // through so the tooltip can show the estimate band.
   const breakdown = {
     peer_discount: i.mos_peer_discount,
     dcf_discount: i.mos_dcf_discount,
     asset_coverage: i.mos_asset_coverage,
     intrinsic: i.mos_intrinsic,
+    dcf_bull: i.mos_dcf_bull,
+    dcf_base: i.mos_dcf_base,
+    dcf_bear: i.mos_dcf_bear,
   };
   const mosPillHtml = renderMosPill(i.mos_score, breakdown);
   const reviewedAt = i.snapshot && i.snapshot.mos_reviewed_at;
