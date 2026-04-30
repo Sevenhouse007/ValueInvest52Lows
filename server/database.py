@@ -129,6 +129,22 @@ def init_db():
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_quality INTEGER")
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_capreturn INTEGER")
 
+        # Migration: Klarman-style MoS components. mos_score is now the
+        # composite *percentage discount to intrinsic value* (Seth Klarman's
+        # definition: MoS = (intrinsic - price) / intrinsic). Positive = the
+        # stock trades below estimated intrinsic value; negative = premium.
+        # The three components are themselves discount percentages so the
+        # composite is just a weighted average. mos_intrinsic stores the
+        # implied per-share fair value so the UI can show "fair $X vs price
+        # $Y" alongside the percentage.
+        try:
+            conn.execute("SELECT mos_peer_discount FROM symbol_latest_price LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_peer_discount INTEGER")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_dcf_discount INTEGER")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_asset_coverage INTEGER")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_intrinsic REAL")
+
         # Migration: add market_sector_averages_json if not present
         try:
             conn.execute("SELECT market_sector_averages_json FROM scans LIMIT 1")
@@ -518,18 +534,23 @@ def upsert_latest_price(
 def upsert_mos_score(
     symbol: str,
     mos_score: Optional[int],
-    cheapness: Optional[int] = None,
-    quality: Optional[int] = None,
-    capreturn: Optional[int] = None,
+    peer_discount: Optional[int] = None,
+    dcf_discount: Optional[int] = None,
+    asset_coverage: Optional[int] = None,
+    intrinsic: Optional[float] = None,
 ) -> None:
-    """Persist the daily-recomputed Margin of Safety composite + 3 subscores.
+    """Persist the Klarman-style MoS = % discount to intrinsic value.
 
-    Categorical MoS rating (high/medium/low/speculative) is a manual judgment
-    override stored on snapshot.margin_of_safety per portfolio/watchlist row.
-    The composite + subscores here are the deterministic auto-refreshed
-    counterpart, computed from sector-relative cheapness + quality + capital
-    return. UI surfaces both so the user can spot drift between the manual
-    rating and the numeric reality, and click to see the breakdown.
+    mos_score = composite discount (positive = stock trades below intrinsic,
+                                    negative = trades at premium)
+    peer_discount = % below peer/sector multiples
+    dcf_discount  = % below 5-yr DCF intrinsic value
+    asset_coverage = price as % of tangible book (>100 = above book)
+    intrinsic    = composite intrinsic per share $
+
+    Recomputed daily by the scheduler from sector medians, FCF projections,
+    and balance-sheet items. No manual override — UI shows the number and
+    the breakdown, full stop.
     """
     if not symbol:
         return
@@ -538,23 +559,26 @@ def upsert_mos_score(
         conn.execute("""
             INSERT INTO symbol_latest_price (
                 symbol, price, updated_at, mos_score, mos_updated_at,
-                mos_cheapness, mos_quality, mos_capreturn
+                mos_peer_discount, mos_dcf_discount, mos_asset_coverage, mos_intrinsic
             )
-            VALUES (?, 0, ?, ?, ?, ?, ?, ?)
+            VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol) DO UPDATE SET
                 mos_score = excluded.mos_score,
                 mos_updated_at = excluded.mos_updated_at,
-                mos_cheapness = excluded.mos_cheapness,
-                mos_quality = excluded.mos_quality,
-                mos_capreturn = excluded.mos_capreturn
-        """, (symbol, updated_at, mos_score, updated_at, cheapness, quality, capreturn))
+                mos_peer_discount = excluded.mos_peer_discount,
+                mos_dcf_discount = excluded.mos_dcf_discount,
+                mos_asset_coverage = excluded.mos_asset_coverage,
+                mos_intrinsic = excluded.mos_intrinsic
+        """, (symbol, updated_at, mos_score, updated_at,
+              peer_discount, dcf_discount, asset_coverage, intrinsic))
 
 
 def get_mos_score(symbol: str) -> Optional[dict]:
-    """Read the stored MoS composite + 3 subscores for a single symbol."""
+    """Read the stored Klarman MoS composite + 3 components for a symbol."""
     with get_db() as conn:
         r = conn.execute(
-            "SELECT mos_score, mos_updated_at, mos_cheapness, mos_quality, mos_capreturn "
+            "SELECT mos_score, mos_updated_at, mos_peer_discount, mos_dcf_discount, "
+            "mos_asset_coverage, mos_intrinsic "
             "FROM symbol_latest_price WHERE symbol = ?",
             (symbol,),
         ).fetchone()
@@ -563,9 +587,10 @@ def get_mos_score(symbol: str) -> Optional[dict]:
         return {
             "mos_score": r["mos_score"],
             "mos_updated_at": r["mos_updated_at"],
-            "mos_cheapness": r["mos_cheapness"],
-            "mos_quality": r["mos_quality"],
-            "mos_capreturn": r["mos_capreturn"],
+            "mos_peer_discount": r["mos_peer_discount"],
+            "mos_dcf_discount": r["mos_dcf_discount"],
+            "mos_asset_coverage": r["mos_asset_coverage"],
+            "mos_intrinsic": r["mos_intrinsic"],
         }
 
 

@@ -2436,13 +2436,15 @@ function renderWatchlistCard(i) {
   // rating from snapshot.margin_of_safety; auto subscore from i.mos_score
   // (recomputed daily by the scheduler from forward P/E + FCF yield +
   // debt/equity).
-  const mos = i.snapshot && i.snapshot.margin_of_safety;
-  const wlBreakdown = (i.mos_cheapness !== null && i.mos_cheapness !== undefined)
-    || (i.mos_quality !== null && i.mos_quality !== undefined)
-    || (i.mos_capreturn !== null && i.mos_capreturn !== undefined)
-    ? { cheapness: i.mos_cheapness, quality: i.mos_quality, capreturn: i.mos_capreturn }
-    : null;
-  const mosBadgeHtml = renderMosPill(mos, i.mos_score, wlBreakdown);
+  // Klarman MoS — strictly numerical, recomputed daily. % discount to
+  // intrinsic; positive = below fair value, negative = at premium.
+  const wlBreakdown = {
+    peer_discount: i.mos_peer_discount,
+    dcf_discount: i.mos_dcf_discount,
+    asset_coverage: i.mos_asset_coverage,
+    intrinsic: i.mos_intrinsic,
+  };
+  const mosBadgeHtml = renderMosPill(i.mos_score, wlBreakdown);
 
   const ribbonParts = [flagRibbonHtml, statusRibbonHtml, mosBadgeHtml].filter(Boolean);
   const ribbonHtml = ribbonParts.length
@@ -3443,35 +3445,52 @@ function togglePortfolioRow(id) {
   renderPortfolio();
 }
 
-// Render the combined MoS pill (categorical + auto subscore). Pill text
-// becomes "🛡️ HIGH · 87" when both signals present; either alone if only
-// one is. Hover tooltip surfaces the 3-subscore breakdown so you can see
-// what's driving the composite (sector-relative cheapness 0-40, quality
-// 0-30, capital return 0-30).
-function renderMosPill(category, score, breakdown) {
-  if (!category && (score === null || score === undefined)) return '';
-  const styles = {
-    high:        { bg: 'rgba(45,212,191,0.18)', fg: 'var(--green)', border: 'rgba(45,212,191,0.45)', label: 'HIGH', icon: '🛡️' },
-    medium:      { bg: 'rgba(148,163,184,0.15)', fg: 'var(--text)',  border: 'var(--border)',         label: 'MED',  icon: '🛡️' },
-    low:         { bg: 'rgba(245,158,11,0.12)',  fg: 'var(--amber)', border: 'rgba(245,158,11,0.35)', label: 'LOW',  icon: '🛡️' },
-    speculative: { bg: 'rgba(168,85,247,0.15)',  fg: '#c084fc',      border: 'rgba(168,85,247,0.4)',  label: 'SPEC', icon: '⚡' },
-  };
-  const s = styles[category] || { bg: 'rgba(148,163,184,0.15)', fg: 'var(--text2)', border: 'var(--border)', label: '', icon: '' };
-  const labelText = category ? `${s.icon} ${s.label}` : '';
-  const scoreText = (score !== null && score !== undefined) ? `${labelText ? ' · ' : ''}${score}` : '';
+// Render the Klarman-style MoS pill — the composite % discount to estimated
+// intrinsic value. Positive number = stock trades below intrinsic (a real
+// margin of safety in the Graham/Klarman sense); negative = at premium.
+//
+// Klarman's preference: ≥50% discount is the "buy with full conviction"
+// zone. 30-50% is a reasonable starter. <30% means no real cushion, and
+// negative means you're paying up.
+//
+//   ≥ 50%  → green   "MoS +52%"  ←  Klarman zone
+//   30–50% → green   "MoS +35%"
+//   10–30% → neutral "MoS +18%"
+//   0–10%  → amber   "MoS +5%"
+//   < 0%   → red     "MoS −12%"   (premium to intrinsic — pass)
+function renderMosPill(score, breakdown) {
+  if (score === null || score === undefined) return '';
+  let bg, fg, border;
+  if      (score >= 30) { bg = 'rgba(45,212,191,0.18)';  fg = 'var(--green)'; border = 'rgba(45,212,191,0.45)'; }
+  else if (score >= 10) { bg = 'rgba(148,163,184,0.15)'; fg = 'var(--text)';  border = 'var(--border)'; }
+  else if (score >= 0)  { bg = 'rgba(245,158,11,0.12)';  fg = 'var(--amber)'; border = 'rgba(245,158,11,0.35)'; }
+  else                  { bg = 'rgba(239,68,68,0.18)';   fg = 'var(--red)';   border = 'rgba(239,68,68,0.45)'; }
+  const sign = score > 0 ? '+' : '';
+  const label = `MoS ${sign}${score}%`;
 
-  // Tooltip with the breakdown — title attribute can't render newlines well
-  // across browsers, but \n + spaces gets decent line breaks in most. The
-  // breakdown only renders when at least one subscore is non-null.
-  const fmt = (v, max) => (v === null || v === undefined) ? '—' : `${v}/${max}`;
-  const breakdownLine = breakdown
-    ? `\n\nBreakdown:\n  Cheapness ${fmt(breakdown.cheapness, 40)}\n  Quality   ${fmt(breakdown.quality, 30)}\n  Cap Rtn   ${fmt(breakdown.capreturn, 30)}\n\n(recomputed daily; sector-relative when sector medians available)`
-    : '';
-  const head = category
-    ? `Categorical: ${s.label} (manual review). Composite: ${score ?? '—'}/100 (auto, daily).`
-    : `Auto MoS composite: ${score}/100. No manual rating set.`;
-  const tooltip = (head + breakdownLine).replace(/"/g, '&quot;');
-  return `<span title="${tooltip}" style="background:${s.bg};color:${s.fg};border:1px solid ${s.border};padding:3px 8px;border-radius:12px;font-size:10px;font-weight:700;cursor:help;">${labelText}${scoreText}</span>`;
+  // Tooltip: surface the 3-component breakdown + the implied intrinsic so
+  // the user can see HOW the composite was derived. Title attribute is the
+  // simplest cross-browser line-break carrier.
+  const fmt = (v) => {
+    if (v === null || v === undefined) return '—';
+    const s = v > 0 ? '+' : '';
+    return `${s}${v}%`;
+  };
+  let tooltip = `Klarman-style Margin of Safety: ${sign}${score}% discount to intrinsic value.`;
+  if (breakdown) {
+    tooltip += `\n\nBreakdown:`;
+    tooltip += `\n  Peer-relative   ${fmt(breakdown.peer_discount)}  (vs sector multiples)`;
+    tooltip += `\n  DCF discount    ${fmt(breakdown.dcf_discount)}  (vs 5-yr DCF intrinsic)`;
+    if (breakdown.asset_coverage !== null && breakdown.asset_coverage !== undefined) {
+      tooltip += `\n  Price/TBV       ${breakdown.asset_coverage}%  (asset floor)`;
+    }
+    if (breakdown.intrinsic) {
+      tooltip += `\n\nDCF intrinsic: $${Number(breakdown.intrinsic).toFixed(2)}/sh`;
+    }
+    tooltip += `\n\nPositive = trades below intrinsic (Klarman MoS).\nKlarman zone: ≥30% discount. Recomputed daily.`;
+  }
+  const safeTip = tooltip.replace(/"/g, '&quot;');
+  return `<span title="${safeTip}" style="background:${bg};color:${fg};border:1px solid ${border};padding:3px 8px;border-radius:12px;font-size:10px;font-weight:700;cursor:help;">${label}</span>`;
 }
 
 // Tiny "reviewed N days ago" indicator under the MoS pill. Turns amber after
@@ -3552,13 +3571,16 @@ function renderPortfolioRow(i) {
   //      forward P/E + FCF yield + balance sheet)
   //   3) "reviewed N days ago" indicator — turns amber/red when stale, so
   //      the manual rating can't quietly drift forever.
-  const mos = i.snapshot && i.snapshot.margin_of_safety;
-  const breakdown = (i.mos_cheapness !== null && i.mos_cheapness !== undefined)
-    || (i.mos_quality !== null && i.mos_quality !== undefined)
-    || (i.mos_capreturn !== null && i.mos_capreturn !== undefined)
-    ? { cheapness: i.mos_cheapness, quality: i.mos_quality, capreturn: i.mos_capreturn }
-    : null;
-  const mosPillHtml = renderMosPill(mos, i.mos_score, breakdown);
+  // Klarman MoS — strictly numerical, recomputed daily. The categorical
+  // pill (snapshot.margin_of_safety) is no longer surfaced; the % discount
+  // to intrinsic value IS the rating.
+  const breakdown = {
+    peer_discount: i.mos_peer_discount,
+    dcf_discount: i.mos_dcf_discount,
+    asset_coverage: i.mos_asset_coverage,
+    intrinsic: i.mos_intrinsic,
+  };
+  const mosPillHtml = renderMosPill(i.mos_score, breakdown);
   const reviewedAt = i.snapshot && i.snapshot.mos_reviewed_at;
   const reviewedHtml = reviewedAt ? renderReviewedIndicator(reviewedAt) : '';
 

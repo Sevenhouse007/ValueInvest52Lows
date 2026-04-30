@@ -331,9 +331,10 @@ async def recompute_mos_scores():
                 upsert_mos_score(
                     sym,
                     r["score"],
-                    cheapness=r.get("cheapness"),
-                    quality=r.get("quality"),
-                    capreturn=r.get("capreturn"),
+                    peer_discount=r.get("peer_discount"),
+                    dcf_discount=r.get("dcf_discount"),
+                    asset_coverage=r.get("asset_coverage"),
+                    intrinsic=r.get("intrinsic"),
                 )
             except Exception as e:
                 logger.warning(f"upsert_mos_score({sym}) failed: {e}")
@@ -890,167 +891,175 @@ def _unwrap_yahoo(v):
     return float(v) if v is not None else None
 
 
-def _ratio_vs_sector(value: Optional[float], sector_median: Optional[float],
-                     fallback_thresholds: list[tuple[float, int]]) -> Optional[int]:
-    """Score a "lower is better" valuation ratio against its sector median.
-    fallback_thresholds = [(threshold, points), ...] sorted ascending — used
-    when no sector median exists. Returns None when the input is missing or
-    non-positive."""
-    if value is None or value <= 0:
+def _peer_discount_pct(value: Optional[float], sector_median: Optional[float]) -> Optional[float]:
+    """For a "lower is better" valuation ratio, return % discount vs sector
+    median. Positive = trades cheaper than peers. None when either input
+    is missing/non-positive. Cap at ±80% to avoid one outlier ratio
+    swamping the average."""
+    if value is None or value <= 0 or sector_median is None or sector_median <= 0:
         return None
-    if sector_median and sector_median > 0:
-        ratio = value / sector_median
-        if ratio < 0.5:    return 10
-        if ratio < 0.7:    return 7
-        if ratio < 0.9:    return 4
-        if ratio < 1.1:    return 2
-        return 0
-    # Fallback to absolute thresholds
-    for thresh, pts in fallback_thresholds:
-        if value < thresh:
-            return pts
-    return 0
+    discount = (sector_median - value) / sector_median * 100
+    return max(-80.0, min(80.0, discount))
+
+
+def _dcf_intrinsic_per_share(stock) -> Optional[float]:
+    """Klarman-style conservative 5-year DCF + terminal value, returning
+    intrinsic value per share. Inputs from quoteSummary fundamentals:
+
+      base_fcf      = trailing FCF (positive only; negative FCF → no DCF)
+      growth_rate   = clamp(revenue_growth, 0%, 12%) — capped to avoid
+                      extrapolating hyper-growth that won't repeat
+      discount_rate = sector WACC if available, else 10% (typical equity
+                      hurdle for Klarman-style conservative valuation)
+      terminal_g    = 2.5% (long-run inflation-ish perpetuity)
+
+    Returns None when any required input is missing.
+    """
+    fcf = getattr(stock, "free_cash_flow", None)
+    shares = getattr(stock, "shares_outstanding", None)
+    if not fcf or fcf <= 0 or not shares or shares <= 0:
+        return None
+
+    growth = getattr(stock, "revenue_growth", None)
+    if growth is None:
+        growth = getattr(stock, "earnings_growth", None)
+    # Yahoo returns growth as decimal (0.07 = 7%)
+    if growth is not None and abs(growth) > 1.5:
+        growth = growth / 100  # already % – normalize
+    g = max(0.0, min(0.12, growth or 0.03))  # clamp 0-12%, default 3%
+
+    wacc = getattr(stock, "sector_wacc", None)
+    r = wacc if (wacc and 0.05 < wacc < 0.20) else 0.10  # 10% fallback
+    g_term = 0.025
+    if r <= g_term:
+        r = g_term + 0.04  # need r > g_term for terminal-value math
+
+    # Project 5 years of FCF, discount each, plus terminal value at year 5
+    pv_total = 0.0
+    for yr in range(1, 6):
+        fcf_yr = fcf * ((1 + g) ** yr)
+        pv_total += fcf_yr / ((1 + r) ** yr)
+    fcf_yr5 = fcf * ((1 + g) ** 5)
+    terminal = fcf_yr5 * (1 + g_term) / (r - g_term)
+    pv_total += terminal / ((1 + r) ** 5)
+
+    # Equity value = enterprise-style PV of FCF, then divide by shares.
+    # We don't subtract net debt here because base_fcf is unlevered-ish for
+    # most names from Yahoo; an explicit net-debt subtraction would require
+    # parsing total_debt + total_cash separately. Adequate for this purpose.
+    return pv_total / shares
+
+
+def _asset_coverage_pct(stock, price: Optional[float]) -> Optional[float]:
+    """Price as % of tangible book per share. < 100 means trades below TBV
+    (Klarman's asset-floor MoS); 100 means at TBV; > 100 means above.
+    Returns None when shares or book inputs aren't available."""
+    if not price:
+        return None
+    shares = getattr(stock, "shares_outstanding", None)
+    total_assets = getattr(stock, "total_assets", None)
+    total_liabilities = getattr(stock, "total_liabilities", None)
+    goodwill = getattr(stock, "goodwill", None) or 0
+    if not shares or shares <= 0 or total_assets is None or total_liabilities is None:
+        return None
+    tangible_equity = total_assets - total_liabilities - goodwill
+    if tangible_equity <= 0:
+        return None
+    tbv_per_share = tangible_equity / shares
+    if tbv_per_share <= 0:
+        return None
+    return (price / tbv_per_share) * 100
 
 
 def compute_mos_subscore(stock) -> Optional[dict]:
-    """Compute the Margin of Safety composite score (0-100) plus the three
-    subscores it's built from. Returns a dict with total + breakdown, or None
-    when fewer than ~half the inputs are available.
+    """Klarman-style Margin of Safety = composite % discount to intrinsic
+    value, computed three ways and weighted-averaged. Positive composite =
+    stock trades below intrinsic; negative = at premium.
 
-    Composite = Cheapness (40) + Quality (30) + Capital Return (30)
+    Components (each is itself a discount %, then weighted):
 
-    Cheapness (40 pts) — sector-relative when sector medians available, else
-    absolute thresholds. 10 pts each across:
-      forward P/E, EV/EBITDA, P/B, P/FCF (= market_cap / free_cash_flow)
+      Peer-Relative Discount (33%)
+        For each of [forward P/E, EV/EBITDA, P/B] vs sector median, compute
+        (median - current) / median. Average the available discounts.
+        Captures: "is it cheap relative to comparable companies?"
 
-    Quality (30 pts):
-      ROIC vs WACC spread (12) — value creation
-      Interest coverage     (8)  — debt service durability
-      Piotroski F-Score     (6)  — fundamental health composite
-      Debt/Equity           (4)  — leverage discipline
+      DCF Discount (50%)
+        Project FCF for 5 years at clamped growth (0-12%), terminal value
+        at 2.5% perpetuity, discounted at sector WACC (or 10% fallback).
+        Discount = (DCF_per_share - price) / DCF_per_share.
+        Captures: "is it cheap relative to its own future cash flows?"
 
-    Capital Return (30 pts):
-      FCF yield        (12) — cash generation per dollar of market cap
-      Buyback yield    (10) — share count compression
-      Insider net buys (8)  — owner-aligned conviction
+      Asset Coverage (17%)
+        Price as % of tangible book per share. Trading below TBV → bonus
+        discount equal to (100 - coverage). Above TBV → 0 contribution
+        (we don't reward asset-light businesses, but we don't penalize
+        them either; quality is for Quality scoring, not MoS).
+        Captures: Klarman's asset-floor / liquidation safety.
 
-    The categorical pill on snapshot.margin_of_safety is the manual override
-    for cases this misses (Buffett anchor, contracted backlog, regulatory
-    moat). Drift between the two is the signal.
+    Returns dict with composite + the three component discounts + the
+    estimated intrinsic value per share, or None when too few inputs are
+    available to be meaningful.
     """
-    fwd_pe = getattr(stock, "forward_pe", None)
-    ev_ebitda = getattr(stock, "ev_to_ebitda", None)
-    pb = getattr(stock, "price_to_book", None)
-    fcf = getattr(stock, "free_cash_flow", None)
-    market_cap = getattr(stock, "market_cap", None)
-    p_fcf = (market_cap / fcf) if (fcf and fcf > 0 and market_cap) else None
+    price = getattr(stock, "price", None)
 
-    sec_pe = getattr(stock, "sector_median_pe", None)
-    sec_ev = getattr(stock, "sector_median_ev_ebitda", None)
-    sec_pb = getattr(stock, "sector_median_pb", None)
+    # ── 1) Peer-relative discount ──────────────────────────────────────
+    pe_disc = _peer_discount_pct(getattr(stock, "forward_pe", None),
+                                  getattr(stock, "sector_median_pe", None))
+    ev_disc = _peer_discount_pct(getattr(stock, "ev_to_ebitda", None),
+                                  getattr(stock, "sector_median_ev_ebitda", None))
+    pb_disc = _peer_discount_pct(getattr(stock, "price_to_book", None),
+                                  getattr(stock, "sector_median_pb", None))
+    peer_components = [d for d in (pe_disc, ev_disc, pb_disc) if d is not None]
+    peer_discount = (sum(peer_components) / len(peer_components)) if peer_components else None
 
-    # ── Cheapness subscore (max 40) ────────────────────────────────────
-    pe_pts   = _ratio_vs_sector(fwd_pe,   sec_pe, [(10, 10), (15, 7), (20, 4), (25, 2)])
-    ev_pts   = _ratio_vs_sector(ev_ebitda, sec_ev, [(6, 10), (10, 7), (14, 4), (18, 2)])
-    pb_pts   = _ratio_vs_sector(pb,       sec_pb, [(1.0, 10), (1.5, 7), (2.5, 4), (4.0, 2)])
-    # P/FCF has no sector median; use absolute thresholds.
-    pfcf_pts = _ratio_vs_sector(p_fcf,    None,   [(8, 10), (12, 7), (18, 4), (25, 2)])
-    cheap_components = [c for c in (pe_pts, ev_pts, pb_pts, pfcf_pts) if c is not None]
-    if cheap_components:
-        # Prorate to 40 to handle missing components fairly.
-        cheap = round(sum(cheap_components) / len(cheap_components) * 4)
+    # ── 2) DCF discount ────────────────────────────────────────────────
+    intrinsic = _dcf_intrinsic_per_share(stock)
+    if intrinsic and price and price > 0:
+        dcf_discount = (intrinsic - price) / intrinsic * 100
+        # Cap at ±80% so one extreme estimate doesn't swamp the composite.
+        dcf_discount = max(-80.0, min(80.0, dcf_discount))
     else:
-        cheap = None
+        dcf_discount = None
 
-    # ── Quality subscore (max 30) ──────────────────────────────────────
-    roic = getattr(stock, "roic", None)
-    wacc = getattr(stock, "sector_wacc", None)
-    int_cov = getattr(stock, "interest_coverage", None)
-    f_score = getattr(stock, "piotroski_f_score", None)
-    de = getattr(stock, "debt_to_equity", None)
+    # ── 3) Asset coverage ──────────────────────────────────────────────
+    coverage_pct = _asset_coverage_pct(stock, price)
+    # Convert coverage (price as % of TBV) to a "discount" contribution.
+    # Below TBV → positive bonus; above TBV → 0 (we don't penalize since
+    # tangible book is the floor, not the ceiling).
+    if coverage_pct is not None:
+        asset_discount = max(0.0, 100.0 - coverage_pct)
+    else:
+        asset_discount = None
 
-    qual_components: list[int] = []
-    if roic is not None and wacc is not None and wacc > 0:
-        spread = roic / wacc
-        if   spread >= 2.0: qual_components.append(12)
-        elif spread >= 1.5: qual_components.append(9)
-        elif spread >= 1.2: qual_components.append(6)
-        elif spread >= 1.0: qual_components.append(3)
-        else:                qual_components.append(0)
-    if int_cov is not None:
-        if   int_cov >= 10: qual_components.append(8)
-        elif int_cov >= 5:  qual_components.append(6)
-        elif int_cov >= 3:  qual_components.append(4)
-        elif int_cov >= 1:  qual_components.append(2)
-        else:                qual_components.append(0)
-    if f_score is not None:
-        if   f_score >= 8: qual_components.append(6)
-        elif f_score >= 6: qual_components.append(4)
-        elif f_score >= 4: qual_components.append(2)
-        else:               qual_components.append(0)
-    if de is not None and de >= 0:
-        de_pct = de if de > 5 else (de * 100)  # normalize ratio vs %
-        if   de_pct < 30:  qual_components.append(4)
-        elif de_pct < 60:  qual_components.append(3)
-        elif de_pct < 100: qual_components.append(2)
-        elif de_pct < 150: qual_components.append(1)
-        else:               qual_components.append(0)
-    quality = sum(qual_components) if qual_components else None
-    # If <2 of 4 components present, drop quality from composite to avoid
-    # publishing a misleading score on thin data.
-    if quality is not None and len(qual_components) < 2:
-        quality = None
+    # ── Composite (weighted average) ───────────────────────────────────
+    weights = {"peer": 0.33, "dcf": 0.50, "asset": 0.17}
+    have = []
+    weighted_sum = 0.0
+    weight_total = 0.0
+    if peer_discount is not None:
+        weighted_sum += peer_discount * weights["peer"]
+        weight_total += weights["peer"]
+        have.append("peer")
+    if dcf_discount is not None:
+        weighted_sum += dcf_discount * weights["dcf"]
+        weight_total += weights["dcf"]
+        have.append("dcf")
+    if asset_discount is not None:
+        weighted_sum += asset_discount * weights["asset"]
+        weight_total += weights["asset"]
+        have.append("asset")
 
-    # ── Capital Return subscore (max 30) ───────────────────────────────
-    cap_components: list[int] = []
-    if fcf is not None and market_cap and market_cap > 0:
-        fcf_y = (fcf / market_cap) * 100
-        if   fcf_y >= 12: cap_components.append(12)
-        elif fcf_y >= 8:  cap_components.append(9)
-        elif fcf_y >= 5:  cap_components.append(6)
-        elif fcf_y >= 3:  cap_components.append(3)
-        elif fcf_y > 0:   cap_components.append(1)
-        else:              cap_components.append(0)
-    bb_y = getattr(stock, "buyback_yield", None)
-    if bb_y is not None:
-        # Yahoo sometimes reports buyback yield as ratio (0.05) vs % (5).
-        bb_pct = bb_y if abs(bb_y) > 0.5 else (bb_y * 100)
-        if   bb_pct >= 5:  cap_components.append(10)
-        elif bb_pct >= 3:  cap_components.append(7)
-        elif bb_pct >= 1:  cap_components.append(4)
-        elif bb_pct >= 0:  cap_components.append(2)
-        else:               cap_components.append(0)
-    buys = getattr(stock, "insider_buy_count", 0) or 0
-    sells = getattr(stock, "insider_sell_count", 0) or 0
-    if buys or sells:
-        if   buys >= 5 and sells == 0: cap_components.append(8)
-        elif buys >= 2 and sells == 0: cap_components.append(5)
-        elif buys > sells:              cap_components.append(3)
-        elif buys == sells:             cap_components.append(1)
-        else:                            cap_components.append(0)
-    capreturn = sum(cap_components) if cap_components else None
-    if capreturn is not None and len(cap_components) < 2:
-        capreturn = None
-
-    # ── Composite ──────────────────────────────────────────────────────
-    have = [s for s in (cheap, quality, capreturn) if s is not None]
+    # Need at least 2 of 3 components — single-axis MoS is too noisy.
     if len(have) < 2:
-        return None  # too thin to publish
-    # Sum what we have; if a subscore is missing, scale up proportionally so
-    # the composite stays comparable to symbols with full coverage.
-    weights = {"cheap": 40, "quality": 30, "capreturn": 30}
-    actual = (cheap or 0) + (quality or 0) + (capreturn or 0)
-    coverage = sum(weights[k] for k, v in
-                   {"cheap": cheap, "quality": quality, "capreturn": capreturn}.items()
-                   if v is not None)
-    composite = round(actual / coverage * 100) if coverage > 0 else 0
-    composite = max(0, min(100, composite))
+        return None
+    composite = weighted_sum / weight_total
 
     return {
-        "score": composite,
-        "cheapness": cheap,
-        "quality": quality,
-        "capreturn": capreturn,
+        "score": round(composite),
+        "peer_discount": round(peer_discount) if peer_discount is not None else None,
+        "dcf_discount": round(dcf_discount) if dcf_discount is not None else None,
+        "asset_coverage": round(coverage_pct) if coverage_pct is not None else None,
+        "intrinsic": round(intrinsic, 2) if intrinsic else None,
     }
 
 
@@ -1233,19 +1242,21 @@ def _enrich_portfolio_item(item: dict, latest_prices: dict) -> dict:
 
 
 def _attach_mos_score(item: dict) -> dict:
-    """Decorate a portfolio/watchlist item with the MoS composite + 3 subscores
-    pulled from symbol_latest_price (recomputed by the daily scheduler job).
-    Subscores let the UI show the breakdown when the pill is hovered or
-    clicked: Cheapness 0-40 + Quality 0-30 + Capital Return 0-30."""
+    """Decorate a portfolio/watchlist item with the Klarman MoS composite +
+    3 component discounts pulled from symbol_latest_price (recomputed by
+    the daily scheduler). UI surfaces the headline % discount on the pill
+    and the breakdown (peer / DCF / asset) plus implied intrinsic value
+    in the hover tooltip."""
     sym = item.get("symbol")
     if sym and sym != "CASH":
         m = get_mos_score(sym)
         if m:
             item["mos_score"] = m.get("mos_score")
             item["mos_updated_at"] = m.get("mos_updated_at")
-            item["mos_cheapness"] = m.get("mos_cheapness")
-            item["mos_quality"] = m.get("mos_quality")
-            item["mos_capreturn"] = m.get("mos_capreturn")
+            item["mos_peer_discount"] = m.get("mos_peer_discount")
+            item["mos_dcf_discount"] = m.get("mos_dcf_discount")
+            item["mos_asset_coverage"] = m.get("mos_asset_coverage")
+            item["mos_intrinsic"] = m.get("mos_intrinsic")
     return item
 
 
