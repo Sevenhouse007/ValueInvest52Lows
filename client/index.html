@@ -2446,6 +2446,8 @@ function renderWatchlistCard(i) {
     dcf_bull: i.mos_dcf_bull,
     dcf_base: i.mos_dcf_base,
     dcf_bear: i.mos_dcf_bear,
+    quality_flag: i.mos_quality_flag,
+    axes_used: i.mos_axes_used,
   };
   const mosBadgeHtml = renderMosPill(i.mos_score, wlBreakdown);
 
@@ -3469,7 +3471,11 @@ function renderMosPill(score, breakdown) {
   else if (score >= 0)  { bg = 'rgba(245,158,11,0.12)';  fg = 'var(--amber)'; border = 'rgba(245,158,11,0.35)'; }
   else                  { bg = 'rgba(239,68,68,0.18)';   fg = 'var(--red)';   border = 'rgba(239,68,68,0.45)'; }
   const sign = score > 0 ? '+' : '';
-  const label = `MoS ${sign}${score}%`;
+  // Data-quality marker — only show when low (score is built on a single
+  // axis, e.g. banks/ETFs where Yahoo's data is sparse). Medium and high
+  // get no marker so the pill stays uncluttered for the common case.
+  const qualityMark = breakdown && breakdown.quality_flag === 'low' ? ' ⚠️' : '';
+  const label = `MoS ${sign}${score}%${qualityMark}`;
 
   // Tooltip: surface the 3-component breakdown + the scenario DCF band
   // (bear/base/bull → 25/50/25 weighted middle) so the user can see HOW the
@@ -3505,6 +3511,16 @@ function renderMosPill(score, breakdown) {
       }
     } else if (breakdown.intrinsic) {
       tooltip += `\n\nDCF intrinsic: $${Number(breakdown.intrinsic).toFixed(2)}/sh`;
+    }
+    // Data quality footer — explicit when the score is built on thin data
+    if (breakdown.quality_flag) {
+      const axes = (breakdown.axes_used || []).join(', ') || 'none';
+      const labels = { high: 'high', medium: 'medium', low: '⚠️ low' };
+      tooltip += `\n\nData quality: ${labels[breakdown.quality_flag] || breakdown.quality_flag}`;
+      tooltip += `\nAxes used: ${axes}`;
+      if (breakdown.quality_flag === 'low') {
+        tooltip += `\n(only one axis contributed — interpret with care; typical for banks, ETFs, pre-profit names)`;
+      }
     }
     tooltip += `\n\nPositive = trades below intrinsic (Klarman MoS).\nKlarman zone: ≥30% discount. Recomputed daily.`;
   }
@@ -3602,6 +3618,8 @@ function renderPortfolioRow(i) {
     dcf_bull: i.mos_dcf_bull,
     dcf_base: i.mos_dcf_base,
     dcf_bear: i.mos_dcf_bear,
+    quality_flag: i.mos_quality_flag,
+    axes_used: i.mos_axes_used,
   };
   const mosPillHtml = renderMosPill(i.mos_score, breakdown);
   const reviewedAt = i.snapshot && i.snapshot.mos_reviewed_at;

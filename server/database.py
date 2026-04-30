@@ -157,6 +157,18 @@ def init_db():
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_dcf_base REAL")
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_dcf_bear REAL")
 
+        # Migration: data-quality flag for the MoS composite. Indicates how
+        # many of the 3 axes (peer / DCF / asset) actually contributed and
+        # whether the DCF band was tight or wide. UI surfaces a ⚠️ icon
+        # when quality is "low" (single-axis, e.g. banks where Yahoo doesn't
+        # report FCF or balance-sheet detail) so the score isn't taken at
+        # face value.
+        try:
+            conn.execute("SELECT mos_quality_flag FROM symbol_latest_price LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_quality_flag TEXT")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_axes_used TEXT")
+
         # Migration: add market_sector_averages_json if not present
         try:
             conn.execute("SELECT market_sector_averages_json FROM scans LIMIT 1")
@@ -553,28 +565,27 @@ def upsert_mos_score(
     dcf_bull: Optional[float] = None,
     dcf_base: Optional[float] = None,
     dcf_bear: Optional[float] = None,
+    quality_flag: Optional[str] = None,
+    axes_used: Optional[list] = None,
 ) -> None:
     """Persist the Klarman-style MoS = % discount to intrinsic value.
 
-    mos_score      = composite discount (positive = below intrinsic)
-    peer_discount  = % below peer/sector multiples
-    dcf_discount   = % below DCF intrinsic (computed against weighted middle)
-    asset_coverage = price as % of tangible book (>100 = above book)
-    intrinsic      = weighted-middle DCF intrinsic per share (25/50/25)
-    dcf_bull/base/bear = the three scenario DCFs — surface the dispersion
-                         so the user can see how wide the estimate band is.
+    quality_flag  = 'high' | 'medium' | 'low' — confidence in the composite
+    axes_used     = which of [peer, dcf, asset] actually contributed (json)
     """
     if not symbol:
         return
     updated_at = datetime.now(timezone.utc).isoformat()
+    axes_json = json.dumps(axes_used) if axes_used is not None else None
     with get_db() as conn:
         conn.execute("""
             INSERT INTO symbol_latest_price (
                 symbol, price, updated_at, mos_score, mos_updated_at,
                 mos_peer_discount, mos_dcf_discount, mos_asset_coverage, mos_intrinsic,
-                mos_dcf_bull, mos_dcf_base, mos_dcf_bear
+                mos_dcf_bull, mos_dcf_base, mos_dcf_bear,
+                mos_quality_flag, mos_axes_used
             )
-            VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol) DO UPDATE SET
                 mos_score = excluded.mos_score,
                 mos_updated_at = excluded.mos_updated_at,
@@ -584,23 +595,34 @@ def upsert_mos_score(
                 mos_intrinsic = excluded.mos_intrinsic,
                 mos_dcf_bull = excluded.mos_dcf_bull,
                 mos_dcf_base = excluded.mos_dcf_base,
-                mos_dcf_bear = excluded.mos_dcf_bear
+                mos_dcf_bear = excluded.mos_dcf_bear,
+                mos_quality_flag = excluded.mos_quality_flag,
+                mos_axes_used = excluded.mos_axes_used
         """, (symbol, updated_at, mos_score, updated_at,
               peer_discount, dcf_discount, asset_coverage, intrinsic,
-              dcf_bull, dcf_base, dcf_bear))
+              dcf_bull, dcf_base, dcf_bear,
+              quality_flag, axes_json))
 
 
 def get_mos_score(symbol: str) -> Optional[dict]:
-    """Read the stored Klarman MoS composite + 3 components + scenario DCFs."""
+    """Read the stored Klarman MoS composite + 3 components + scenario DCFs
+    + quality flag + axes used."""
     with get_db() as conn:
         r = conn.execute(
             "SELECT mos_score, mos_updated_at, mos_peer_discount, mos_dcf_discount, "
-            "mos_asset_coverage, mos_intrinsic, mos_dcf_bull, mos_dcf_base, mos_dcf_bear "
+            "mos_asset_coverage, mos_intrinsic, mos_dcf_bull, mos_dcf_base, mos_dcf_bear, "
+            "mos_quality_flag, mos_axes_used "
             "FROM symbol_latest_price WHERE symbol = ?",
             (symbol,),
         ).fetchone()
         if not r:
             return None
+        axes = None
+        if r["mos_axes_used"]:
+            try:
+                axes = json.loads(r["mos_axes_used"])
+            except Exception:
+                axes = None
         return {
             "mos_score": r["mos_score"],
             "mos_updated_at": r["mos_updated_at"],
@@ -611,6 +633,8 @@ def get_mos_score(symbol: str) -> Optional[dict]:
             "mos_dcf_bull": r["mos_dcf_bull"],
             "mos_dcf_base": r["mos_dcf_base"],
             "mos_dcf_bear": r["mos_dcf_bear"],
+            "mos_quality_flag": r["mos_quality_flag"],
+            "mos_axes_used": axes,
         }
 
 

@@ -338,6 +338,8 @@ async def recompute_mos_scores():
                     dcf_bull=r.get("dcf_bull"),
                     dcf_base=r.get("dcf_base"),
                     dcf_bear=r.get("dcf_bear"),
+                    quality_flag=r.get("data_quality"),
+                    axes_used=r.get("axes_used"),
                 )
             except Exception as e:
                 logger.warning(f"upsert_mos_score({sym}) failed: {e}")
@@ -905,6 +907,69 @@ def _peer_discount_pct(value: Optional[float], sector_median: Optional[float]) -
     return max(-80.0, min(80.0, discount))
 
 
+# Sectors where TTM FCF is a poor proxy for normalized earnings power.
+# For these, the DCF runs on a smoothed FCF (5-year average if available,
+# else TTM dampened toward sector norms). This prevents AMR/CNR/OXY type
+# scoring distortions where projecting from a trough quarter produces
+# perpetually pessimistic intrinsics.
+_CYCLICAL_SECTORS = {
+    "energy", "basic materials", "industrials",
+}
+_CYCLICAL_INDUSTRIES = {
+    # Auto, mining, steel, oil services — cycle-driven names that show up
+    # outside the broad cyclical sectors above.
+    "auto manufacturers", "auto parts", "auto & truck dealerships",
+    "thermal coal", "coking coal", "steel", "copper", "aluminum",
+    "oil & gas e&p", "oil & gas integrated", "oil & gas drilling",
+    "oil & gas equipment & services", "oil & gas refining & marketing",
+    "marine shipping", "airlines", "trucking",
+}
+
+
+def _is_cyclical(stock) -> bool:
+    sector = (getattr(stock, "sector", "") or "").strip().lower()
+    industry = (getattr(stock, "industry", "") or "").strip().lower()
+    return sector in _CYCLICAL_SECTORS or industry in _CYCLICAL_INDUSTRIES
+
+
+def _is_bank(stock) -> bool:
+    """Banks (and sometimes insurers) need P/TBV-based scoring instead of
+    FCF-based DCF. Yahoo doesn't report FCF for banks because their "cash
+    flow" is dominated by deposit/loan changes that are operating, not
+    capital-allocating. Different valuation framework required."""
+    industry = (getattr(stock, "industry", "") or "").strip().lower()
+    return industry in {"banks - diversified", "banks - regional", "banks"}
+
+
+def _normalized_fcf(stock) -> Optional[float]:
+    """Return a smoothed FCF for cyclical names. We don't have multi-year
+    history in the model right now, so the heuristic is:
+
+      - Use TTM FCF if positive and at least 30% of EBITDA — that suggests
+        we're not at a depressed trough quarter
+      - Otherwise blend TTM FCF (50%) with a peer-normalized estimate
+        derived from the company's own EBITDA × an industry-typical
+        FCF/EBITDA conversion ratio (50%)
+
+    This is a stop-gap until we wire 5-year history. It's enough to keep
+    the DCF from being silly on AMR/CNR at trough met-coal pricing."""
+    fcf = getattr(stock, "free_cash_flow", None)
+    ebitda = getattr(stock, "ebitda", None)
+    if fcf is None or fcf <= 0:
+        return None
+    if not ebitda or ebitda <= 0:
+        return fcf
+    # If TTM FCF/EBITDA ratio is healthy (>30%), TTM is the right number
+    fcf_ratio = fcf / ebitda
+    if fcf_ratio >= 0.30:
+        return fcf
+    # Otherwise we're in a compressed-margin period; blend toward a
+    # normalized estimate at 35% FCF/EBITDA conversion (rough industrial
+    # average — Damodaran data puts most cyclicals at 30-40% through-cycle)
+    normalized = ebitda * 0.35
+    return 0.5 * fcf + 0.5 * normalized
+
+
 def _dcf_value(fcf: float, shares: float, g: float, r: float, g_term: float) -> float:
     """Mechanical 5-year DCF + terminal value → per-share intrinsic.
     All inputs validated by the caller; this is just the arithmetic."""
@@ -918,6 +983,71 @@ def _dcf_value(fcf: float, shares: float, g: float, r: float, g_term: float) -> 
     terminal = fcf_yr5 * (1 + g_term) / (r - g_term)
     pv_total += terminal / ((1 + r) ** 5)
     return pv_total / shares
+
+
+def _bank_intrinsic_per_share(stock) -> Optional[dict]:
+    """Klarman-style intrinsic value for banks using the residual-income /
+    fair-P/B framework that financials are actually valued on. Banks don't
+    produce comparable FCF, so DCF doesn't work; instead:
+
+      Fair P/B = (ROE - g) / (cost_of_equity - g)
+
+    Where g is long-run book-value growth (use 3% perpetuity). When ROE >
+    cost of equity, fair P/B > 1; when ROE < cost of equity, fair P/B < 1.
+    Bank intrinsic = current_book_per_share × fair_P/B.
+
+    We don't have direct book value per share from Yahoo's quoteSummary
+    for banks, so we back into it: book = price / current P/B.
+    Then run three scenarios on ROE assumptions (bear/base/bull).
+    """
+    pb = getattr(stock, "price_to_book", None)
+    price = getattr(stock, "price", None)
+    roe = getattr(stock, "return_on_equity", None)
+    if not pb or pb <= 0 or not price or price <= 0:
+        return None
+    book_per_share = price / pb
+
+    # Cost of equity: prefer sector_wacc, else 9% for banks (industry default).
+    coe = getattr(stock, "sector_wacc", None)
+    coe = coe if (coe and 0.06 < coe < 0.15) else 0.09
+
+    # Base ROE: prefer reported. If missing, estimate from forward P/E:
+    # ROE ≈ P/B / forward_pe (very rough — assumes earnings reflect ROE on book).
+    if not roe or roe <= 0:
+        fpe = getattr(stock, "forward_pe", None)
+        if fpe and fpe > 0:
+            roe = pb / fpe  # rough back-into
+        else:
+            return None
+    # Yahoo returns ROE as decimal sometimes, % sometimes; normalize.
+    if abs(roe) > 1.5:
+        roe = roe / 100
+
+    g_book = 0.03  # long-run book growth perpetuity
+
+    def fair_pb(roe_, coe_, g_):
+        if coe_ <= g_:
+            coe_ = g_ + 0.04
+        if roe_ <= g_:
+            return 1.0  # value-destroying ROE → can't justify any premium to book
+        return (roe_ - g_) / (coe_ - g_)
+
+    # Scenarios on ROE (banks' ROE is the dominant lever)
+    bear_roe = max(0.04, roe * 0.7)  # 30% haircut, floor at 4%
+    base_roe = roe
+    bull_roe = min(0.20, roe * 1.2)  # 20% lift, cap at 20%
+
+    bear = book_per_share * fair_pb(bear_roe, coe + 0.01, g_book)
+    base = book_per_share * fair_pb(base_roe, coe, g_book)
+    bull = book_per_share * fair_pb(bull_roe, max(0.06, coe - 0.005), g_book)
+    weighted = 0.25 * bull + 0.50 * base + 0.25 * bear
+
+    return {
+        "bull": round(bull, 2),
+        "base": round(base, 2),
+        "bear": round(bear, 2),
+        "weighted": round(weighted, 2),
+    }
 
 
 def _dcf_scenarios(stock) -> Optional[dict]:
@@ -938,7 +1068,12 @@ def _dcf_scenarios(stock) -> Optional[dict]:
 
     Returns None when any required input is missing (FCF, shares, etc.).
     """
-    fcf = getattr(stock, "free_cash_flow", None)
+    # Cyclicals use a smoothed FCF so we don't project 5 years of growth
+    # off a trough-quarter cash-flow base. Stable businesses use TTM as-is.
+    if _is_cyclical(stock):
+        fcf = _normalized_fcf(stock)
+    else:
+        fcf = getattr(stock, "free_cash_flow", None)
     shares = getattr(stock, "shares_outstanding", None)
     if not fcf or fcf <= 0 or not shares or shares <= 0:
         return None
@@ -1042,7 +1177,13 @@ def compute_mos_subscore(stock) -> Optional[dict]:
     # Klarman-style: bull/base/bear scenarios, weighted 25/50/25 to get
     # the central intrinsic estimate. Stored separately so the UI can show
     # the dispersion (wide band = low confidence in the point estimate).
-    scenarios = _dcf_scenarios(stock)
+    # Banks route through _bank_intrinsic_per_share (residual-income / fair
+    # P/B) instead of the FCF-based DCF, since banks don't produce
+    # comparable FCF; cyclicals use _dcf_scenarios with smoothed FCF.
+    if _is_bank(stock):
+        scenarios = _bank_intrinsic_per_share(stock)
+    else:
+        scenarios = _dcf_scenarios(stock)
     intrinsic = scenarios["weighted"] if scenarios else None
     if intrinsic and intrinsic > 0 and price and price > 0:
         dcf_discount = (intrinsic - price) / intrinsic * 100
@@ -1078,10 +1219,28 @@ def compute_mos_subscore(stock) -> Optional[dict]:
         weight_total += weights["asset"]
         have.append("asset")
 
-    # Need at least 2 of 3 components — single-axis MoS is too noisy.
-    if len(have) < 2:
+    # Publish with at least one axis. Single-axis is noisy but better than
+    # silently filtering out whole sectors (banks have no FCF / no Yahoo
+    # balance sheet → DCF and asset both fail; only peer-relative survives).
+    if not have:
         return None
     composite = weighted_sum / weight_total
+
+    # Data-quality flag — surfaced on the UI as a ⚠️ icon when the score is
+    # built on thin signals. The tooltip explains which axes are missing
+    # so the user knows whether to trust the number.
+    #   high   = all 3 axes contributed
+    #   medium = 2 of 3 axes; or 3 axes but DCF band is wide (>80% dispersion)
+    #   low    = 1 of 3 axes (typical for banks/insurers/ETFs)
+    band_pct = None
+    if scenarios and scenarios.get("bull") and scenarios.get("bear") and intrinsic and intrinsic > 0:
+        band_pct = (scenarios["bull"] - scenarios["bear"]) / intrinsic * 100
+    if len(have) == 3:
+        data_quality = "high" if (band_pct is None or band_pct < 80) else "medium"
+    elif len(have) == 2:
+        data_quality = "medium"
+    else:
+        data_quality = "low"
 
     return {
         "score": round(composite),
@@ -1092,6 +1251,8 @@ def compute_mos_subscore(stock) -> Optional[dict]:
         "dcf_bull": scenarios["bull"] if scenarios else None,
         "dcf_base": scenarios["base"] if scenarios else None,
         "dcf_bear": scenarios["bear"] if scenarios else None,
+        "data_quality": data_quality,
+        "axes_used": have,
     }
 
 
@@ -1292,6 +1453,8 @@ def _attach_mos_score(item: dict) -> dict:
             item["mos_dcf_bull"] = m.get("mos_dcf_bull")
             item["mos_dcf_base"] = m.get("mos_dcf_base")
             item["mos_dcf_bear"] = m.get("mos_dcf_bear")
+            item["mos_quality_flag"] = m.get("mos_quality_flag")
+            item["mos_axes_used"] = m.get("mos_axes_used")
     return item
 
 
