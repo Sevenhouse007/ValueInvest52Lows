@@ -23,12 +23,12 @@ from server.database import (
     create_portfolio_item, create_watchlist_item, delete_portfolio_item, delete_scan,
     delete_watchlist_item, get_backtest_details, get_backtest_summary,
     get_bounce_back_candidates, get_latest_good_scan, get_latest_scan,
-    get_latest_scan_averages, get_performance_rows_needing_update,
+    get_latest_scan_averages, get_mos_score, get_performance_rows_needing_update,
     get_portfolio_by_symbol, get_portfolio_item, get_recent_tracked_symbols,
     get_scan_by_date, get_scan_history, get_stock_history, get_watchlist_by_symbol,
     get_watchlist_item, init_db, list_portfolio, list_watchlist,
     save_performance_tracking, save_scan, update_forward_price, update_portfolio_item,
-    update_watchlist_item, upsert_latest_price,
+    update_watchlist_item, upsert_latest_price, upsert_mos_score,
 )
 from server.models import ScanResult, ScanSummary
 from server.pipeline import merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
@@ -289,6 +289,51 @@ async def fill_forward_returns():
         logger.error(f"Forward return fill job failed: {e}")
 
 
+async def recompute_mos_scores():
+    """Refresh the deterministic Margin of Safety subscore for every symbol
+    on the user's portfolio + watchlist. Runs once a day at 5:00 PM ET so
+    the score reflects post-close fundamentals. Each score is computed from
+    forward P/E + FCF yield + debt/equity via compute_mos_subscore() and
+    persisted to symbol_latest_price.mos_score / mos_updated_at.
+
+    The categorical pill on snapshot.margin_of_safety is not touched — that
+    remains the human override. The UI surfaces both side-by-side so drift
+    between manual rating and computed reality is visible.
+    """
+    global _yahoo_client
+    if _yahoo_client is None:
+        _yahoo_client = YahooClient()
+
+    # Union of portfolio + watchlist symbols, dropping CASH (no fundamentals).
+    pf_syms = {it["symbol"] for it in list_portfolio() if it["symbol"] != "CASH"}
+    wl_syms = {it["symbol"] for it in list_watchlist()}
+    symbols = sorted(pf_syms | wl_syms)
+    logger.info(f"MoS recompute starting for {len(symbols)} symbols")
+
+    async def _one(sym: str) -> tuple[str, Optional[int]]:
+        try:
+            raw = await _yahoo_client.fetch_quote_summary(sym)
+            if not raw:
+                return sym, None
+            quote = parse_quote_from_summary(sym, raw)
+            fundamentals = parse_fundamentals(sym, raw)
+            stock = merge_quote_and_fundamentals(quote, fundamentals)
+            return sym, compute_mos_subscore(stock)
+        except Exception as e:
+            logger.debug(f"MoS recompute failed for {sym}: {e}")
+            return sym, None
+
+    results = await asyncio.gather(*(_one(s) for s in symbols))
+    written = sum(1 for _, score in results if score is not None)
+    for sym, score in results:
+        if score is not None:
+            try:
+                upsert_mos_score(sym, score)
+            except Exception as e:
+                logger.warning(f"upsert_mos_score({sym}) failed: {e}")
+    logger.info(f"MoS recompute done: {written}/{len(symbols)} scores written")
+
+
 async def premarket_refresh():
     """Lightweight 7 AM ET job — update prices only, no fundamentals."""
     global _yahoo_client
@@ -426,6 +471,17 @@ async def lifespan(app: FastAPI):
             timezone="US/Eastern",
         ),
         id="forward_returns",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        recompute_mos_scores,
+        CronTrigger(
+            hour=17,
+            minute=0,
+            day_of_week="mon-fri",
+            timezone="US/Eastern",
+        ),
+        id="mos_recompute",
         replace_existing=True,
     )
     scheduler.start()
@@ -828,6 +884,69 @@ def _unwrap_yahoo(v):
     return float(v) if v is not None else None
 
 
+def compute_mos_subscore(stock) -> Optional[int]:
+    """Compute the deterministic Margin of Safety subscore (0-100) from
+    fundamentals. Three components, ~33 points each:
+
+      Cheapness    (0-34) — forward P/E (lower is better)
+      Cash flow    (0-33) — FCF yield (FCF / market cap, higher is better)
+      Balance sheet (0-33) — debt/equity (lower is better; net cash = full)
+
+    Returns None when too few inputs are available to be meaningful (e.g.
+    < 2 of 3 components computable). The categorical pill on the snapshot
+    is the human override for cases this misses (Buffett anchor, contracted
+    backlog, regulatory moat — none of which show up in these three ratios).
+    """
+    fwd_pe = getattr(stock, "forward_pe", None)
+    fcf = getattr(stock, "free_cash_flow", None)
+    market_cap = getattr(stock, "market_cap", None)
+    de = getattr(stock, "debt_to_equity", None)
+
+    parts: list[int] = []
+
+    # Component 1: Cheapness via fwd P/E
+    if fwd_pe is not None and fwd_pe > 0:
+        if fwd_pe < 8:    parts.append(34)
+        elif fwd_pe < 12: parts.append(28)
+        elif fwd_pe < 16: parts.append(22)
+        elif fwd_pe < 20: parts.append(15)
+        elif fwd_pe < 25: parts.append(8)
+        elif fwd_pe < 35: parts.append(3)
+        else:             parts.append(0)
+
+    # Component 2: FCF yield = FCF / market cap
+    if fcf is not None and market_cap and market_cap > 0:
+        fcf_yield_pct = (fcf / market_cap) * 100
+        if fcf_yield_pct >= 12:   parts.append(33)
+        elif fcf_yield_pct >= 8:  parts.append(27)
+        elif fcf_yield_pct >= 5:  parts.append(20)
+        elif fcf_yield_pct >= 3:  parts.append(13)
+        elif fcf_yield_pct >= 1:  parts.append(6)
+        elif fcf_yield_pct > 0:   parts.append(2)
+        else:                      parts.append(0)
+
+    # Component 3: Balance sheet via debt/equity. Yahoo reports D/E as a
+    # ratio (e.g. 0.45) for some symbols and a percentage (e.g. 45) for
+    # others; normalize by treating values >5 as percent.
+    if de is not None and de >= 0:
+        de_pct = de if de > 5 else (de * 100)
+        if de_pct < 5:     parts.append(33)
+        elif de_pct < 30:  parts.append(27)
+        elif de_pct < 60:  parts.append(20)
+        elif de_pct < 100: parts.append(13)
+        elif de_pct < 150: parts.append(6)
+        else:               parts.append(0)
+
+    # Need at least 2 of 3 components to publish a meaningful score.
+    if len(parts) < 2:
+        return None
+    # Pad missing components with the average so partial-data symbols don't
+    # get unfairly punished — they still rate against the components we do have.
+    while len(parts) < 3:
+        parts.append(int(sum(parts) / len(parts)))
+    return min(100, max(0, sum(parts)))
+
+
 async def _fetch_latest_prices(symbols: list[str]) -> dict[str, dict]:
     """Read latest prices from symbol_latest_price (maintained by scan/fill).
 
@@ -897,7 +1016,7 @@ async def watchlist_list():
     """Return all watchlist items, enriched with current price + ready flag."""
     items = list_watchlist()
     prices = await _fetch_latest_prices([i["symbol"] for i in items])
-    return {"items": [_enrich_watchlist_item(i, prices) for i in items]}
+    return {"items": [_attach_mos_score(_enrich_watchlist_item(i, prices)) for i in items]}
 
 
 @app.post("/api/watchlist")
@@ -1006,6 +1125,27 @@ def _enrich_portfolio_item(item: dict, latest_prices: dict) -> dict:
     return item
 
 
+def _attach_mos_score(item: dict) -> dict:
+    """Decorate a portfolio/watchlist item with mos_score + mos_updated_at
+    pulled from symbol_latest_price (recomputed by the daily scheduler job)."""
+    sym = item.get("symbol")
+    if sym and sym != "CASH":
+        m = get_mos_score(sym)
+        if m:
+            item["mos_score"] = m["mos_score"]
+            item["mos_updated_at"] = m["mos_updated_at"]
+    return item
+
+
+@app.post("/api/recompute-mos")
+async def recompute_mos_endpoint():
+    """Manual trigger for the MoS recompute job (otherwise runs daily at
+    5 PM ET). Returns the count of symbols scored. Useful right after
+    seeding new positions so the pills aren't blank until the next cron."""
+    await recompute_mos_scores()
+    return {"status": "ok"}
+
+
 @app.get("/api/portfolio")
 async def portfolio_list():
     """Return all portfolio rows + totals, enriched with current prices."""
@@ -1013,7 +1153,7 @@ async def portfolio_list():
     # Pull live prices for everything except CASH, which is always $1.
     syms = [i["symbol"] for i in items if i["symbol"] != "CASH"]
     prices = await _fetch_latest_prices(syms)
-    enriched = [_enrich_portfolio_item(i, prices) for i in items]
+    enriched = [_attach_mos_score(_enrich_portfolio_item(i, prices)) for i in items]
 
     # Portfolio-level totals. We tolerate missing market_value (price
     # lookup failed) by treating it as null — the UI shows the position
@@ -1082,12 +1222,20 @@ async def portfolio_update(item_id: int, body: PortfolioUpdate):
     if item_id <= 0:
         raise HTTPException(400, "item_id must be positive")
     fields = body.model_dump(exclude_unset=True)
+    # When the categorical MoS rating is being set/changed via the snapshot,
+    # stamp a mos_reviewed_at timestamp so the UI can show "reviewed N days
+    # ago" and flag stale ratings. Auto-recomputes (which only touch the
+    # numeric mos_score, not the categorical) don't go through this path.
+    if "snapshot" in fields and isinstance(fields["snapshot"], dict):
+        snap = fields["snapshot"]
+        if "margin_of_safety" in snap and not snap.get("mos_reviewed_at"):
+            snap["mos_reviewed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     item = update_portfolio_item(item_id, fields)
     if not item:
         raise HTTPException(404, f"Portfolio item {item_id} not found")
     sym = item["symbol"]
     prices = await _fetch_latest_prices([sym]) if sym != "CASH" else {}
-    return _enrich_portfolio_item(item, prices)
+    return _attach_mos_score(_enrich_portfolio_item(item, prices))
 
 
 @app.delete("/api/portfolio/{item_id}")

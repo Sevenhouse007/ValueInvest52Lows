@@ -107,6 +107,17 @@ def init_db():
         except sqlite3.OperationalError:
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN prev_close REAL")
 
+        # Migration: add mos_score (0-100, computed daily) + mos_updated_at so
+        # the UI can render a numeric Margin of Safety subscore alongside the
+        # categorical pill. Categorical lives on snapshot.margin_of_safety
+        # (manual override); this column is the deterministic auto-refreshed
+        # subscore, so the UI can surface drift between the two.
+        try:
+            conn.execute("SELECT mos_score FROM symbol_latest_price LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_score INTEGER")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_updated_at TEXT")
+
         # Migration: add market_sector_averages_json if not present
         try:
             conn.execute("SELECT market_sector_averages_json FROM scans LIMIT 1")
@@ -491,6 +502,44 @@ def upsert_latest_price(
                     price = excluded.price,
                     updated_at = excluded.updated_at
             """, (symbol, price, updated_at))
+
+
+def upsert_mos_score(symbol: str, mos_score: Optional[int]) -> None:
+    """Persist the daily-recomputed Margin of Safety subscore for a symbol.
+
+    The categorical MoS rating (high/medium/low/speculative) is a manual
+    judgment override stored on snapshot.margin_of_safety per
+    portfolio/watchlist row. This subscore is the auto-refreshed numeric
+    counterpart, computed from fundamentals (forward P/E, FCF yield, balance
+    sheet) once per day. UI surfaces both so the user can spot drift between
+    the manual rating and the numeric reality.
+    """
+    if not symbol:
+        return
+    updated_at = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        # Upsert pattern: insert a stub row with placeholder price=0 if missing
+        # (price will be repopulated by the next price fetch), or update in
+        # place. Using a price-skip subquery to avoid clobbering existing price.
+        conn.execute("""
+            INSERT INTO symbol_latest_price (symbol, price, updated_at, mos_score, mos_updated_at)
+            VALUES (?, 0, ?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                mos_score = excluded.mos_score,
+                mos_updated_at = excluded.mos_updated_at
+        """, (symbol, updated_at, mos_score, updated_at))
+
+
+def get_mos_score(symbol: str) -> Optional[dict]:
+    """Read the stored MoS subscore + timestamp for a single symbol."""
+    with get_db() as conn:
+        r = conn.execute(
+            "SELECT mos_score, mos_updated_at FROM symbol_latest_price WHERE symbol = ?",
+            (symbol,),
+        ).fetchone()
+        if not r:
+            return None
+        return {"mos_score": r["mos_score"], "mos_updated_at": r["mos_updated_at"]}
 
 
 def get_recent_tracked_symbols(lookback_days: int = 365) -> list[str]:
