@@ -2430,9 +2430,26 @@ function renderWatchlistCard(i) {
     : isRejected
     ? `<span style="background:rgba(239,68,68,0.2);color:var(--red);padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;">REJECTED</span>`
     : `<span style="background:rgba(148,163,184,0.15);color:var(--text2);padding:3px 10px;border-radius:12px;font-size:11px;">WATCHING</span>`;
-  const ribbonHtml = flagRibbonHtml
-    ? `${flagRibbonHtml}${statusRibbonHtml ? '<span style="margin-left:6px;display:inline-block;">' + statusRibbonHtml + '</span>' : ''}`
-    : statusRibbonHtml;
+
+  // Margin of Safety badge — Graham/Buffett-style downside-protection rating.
+  // Stored on the snapshot so it travels with the row across rebuilds; the
+  // rationale lives in the notes field (asset backing, cash flow stability,
+  // balance sheet strength, multi-metric cheapness, owner-operator presence).
+  const mos = i.snapshot && i.snapshot.margin_of_safety;
+  const mosBadgeHtml = mos === 'high'
+    ? `<span title="High margin of safety — asset/cash-flow backing with multi-metric cheapness" style="background:rgba(45,212,191,0.18);color:var(--green);border:1px solid rgba(45,212,191,0.45);padding:3px 8px;border-radius:12px;font-size:11px;font-weight:700;">🛡️ HIGH MoS</span>`
+    : mos === 'medium'
+    ? `<span title="Medium margin of safety — partial criteria; reasonable downside protection" style="background:rgba(148,163,184,0.15);color:var(--text);border:1px solid var(--border);padding:3px 8px;border-radius:12px;font-size:11px;">🛡️ MED MoS</span>`
+    : mos === 'low'
+    ? `<span title="Low margin of safety — pay-up-for-quality territory; thin downside cushion" style="background:rgba(245,158,11,0.12);color:var(--amber);border:1px solid rgba(245,158,11,0.35);padding:3px 8px;border-radius:12px;font-size:11px;">🛡️ LOW MoS</span>`
+    : mos === 'speculative'
+    ? `<span title="Speculative — venture-style bet with no traditional MoS; size accordingly" style="background:rgba(168,85,247,0.15);color:#c084fc;border:1px solid rgba(168,85,247,0.4);padding:3px 8px;border-radius:12px;font-size:11px;font-weight:700;">⚡ SPEC</span>`
+    : '';
+
+  const ribbonParts = [flagRibbonHtml, statusRibbonHtml, mosBadgeHtml].filter(Boolean);
+  const ribbonHtml = ribbonParts.length
+    ? ribbonParts.map((p, idx) => idx === 0 ? p : `<span style="margin-left:6px;display:inline-block;">${p}</span>`).join('')
+    : '';
 
   // Price block — surfaces both the live price and the buy trigger
   // ("Buy ≤ $X") together with the % drop still needed, so the user
