@@ -3496,9 +3496,27 @@ function renderPortfolioRow(i) {
     review:  { bg: 'rgba(59,130,246,0.15)', fg: 'var(--blue)',  border: 'rgba(59,130,246,0.4)',  label: 'REVIEW' },
     deploy:  { bg: 'rgba(45,212,191,0.18)', fg: 'var(--green)', border: 'rgba(45,212,191,0.45)', label: 'DEPLOY' },
   };
-  const actionCell = action && actionStyles[action]
+  const actionChip = action && actionStyles[action]
     ? `<span style="background:${actionStyles[action].bg};color:${actionStyles[action].fg};border:1px solid ${actionStyles[action].border};padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;">${actionStyles[action].label}</span>`
     : '<span style="color:var(--text2);font-size:11px;">—</span>';
+
+  // Margin-of-Safety pill — same vocabulary as the watchlist (high / medium /
+  // low / speculative). Stored on snapshot.margin_of_safety; full rationale
+  // lives in the action notes the row reveals when expanded.
+  const mos = i.snapshot && i.snapshot.margin_of_safety;
+  const mosPill = mos === 'high'
+    ? `<span title="High margin of safety — asset/cash-flow backing with multi-metric cheapness" style="background:rgba(45,212,191,0.18);color:var(--green);border:1px solid rgba(45,212,191,0.45);padding:3px 8px;border-radius:12px;font-size:10px;font-weight:700;cursor:help;">🛡️ HIGH</span>`
+    : mos === 'medium'
+    ? `<span title="Medium margin of safety — partial criteria; reasonable downside protection" style="background:rgba(148,163,184,0.15);color:var(--text);border:1px solid var(--border);padding:3px 8px;border-radius:12px;font-size:10px;cursor:help;">🛡️ MED</span>`
+    : mos === 'low'
+    ? `<span title="Low margin of safety — pay-up-for-quality territory; thin downside cushion" style="background:rgba(245,158,11,0.12);color:var(--amber);border:1px solid rgba(245,158,11,0.35);padding:3px 8px;border-radius:12px;font-size:10px;cursor:help;">🛡️ LOW</span>`
+    : mos === 'speculative'
+    ? `<span title="Speculative — venture-style bet with no traditional MoS; size accordingly" style="background:rgba(168,85,247,0.15);color:#c084fc;border:1px solid rgba(168,85,247,0.4);padding:3px 8px;border-radius:12px;font-size:10px;font-weight:700;cursor:help;">⚡ SPEC</span>`
+    : '';
+
+  const actionCell = mosPill
+    ? `<div style="display:inline-flex;flex-direction:column;gap:4px;align-items:center;">${actionChip}${mosPill}</div>`
+    : actionChip;
 
   // Expand chevron — purely visual now; the entire row is clickable. We
   // still render it so the user has an obvious affordance for "this row

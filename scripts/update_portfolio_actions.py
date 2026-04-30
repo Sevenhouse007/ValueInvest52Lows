@@ -35,6 +35,7 @@ DEFAULT_TARGETS = {
 ACTIONS = {
     "AMR": {
         "action": "trim",
+        "margin_of_safety": "medium",
         "notes": (
             "TRIM 26% → 10% (frees ~$25k for redeployment).\n\n"
             "Currently 15.9% post fresh-price update — already trimmed conceptually but "
@@ -50,6 +51,7 @@ ACTIONS = {
     },
     "CNR": {
         "action": "exit",
+        "margin_of_safety": "low",
         "notes": (
             "EXIT entirely (frees ~$23k).\n\n"
             "Highly correlated with AMR (US met coal). Owning both is single-bet leverage, "
@@ -61,6 +63,7 @@ ACTIONS = {
     },
     "ULTA": {
         "action": "hold",
+        "margin_of_safety": "medium",
         "notes": (
             "HOLD at current ~9% weight.\n\n"
             "Highest-quality business in the book. 44M loyalty members (95%+ of sales), "
@@ -78,6 +81,7 @@ ACTIONS = {
     },
     "INFQ": {
         "action": "swap",
+        "margin_of_safety": "speculative",
         "notes": (
             "SWAP — Sell INFQ entirely, buy IONQ at 3-3.5% sizing.\n\n"
             "Why: IONQ is the higher-quality public quantum bet on every metric — $130M "
@@ -91,6 +95,7 @@ ACTIONS = {
     },
     "JD": {
         "action": "trim",
+        "margin_of_safety": "medium",
         "notes": (
             "TRIM 6.7% → 4% (already roughly there at 4.4%).\n\n"
             "Cheap profitable Chinese e-commerce business with $24B+ cash, 4.6% retail op "
@@ -109,6 +114,7 @@ ACTIONS = {
     },
     "PYPL": {
         "action": "exit",
+        "margin_of_safety": "low",
         "notes": (
             "EXIT (frees ~$8k + ~$4k harvestable tax loss).\n\n"
             "Channel-check confirms what the data showed: branded checkout +1% organic = "
@@ -169,6 +175,7 @@ ACTIONS = {
     },
     "IWM": {
         "action": "review",
+        "margin_of_safety": "medium",
         "notes": (
             "REVIEW — decide if this is conviction or parking lot.\n\n"
             "iShares Russell 2000 ETF up +45.79% on cost = winner that snuck up. But owning "
@@ -182,6 +189,7 @@ ACTIONS = {
     },
     "STLA": {
         "action": "hold",
+        "margin_of_safety": "speculative",
         "notes": (
             "HOLD at 2.2% — turnaround speculation, properly sized.\n\n"
             "Down 54.7% on cost but the 10-K deep dive showed real recovery signals: H2 "
@@ -202,6 +210,7 @@ ACTIONS = {
     },
     "NKE": {
         "action": "exit",
+        "margin_of_safety": "low",
         "notes": (
             "EXIT (frees ~$5k + ~$3.8k harvestable tax loss).\n\n"
             "Down 46.5% but still trades 23x fwd P/E with eroding moat. Different from STLA: "
@@ -215,6 +224,7 @@ ACTIONS = {
     },
     "PAYC": {
         "action": "exit",
+        "margin_of_safety": "low",
         "notes": (
             "GRADUAL EXIT (frees ~$4k).\n\n"
             "AI-substitution risk flagged. SMB payroll/HR SaaS is directly in the line of "
@@ -228,6 +238,7 @@ ACTIONS = {
     },
     "GPI": {
         "action": "hold",
+        "margin_of_safety": "medium",
         "notes": (
             "HOLD at 1.5%.\n\n"
             "Auto retail — physical inventory + dealer franchises = AI-immune. Down 7.86% "
@@ -240,6 +251,7 @@ ACTIONS = {
     },
     "LAD": {
         "action": "hold",
+        "margin_of_safety": "medium",
         "notes": (
             "HOLD at 1.5%.\n\n"
             "Lithia Motors — auto retail with strongest acquisition/scale story among "
@@ -251,6 +263,7 @@ ACTIONS = {
     },
     "SIRI": {
         "action": "exit",
+        "margin_of_safety": "low",
         "notes": (
             "EXIT (frees ~$2.8k).\n\n"
             "Sirius XM — declining sub business + Liberty Media overhang. Down 13.87% on "
@@ -261,6 +274,7 @@ ACTIONS = {
     },
     "BAC": {
         "action": "hold",
+        "margin_of_safety": "medium",
         "notes": (
             "HOLD at 0.7% — winner but tiny weight.\n\n"
             "Up 113% on cost = trophy position that proved the original thesis. But it's now "
@@ -272,6 +286,7 @@ ACTIONS = {
     },
     "WFC": {
         "action": "build",
+        "margin_of_safety": "medium",
         "notes": (
             "BUILD from 0.1% stub → 3% target (~$7k more).\n\n"
             "Q1 2026 confirmed thesis (per Potential Buys watchlist green flag): EPS $1.60 "
@@ -283,6 +298,7 @@ ACTIONS = {
     },
     "CASH": {
         "action": "deploy",
+        "margin_of_safety": "high",
         "notes": (
             "DEPLOY ~$30-50k of $87k per Tier 1 plan; keep ~$40-55k as dry powder.\n\n"
             "ACTIVE BUYS (per current watchlist flags + MoS):\n"
