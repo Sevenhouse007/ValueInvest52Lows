@@ -211,6 +211,15 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mos_history_date ON mos_history(snapshot_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mos_history_symbol ON mos_history(symbol)")
 
+        # Earnings date — persisted alongside MoS so the UI can render the
+        # next-earnings indicator on every portfolio/watchlist row without
+        # round-tripping fundamentals on each render. Refreshed by the
+        # daily MoS recompute, which already pulls fundamentals.
+        try:
+            conn.execute("SELECT next_earnings_date FROM symbol_latest_price LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN next_earnings_date TEXT")
+
         # Migration: Klarman-style composite adjustments —
         #   raw_score        = composite before adjustments (peer/DCF/asset only)
         #   buyback_credit   = +pp added for shareholder yield via buybacks
@@ -730,6 +739,67 @@ def get_mos_score(symbol: str) -> Optional[dict]:
             "mos_quality_reasons": reasons,
             "mos_implied_growth": r["mos_implied_growth"],
         }
+
+
+def upsert_earnings_date(symbol: str, earnings_date: Optional[str]) -> None:
+    """Persist the next-earnings date for a symbol. ISO YYYY-MM-DD or
+    None when unknown. Refreshed by the daily MoS recompute since it
+    already has the fundamentals dict in hand."""
+    if not symbol:
+        return
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO symbol_latest_price (symbol, price, updated_at, next_earnings_date)
+            VALUES (?, 0, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                next_earnings_date = excluded.next_earnings_date
+        """, (symbol, datetime.now(timezone.utc).isoformat(), earnings_date))
+
+
+def get_earnings_date(symbol: str) -> Optional[str]:
+    with get_db() as conn:
+        r = conn.execute(
+            "SELECT next_earnings_date FROM symbol_latest_price WHERE symbol = ?",
+            (symbol,),
+        ).fetchone()
+        return r["next_earnings_date"] if r else None
+
+
+def get_upcoming_earnings(within_days: int = 30) -> list[dict]:
+    """Return upcoming earnings dates for symbols on portfolio + watchlist,
+    sorted by date ascending. Used by the catalyst panel to surface
+    near-term events at a glance."""
+    today = date.today().isoformat()
+    cutoff = (date.today() + timedelta(days=within_days)).isoformat()
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT slp.symbol, slp.next_earnings_date,
+                   p.short_name AS portfolio_name,
+                   w.short_name AS watchlist_name
+            FROM symbol_latest_price slp
+            LEFT JOIN portfolio p ON p.symbol = slp.symbol
+            LEFT JOIN watchlist w ON w.symbol = slp.symbol
+            WHERE slp.next_earnings_date IS NOT NULL
+              AND slp.next_earnings_date >= ?
+              AND slp.next_earnings_date <= ?
+              AND (p.symbol IS NOT NULL OR w.symbol IS NOT NULL)
+            ORDER BY slp.next_earnings_date ASC
+        """, (today, cutoff)).fetchall()
+        out = []
+        for r in rows:
+            d = date.fromisoformat(r["next_earnings_date"])
+            days = (d - date.today()).days
+            on_portfolio = r["portfolio_name"] is not None
+            on_watchlist = r["watchlist_name"] is not None
+            out.append({
+                "symbol": r["symbol"],
+                "earnings_date": r["next_earnings_date"],
+                "days_until": days,
+                "short_name": r["portfolio_name"] or r["watchlist_name"] or "",
+                "on_portfolio": on_portfolio,
+                "on_watchlist": on_watchlist,
+            })
+        return out
 
 
 def insert_mos_snapshot(

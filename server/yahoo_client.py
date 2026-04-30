@@ -191,6 +191,9 @@ def _fetch_yf_financials(symbol: str) -> Optional[dict]:
                     if isinstance(next_earn, datetime.date):
                         days_to_earnings = (next_earn - datetime.date.today()).days
                         result["days_to_earnings"] = days_to_earnings
+                        # Also persist the date string so we can render
+                        # "📅 May 6 (5d)" rather than just a day count.
+                        result["next_earnings_date"] = next_earn.isoformat()
         except Exception:
             pass
 

@@ -22,14 +22,16 @@ from server.config import BASE_DIR, DAILY_REFRESH_HOUR, DAILY_REFRESH_MINUTE, HO
 from server.database import (
     create_portfolio_item, create_watchlist_item, delete_portfolio_item, delete_scan,
     delete_watchlist_item, fill_mos_forward_return, get_backtest_details,
-    get_backtest_summary, get_bounce_back_candidates, get_latest_good_scan,
-    get_latest_scan, get_latest_scan_averages, get_mos_backtest_summary,
-    get_mos_history_needing_fill, get_mos_score, get_performance_rows_needing_update,
-    get_portfolio_by_symbol, get_portfolio_item, get_recent_tracked_symbols,
-    get_scan_by_date, get_scan_history, get_stock_history, get_watchlist_by_symbol,
-    get_watchlist_item, init_db, insert_mos_snapshot, list_portfolio, list_watchlist,
-    save_performance_tracking, save_scan, update_forward_price, update_portfolio_item,
-    update_watchlist_item, upsert_latest_price, upsert_mos_score,
+    get_backtest_summary, get_bounce_back_candidates, get_earnings_date,
+    get_latest_good_scan, get_latest_scan, get_latest_scan_averages,
+    get_mos_backtest_summary, get_mos_history_needing_fill, get_mos_score,
+    get_performance_rows_needing_update, get_portfolio_by_symbol,
+    get_portfolio_item, get_recent_tracked_symbols, get_scan_by_date,
+    get_scan_history, get_stock_history, get_upcoming_earnings,
+    get_watchlist_by_symbol, get_watchlist_item, init_db, insert_mos_snapshot,
+    list_portfolio, list_watchlist, save_performance_tracking, save_scan,
+    update_forward_price, update_portfolio_item, update_watchlist_item,
+    upsert_earnings_date, upsert_latest_price, upsert_mos_score,
 )
 from server.models import ScanResult, ScanSummary
 from server.pipeline import merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
@@ -311,11 +313,11 @@ async def recompute_mos_scores():
     symbols = sorted(pf_syms | wl_syms)
     logger.info(f"MoS recompute starting for {len(symbols)} symbols")
 
-    async def _one(sym: str) -> tuple[str, Optional[dict]]:
+    async def _one(sym: str) -> tuple[str, Optional[dict], Optional[str]]:
         try:
             raw = await _yahoo_client.fetch_quote_summary(sym)
             if not raw:
-                return sym, None
+                return sym, None, None
             # Enrich with yfinance financials so balance-sheet items, FCF
             # for some symbols (REITs, midstream, asset managers), and
             # accruals/F-Score-driving line items flow through. Same
@@ -331,18 +333,29 @@ async def recompute_mos_scores():
             quote = parse_quote_from_summary(sym, raw)
             fundamentals = parse_fundamentals(sym, raw)
             stock = merge_quote_and_fundamentals(quote, fundamentals)
-            return sym, compute_mos_subscore(stock)
+            mos = compute_mos_subscore(stock)
+            earnings = getattr(stock, "next_earnings_date", None)
+            return sym, mos, earnings
         except Exception as e:
             logger.debug(f"MoS recompute failed for {sym}: {e}")
-            return sym, None
+            return sym, None, None
 
     results = await asyncio.gather(*(_one(s) for s in symbols))
-    written = sum(1 for _, r in results if r is not None)
+    written = sum(1 for _, r, _ in results if r is not None)
     today_iso = datetime.now(timezone.utc).date().isoformat()
     # Fetch current prices once for snapshot pricing — same call shape as
     # the portfolio/watchlist enrichment uses.
     prices = await _fetch_latest_prices(symbols)
-    for sym, r in results:
+    # Persist next-earnings date for every symbol that has one — even when
+    # the MoS subscore came back None, the earnings date may still be valid
+    # and useful for the catalyst panel.
+    for sym, _, earnings in results:
+        if earnings:
+            try:
+                upsert_earnings_date(sym, earnings)
+            except Exception as e:
+                logger.debug(f"upsert_earnings_date({sym}) failed: {e}")
+    for sym, r, earnings in results:
         if r is not None:
             try:
                 upsert_mos_score(
@@ -2179,9 +2192,19 @@ def _attach_mos_score(item: dict) -> dict:
     3 component discounts pulled from symbol_latest_price (recomputed by
     the daily scheduler). UI surfaces the headline % discount on the pill
     and the breakdown (peer / DCF / asset) plus implied intrinsic value
-    in the hover tooltip."""
+    in the hover tooltip. Also attaches next_earnings_date so the row
+    can render a 📅 indicator when earnings is approaching."""
     sym = item.get("symbol")
     if sym and sym != "CASH":
+        ed = get_earnings_date(sym)
+        if ed:
+            item["next_earnings_date"] = ed
+            try:
+                from datetime import date as _date
+                d = _date.fromisoformat(ed)
+                item["days_to_earnings"] = (d - _date.today()).days
+            except Exception:
+                pass
         m = get_mos_score(sym)
         if m:
             item["mos_score"] = m.get("mos_score")
@@ -2220,6 +2243,16 @@ async def fill_mos_returns_endpoint():
     daily at 1 AM ET). Pairs each matured snapshot with today's price."""
     await fill_mos_forward_returns()
     return {"status": "ok"}
+
+
+@app.get("/api/catalysts")
+async def catalysts(within_days: int = 30):
+    """Return upcoming earnings dates for portfolio + watchlist symbols
+    within the next N days, sorted ascending. Powers the Catalysts banner
+    on Portfolio + Watchlist tabs."""
+    if within_days < 1 or within_days > 365:
+        raise HTTPException(400, "within_days must be 1-365")
+    return {"items": get_upcoming_earnings(within_days=within_days)}
 
 
 @app.get("/api/backtest/mos")

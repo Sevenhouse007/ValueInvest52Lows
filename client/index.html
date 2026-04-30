@@ -429,6 +429,7 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
       <button onclick="loadWatchlist()" title="Refresh prices" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;">↻ Refresh</button>
     </div>
   </div>
+  <div id="watchlistCatalysts"></div>
   <div id="watchlistAddForm" style="display:none;"></div>
   <div id="watchlistContent">
     <p style="color:var(--text2);">Loading watchlist...</p>
@@ -448,6 +449,7 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
       <button onclick="loadPortfolio()" title="Refresh prices" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;">↻ Refresh</button>
     </div>
   </div>
+  <div id="portfolioCatalysts"></div>
   <div id="portfolioSummary"></div>
   <div id="portfolioAddForm" style="display:none;"></div>
   <div id="portfolioContent">
@@ -2321,10 +2323,14 @@ async function loadWatchlist() {
   const c = document.getElementById('watchlistContent');
   c.innerHTML = '<p style="color:var(--text2);">Loading watchlist...</p>';
   try {
-    const r = await fetch('/api/watchlist');
-    const data = await r.json();
+    const [wlRes] = await Promise.all([
+      fetch('/api/watchlist'),
+      loadCatalysts(),
+    ]);
+    const data = await wlRes.json();
     _watchlistItems = data.items || [];
     renderWatchlist();
+    renderCatalystBanner('watchlistCatalysts', 'watchlist');
   } catch (e) {
     c.innerHTML = '<p style="color:var(--red);">Failed to load watchlist.</p>';
   }
@@ -2458,7 +2464,10 @@ function renderWatchlistCard(i) {
   };
   const mosBadgeHtml = renderMosPill(i.mos_score, wlBreakdown);
 
-  const ribbonParts = [flagRibbonHtml, statusRibbonHtml, mosBadgeHtml].filter(Boolean);
+  // Earnings badge (when within 14 days) joins the ribbon row so the
+  // user sees act-on-this signals together.
+  const wlEarningsBadge = renderEarningsBadge(i.days_to_earnings, i.next_earnings_date);
+  const ribbonParts = [flagRibbonHtml, statusRibbonHtml, mosBadgeHtml, wlEarningsBadge].filter(Boolean);
   const ribbonHtml = ribbonParts.length
     ? ribbonParts.map((p, idx) => idx === 0 ? p : `<span style="margin-left:6px;display:inline-block;">${p}</span>`).join('')
     : '';
@@ -2490,7 +2499,9 @@ function renderWatchlistCard(i) {
     priceBlock = `<div style="text-align:right;color:var(--text2);font-size:13px;">price unavailable</div>`;
   }
 
-  // Catalyst row
+  // Catalyst row — combines the user-defined target_event/target_date
+  // with the auto-tracked next-earnings-date. When earnings is within
+  // 14 days it shows up here even without a manual catalyst entry.
   let catalystHtml = '';
   if (i.target_event || i.target_date) {
     let countdown = '';
@@ -3420,6 +3431,91 @@ async function saveSettings() {
 function showLoading(on) { document.getElementById('loadingOverlay').style.display = on ? 'flex' : 'none'; }
 function showEmpty() { document.getElementById('emptyState').style.display = 'block'; }
 
+// ────────── Catalyst tracker (earnings calendar) ──────────
+// Surfaces upcoming earnings dates for portfolio + watchlist symbols.
+// Banner sits above each tab's main content. Per-row 📅 indicator
+// shows days-until-earnings, color-coded by urgency (red <3d, amber
+// 3–7d, gray 7+d). Earnings-quality concerns + kill-switch checks
+// matter most around the print, so the banner makes them impossible
+// to miss.
+let _catalystState = { items: [] };
+
+async function loadCatalysts() {
+  try {
+    const r = await fetch('/api/catalysts?within_days=14');
+    const d = await r.json();
+    _catalystState = d;
+  } catch (e) {
+    _catalystState = { items: [] };
+  }
+}
+
+function renderCatalystBanner(targetId, mode) {
+  // mode: 'portfolio' | 'watchlist' — filters the list to only show
+  // events relevant to the active tab so each surface stays focused.
+  const el = document.getElementById(targetId);
+  if (!el) return;
+  let items = (_catalystState.items || []).filter(i => {
+    if (mode === 'portfolio') return i.on_portfolio;
+    if (mode === 'watchlist') return i.on_watchlist;
+    return true;
+  });
+  if (!items.length) {
+    el.innerHTML = '';
+    return;
+  }
+  // Group by urgency
+  const today = items.filter(i => i.days_until === 0);
+  const soon  = items.filter(i => i.days_until > 0 && i.days_until <= 7);
+  const later = items.filter(i => i.days_until > 7);
+
+  const chip = (i, color) => {
+    const dayLabel = i.days_until === 0 ? 'today'
+                   : i.days_until === 1 ? 'tomorrow'
+                   : `${i.days_until}d`;
+    const date = new Date(i.earnings_date + 'T12:00:00');
+    const dateLabel = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return `<span title="${i.symbol} — ${escapeHtml(i.short_name)} reports ${dateLabel}" style="background:${color.bg};color:${color.fg};border:1px solid ${color.border};padding:4px 10px;border-radius:14px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px;cursor:help;">📅 ${i.symbol} <span style="opacity:0.7;font-weight:400;">${dayLabel}</span></span>`;
+  };
+  const RED    = { bg: 'rgba(239,68,68,0.15)',  fg: 'var(--red)',   border: 'rgba(239,68,68,0.45)'  };
+  const AMBER  = { bg: 'rgba(245,158,11,0.15)', fg: 'var(--amber)', border: 'rgba(245,158,11,0.4)'  };
+  const GRAY   = { bg: 'rgba(148,163,184,0.12)',fg: 'var(--text)',  border: 'var(--border)'         };
+
+  let chips = '';
+  today.forEach(i => chips += chip(i, RED));
+  soon.forEach(i  => chips += chip(i, AMBER));
+  later.forEach(i => chips += chip(i, GRAY));
+
+  el.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="font-size:13px;font-weight:600;">📅 Upcoming Earnings (next 14 days)</div>
+        <div style="font-size:11px;color:var(--text2);">${items.length} event${items.length === 1 ? '' : 's'} — review kill switches around the print</div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">${chips}</div>
+    </div>`;
+}
+
+// Small per-row earnings badge — placed alongside other status indicators
+// on portfolio/watchlist rows. Color-coded by urgency.
+function renderEarningsBadge(daysToEarnings, earningsDate) {
+  if (daysToEarnings === null || daysToEarnings === undefined) return '';
+  if (daysToEarnings < -1 || daysToEarnings > 14) return '';  // past or distant
+  let color, label;
+  if (daysToEarnings <= 1) {
+    color = { bg: 'rgba(239,68,68,0.15)', fg: 'var(--red)', border: 'rgba(239,68,68,0.45)' };
+    label = daysToEarnings === 0 ? 'today' : daysToEarnings === 1 ? 'tomorrow' : 'yesterday';
+  } else if (daysToEarnings <= 7) {
+    color = { bg: 'rgba(245,158,11,0.15)', fg: 'var(--amber)', border: 'rgba(245,158,11,0.4)' };
+    label = `${daysToEarnings}d`;
+  } else {
+    color = { bg: 'rgba(148,163,184,0.12)', fg: 'var(--text)', border: 'var(--border)' };
+    label = `${daysToEarnings}d`;
+  }
+  const dateStr = earningsDate ? new Date(earningsDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+  return `<span title="Reports ${dateStr}" style="background:${color.bg};color:${color.fg};border:1px solid ${color.border};padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600;cursor:help;">📅 ${label}</span>`;
+}
+
 // ────────── Portfolio (Current Holdings) ──────────
 // Persistent CRUD over /api/portfolio. Each row is a position with shares
 // + cost basis; the API enriches at read time with live price, market
@@ -3435,10 +3531,16 @@ async function loadPortfolio() {
   c.innerHTML = '<p style="color:var(--text2);">Loading portfolio...</p>';
   s.innerHTML = '';
   try {
-    const r = await fetch('/api/portfolio');
-    const data = await r.json();
+    // Fetch portfolio + catalysts in parallel — catalyst banner needs to
+    // render alongside the summary cards.
+    const [pfRes] = await Promise.all([
+      fetch('/api/portfolio'),
+      loadCatalysts(),
+    ]);
+    const data = await pfRes.json();
     _portfolioState = data;
     renderPortfolio();
+    renderCatalystBanner('portfolioCatalysts', 'portfolio');
   } catch (e) {
     c.innerHTML = '<p style="color:var(--red);">Failed to load portfolio.</p>';
   }
@@ -3765,11 +3867,17 @@ function renderPortfolioRow(i) {
   const reviewedAt = i.snapshot && i.snapshot.mos_reviewed_at;
   const reviewedHtml = reviewedAt ? renderReviewedIndicator(reviewedAt) : '';
 
-  const actionCell = (mosPillHtml || reviewedHtml)
+  // Earnings badge — surfaces 📅 on rows where earnings is within 14
+  // days. Lives in the Action column so it's adjacent to the action
+  // chip (act-on-this signals stay together).
+  const earningsBadge = renderEarningsBadge(i.days_to_earnings, i.next_earnings_date);
+
+  const actionCell = (mosPillHtml || reviewedHtml || earningsBadge)
     ? `<div style="display:inline-flex;flex-direction:column;gap:3px;align-items:center;">
          ${actionChip}
          ${mosPillHtml}
          ${reviewedHtml}
+         ${earningsBadge}
        </div>`
     : actionChip;
 

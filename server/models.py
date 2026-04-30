@@ -101,6 +101,7 @@ class StockFundamentals(BaseModel):
     shareholder_yield: Optional[float] = None
     debt_maturity_ratio: Optional[float] = None
     days_to_earnings: Optional[int] = None
+    next_earnings_date: Optional[str] = None  # YYYY-MM-DD; companion to days_to_earnings
     days_to_cover: Optional[float] = None
     goodwill: Optional[float] = None
     goodwill_prev: Optional[float] = None
@@ -211,6 +212,7 @@ class ScoredStock(BaseModel):
     shareholder_yield: Optional[float] = None
     debt_maturity_ratio: Optional[float] = None
     days_to_earnings: Optional[int] = None
+    next_earnings_date: Optional[str] = None  # YYYY-MM-DD; companion to days_to_earnings
     days_to_cover: Optional[float] = None
     goodwill: Optional[float] = None
     goodwill_prev: Optional[float] = None
