@@ -310,7 +310,7 @@ async def recompute_mos_scores():
     symbols = sorted(pf_syms | wl_syms)
     logger.info(f"MoS recompute starting for {len(symbols)} symbols")
 
-    async def _one(sym: str) -> tuple[str, Optional[int]]:
+    async def _one(sym: str) -> tuple[str, Optional[dict]]:
         try:
             raw = await _yahoo_client.fetch_quote_summary(sym)
             if not raw:
@@ -324,11 +324,17 @@ async def recompute_mos_scores():
             return sym, None
 
     results = await asyncio.gather(*(_one(s) for s in symbols))
-    written = sum(1 for _, score in results if score is not None)
-    for sym, score in results:
-        if score is not None:
+    written = sum(1 for _, r in results if r is not None)
+    for sym, r in results:
+        if r is not None:
             try:
-                upsert_mos_score(sym, score)
+                upsert_mos_score(
+                    sym,
+                    r["score"],
+                    cheapness=r.get("cheapness"),
+                    quality=r.get("quality"),
+                    capreturn=r.get("capreturn"),
+                )
             except Exception as e:
                 logger.warning(f"upsert_mos_score({sym}) failed: {e}")
     logger.info(f"MoS recompute done: {written}/{len(symbols)} scores written")
@@ -884,67 +890,168 @@ def _unwrap_yahoo(v):
     return float(v) if v is not None else None
 
 
-def compute_mos_subscore(stock) -> Optional[int]:
-    """Compute the deterministic Margin of Safety subscore (0-100) from
-    fundamentals. Three components, ~33 points each:
+def _ratio_vs_sector(value: Optional[float], sector_median: Optional[float],
+                     fallback_thresholds: list[tuple[float, int]]) -> Optional[int]:
+    """Score a "lower is better" valuation ratio against its sector median.
+    fallback_thresholds = [(threshold, points), ...] sorted ascending — used
+    when no sector median exists. Returns None when the input is missing or
+    non-positive."""
+    if value is None or value <= 0:
+        return None
+    if sector_median and sector_median > 0:
+        ratio = value / sector_median
+        if ratio < 0.5:    return 10
+        if ratio < 0.7:    return 7
+        if ratio < 0.9:    return 4
+        if ratio < 1.1:    return 2
+        return 0
+    # Fallback to absolute thresholds
+    for thresh, pts in fallback_thresholds:
+        if value < thresh:
+            return pts
+    return 0
 
-      Cheapness    (0-34) — forward P/E (lower is better)
-      Cash flow    (0-33) — FCF yield (FCF / market cap, higher is better)
-      Balance sheet (0-33) — debt/equity (lower is better; net cash = full)
 
-    Returns None when too few inputs are available to be meaningful (e.g.
-    < 2 of 3 components computable). The categorical pill on the snapshot
-    is the human override for cases this misses (Buffett anchor, contracted
-    backlog, regulatory moat — none of which show up in these three ratios).
+def compute_mos_subscore(stock) -> Optional[dict]:
+    """Compute the Margin of Safety composite score (0-100) plus the three
+    subscores it's built from. Returns a dict with total + breakdown, or None
+    when fewer than ~half the inputs are available.
+
+    Composite = Cheapness (40) + Quality (30) + Capital Return (30)
+
+    Cheapness (40 pts) — sector-relative when sector medians available, else
+    absolute thresholds. 10 pts each across:
+      forward P/E, EV/EBITDA, P/B, P/FCF (= market_cap / free_cash_flow)
+
+    Quality (30 pts):
+      ROIC vs WACC spread (12) — value creation
+      Interest coverage     (8)  — debt service durability
+      Piotroski F-Score     (6)  — fundamental health composite
+      Debt/Equity           (4)  — leverage discipline
+
+    Capital Return (30 pts):
+      FCF yield        (12) — cash generation per dollar of market cap
+      Buyback yield    (10) — share count compression
+      Insider net buys (8)  — owner-aligned conviction
+
+    The categorical pill on snapshot.margin_of_safety is the manual override
+    for cases this misses (Buffett anchor, contracted backlog, regulatory
+    moat). Drift between the two is the signal.
     """
     fwd_pe = getattr(stock, "forward_pe", None)
+    ev_ebitda = getattr(stock, "ev_to_ebitda", None)
+    pb = getattr(stock, "price_to_book", None)
     fcf = getattr(stock, "free_cash_flow", None)
     market_cap = getattr(stock, "market_cap", None)
+    p_fcf = (market_cap / fcf) if (fcf and fcf > 0 and market_cap) else None
+
+    sec_pe = getattr(stock, "sector_median_pe", None)
+    sec_ev = getattr(stock, "sector_median_ev_ebitda", None)
+    sec_pb = getattr(stock, "sector_median_pb", None)
+
+    # ── Cheapness subscore (max 40) ────────────────────────────────────
+    pe_pts   = _ratio_vs_sector(fwd_pe,   sec_pe, [(10, 10), (15, 7), (20, 4), (25, 2)])
+    ev_pts   = _ratio_vs_sector(ev_ebitda, sec_ev, [(6, 10), (10, 7), (14, 4), (18, 2)])
+    pb_pts   = _ratio_vs_sector(pb,       sec_pb, [(1.0, 10), (1.5, 7), (2.5, 4), (4.0, 2)])
+    # P/FCF has no sector median; use absolute thresholds.
+    pfcf_pts = _ratio_vs_sector(p_fcf,    None,   [(8, 10), (12, 7), (18, 4), (25, 2)])
+    cheap_components = [c for c in (pe_pts, ev_pts, pb_pts, pfcf_pts) if c is not None]
+    if cheap_components:
+        # Prorate to 40 to handle missing components fairly.
+        cheap = round(sum(cheap_components) / len(cheap_components) * 4)
+    else:
+        cheap = None
+
+    # ── Quality subscore (max 30) ──────────────────────────────────────
+    roic = getattr(stock, "roic", None)
+    wacc = getattr(stock, "sector_wacc", None)
+    int_cov = getattr(stock, "interest_coverage", None)
+    f_score = getattr(stock, "piotroski_f_score", None)
     de = getattr(stock, "debt_to_equity", None)
 
-    parts: list[int] = []
-
-    # Component 1: Cheapness via fwd P/E
-    if fwd_pe is not None and fwd_pe > 0:
-        if fwd_pe < 8:    parts.append(34)
-        elif fwd_pe < 12: parts.append(28)
-        elif fwd_pe < 16: parts.append(22)
-        elif fwd_pe < 20: parts.append(15)
-        elif fwd_pe < 25: parts.append(8)
-        elif fwd_pe < 35: parts.append(3)
-        else:             parts.append(0)
-
-    # Component 2: FCF yield = FCF / market cap
-    if fcf is not None and market_cap and market_cap > 0:
-        fcf_yield_pct = (fcf / market_cap) * 100
-        if fcf_yield_pct >= 12:   parts.append(33)
-        elif fcf_yield_pct >= 8:  parts.append(27)
-        elif fcf_yield_pct >= 5:  parts.append(20)
-        elif fcf_yield_pct >= 3:  parts.append(13)
-        elif fcf_yield_pct >= 1:  parts.append(6)
-        elif fcf_yield_pct > 0:   parts.append(2)
-        else:                      parts.append(0)
-
-    # Component 3: Balance sheet via debt/equity. Yahoo reports D/E as a
-    # ratio (e.g. 0.45) for some symbols and a percentage (e.g. 45) for
-    # others; normalize by treating values >5 as percent.
+    qual_components: list[int] = []
+    if roic is not None and wacc is not None and wacc > 0:
+        spread = roic / wacc
+        if   spread >= 2.0: qual_components.append(12)
+        elif spread >= 1.5: qual_components.append(9)
+        elif spread >= 1.2: qual_components.append(6)
+        elif spread >= 1.0: qual_components.append(3)
+        else:                qual_components.append(0)
+    if int_cov is not None:
+        if   int_cov >= 10: qual_components.append(8)
+        elif int_cov >= 5:  qual_components.append(6)
+        elif int_cov >= 3:  qual_components.append(4)
+        elif int_cov >= 1:  qual_components.append(2)
+        else:                qual_components.append(0)
+    if f_score is not None:
+        if   f_score >= 8: qual_components.append(6)
+        elif f_score >= 6: qual_components.append(4)
+        elif f_score >= 4: qual_components.append(2)
+        else:               qual_components.append(0)
     if de is not None and de >= 0:
-        de_pct = de if de > 5 else (de * 100)
-        if de_pct < 5:     parts.append(33)
-        elif de_pct < 30:  parts.append(27)
-        elif de_pct < 60:  parts.append(20)
-        elif de_pct < 100: parts.append(13)
-        elif de_pct < 150: parts.append(6)
-        else:               parts.append(0)
+        de_pct = de if de > 5 else (de * 100)  # normalize ratio vs %
+        if   de_pct < 30:  qual_components.append(4)
+        elif de_pct < 60:  qual_components.append(3)
+        elif de_pct < 100: qual_components.append(2)
+        elif de_pct < 150: qual_components.append(1)
+        else:               qual_components.append(0)
+    quality = sum(qual_components) if qual_components else None
+    # If <2 of 4 components present, drop quality from composite to avoid
+    # publishing a misleading score on thin data.
+    if quality is not None and len(qual_components) < 2:
+        quality = None
 
-    # Need at least 2 of 3 components to publish a meaningful score.
-    if len(parts) < 2:
-        return None
-    # Pad missing components with the average so partial-data symbols don't
-    # get unfairly punished — they still rate against the components we do have.
-    while len(parts) < 3:
-        parts.append(int(sum(parts) / len(parts)))
-    return min(100, max(0, sum(parts)))
+    # ── Capital Return subscore (max 30) ───────────────────────────────
+    cap_components: list[int] = []
+    if fcf is not None and market_cap and market_cap > 0:
+        fcf_y = (fcf / market_cap) * 100
+        if   fcf_y >= 12: cap_components.append(12)
+        elif fcf_y >= 8:  cap_components.append(9)
+        elif fcf_y >= 5:  cap_components.append(6)
+        elif fcf_y >= 3:  cap_components.append(3)
+        elif fcf_y > 0:   cap_components.append(1)
+        else:              cap_components.append(0)
+    bb_y = getattr(stock, "buyback_yield", None)
+    if bb_y is not None:
+        # Yahoo sometimes reports buyback yield as ratio (0.05) vs % (5).
+        bb_pct = bb_y if abs(bb_y) > 0.5 else (bb_y * 100)
+        if   bb_pct >= 5:  cap_components.append(10)
+        elif bb_pct >= 3:  cap_components.append(7)
+        elif bb_pct >= 1:  cap_components.append(4)
+        elif bb_pct >= 0:  cap_components.append(2)
+        else:               cap_components.append(0)
+    buys = getattr(stock, "insider_buy_count", 0) or 0
+    sells = getattr(stock, "insider_sell_count", 0) or 0
+    if buys or sells:
+        if   buys >= 5 and sells == 0: cap_components.append(8)
+        elif buys >= 2 and sells == 0: cap_components.append(5)
+        elif buys > sells:              cap_components.append(3)
+        elif buys == sells:             cap_components.append(1)
+        else:                            cap_components.append(0)
+    capreturn = sum(cap_components) if cap_components else None
+    if capreturn is not None and len(cap_components) < 2:
+        capreturn = None
+
+    # ── Composite ──────────────────────────────────────────────────────
+    have = [s for s in (cheap, quality, capreturn) if s is not None]
+    if len(have) < 2:
+        return None  # too thin to publish
+    # Sum what we have; if a subscore is missing, scale up proportionally so
+    # the composite stays comparable to symbols with full coverage.
+    weights = {"cheap": 40, "quality": 30, "capreturn": 30}
+    actual = (cheap or 0) + (quality or 0) + (capreturn or 0)
+    coverage = sum(weights[k] for k, v in
+                   {"cheap": cheap, "quality": quality, "capreturn": capreturn}.items()
+                   if v is not None)
+    composite = round(actual / coverage * 100) if coverage > 0 else 0
+    composite = max(0, min(100, composite))
+
+    return {
+        "score": composite,
+        "cheapness": cheap,
+        "quality": quality,
+        "capreturn": capreturn,
+    }
 
 
 async def _fetch_latest_prices(symbols: list[str]) -> dict[str, dict]:
@@ -1126,14 +1233,19 @@ def _enrich_portfolio_item(item: dict, latest_prices: dict) -> dict:
 
 
 def _attach_mos_score(item: dict) -> dict:
-    """Decorate a portfolio/watchlist item with mos_score + mos_updated_at
-    pulled from symbol_latest_price (recomputed by the daily scheduler job)."""
+    """Decorate a portfolio/watchlist item with the MoS composite + 3 subscores
+    pulled from symbol_latest_price (recomputed by the daily scheduler job).
+    Subscores let the UI show the breakdown when the pill is hovered or
+    clicked: Cheapness 0-40 + Quality 0-30 + Capital Return 0-30."""
     sym = item.get("symbol")
     if sym and sym != "CASH":
         m = get_mos_score(sym)
         if m:
-            item["mos_score"] = m["mos_score"]
-            item["mos_updated_at"] = m["mos_updated_at"]
+            item["mos_score"] = m.get("mos_score")
+            item["mos_updated_at"] = m.get("mos_updated_at")
+            item["mos_cheapness"] = m.get("mos_cheapness")
+            item["mos_quality"] = m.get("mos_quality")
+            item["mos_capreturn"] = m.get("mos_capreturn")
     return item
 
 

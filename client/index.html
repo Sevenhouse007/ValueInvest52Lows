@@ -2437,7 +2437,12 @@ function renderWatchlistCard(i) {
   // (recomputed daily by the scheduler from forward P/E + FCF yield +
   // debt/equity).
   const mos = i.snapshot && i.snapshot.margin_of_safety;
-  const mosBadgeHtml = renderMosPill(mos, i.mos_score);
+  const wlBreakdown = (i.mos_cheapness !== null && i.mos_cheapness !== undefined)
+    || (i.mos_quality !== null && i.mos_quality !== undefined)
+    || (i.mos_capreturn !== null && i.mos_capreturn !== undefined)
+    ? { cheapness: i.mos_cheapness, quality: i.mos_quality, capreturn: i.mos_capreturn }
+    : null;
+  const mosBadgeHtml = renderMosPill(mos, i.mos_score, wlBreakdown);
 
   const ribbonParts = [flagRibbonHtml, statusRibbonHtml, mosBadgeHtml].filter(Boolean);
   const ribbonHtml = ribbonParts.length
@@ -3438,11 +3443,12 @@ function togglePortfolioRow(id) {
   renderPortfolio();
 }
 
-// Render the combined MoS pill (categorical + auto subscore). The pill text
-// becomes "🛡️ HIGH · 87" when both are present, just "🛡️ HIGH" when no
-// score is available, or just "· 87" when there's a score but no manual
-// rating. Returns empty string when neither exists.
-function renderMosPill(category, score) {
+// Render the combined MoS pill (categorical + auto subscore). Pill text
+// becomes "🛡️ HIGH · 87" when both signals present; either alone if only
+// one is. Hover tooltip surfaces the 3-subscore breakdown so you can see
+// what's driving the composite (sector-relative cheapness 0-40, quality
+// 0-30, capital return 0-30).
+function renderMosPill(category, score, breakdown) {
   if (!category && (score === null || score === undefined)) return '';
   const styles = {
     high:        { bg: 'rgba(45,212,191,0.18)', fg: 'var(--green)', border: 'rgba(45,212,191,0.45)', label: 'HIGH', icon: '🛡️' },
@@ -3453,9 +3459,18 @@ function renderMosPill(category, score) {
   const s = styles[category] || { bg: 'rgba(148,163,184,0.15)', fg: 'var(--text2)', border: 'var(--border)', label: '', icon: '' };
   const labelText = category ? `${s.icon} ${s.label}` : '';
   const scoreText = (score !== null && score !== undefined) ? `${labelText ? ' · ' : ''}${score}` : '';
-  const tooltip = category
-    ? `Categorical rating: ${s.label}. Auto subscore: ${score ?? 'n/a'}/100 (recomputed daily from forward P/E + FCF yield + debt/equity).`
-    : `Auto MoS subscore: ${score}/100 (forward P/E + FCF yield + debt/equity, recomputed daily). No manual rating set.`;
+
+  // Tooltip with the breakdown — title attribute can't render newlines well
+  // across browsers, but \n + spaces gets decent line breaks in most. The
+  // breakdown only renders when at least one subscore is non-null.
+  const fmt = (v, max) => (v === null || v === undefined) ? '—' : `${v}/${max}`;
+  const breakdownLine = breakdown
+    ? `\n\nBreakdown:\n  Cheapness ${fmt(breakdown.cheapness, 40)}\n  Quality   ${fmt(breakdown.quality, 30)}\n  Cap Rtn   ${fmt(breakdown.capreturn, 30)}\n\n(recomputed daily; sector-relative when sector medians available)`
+    : '';
+  const head = category
+    ? `Categorical: ${s.label} (manual review). Composite: ${score ?? '—'}/100 (auto, daily).`
+    : `Auto MoS composite: ${score}/100. No manual rating set.`;
+  const tooltip = (head + breakdownLine).replace(/"/g, '&quot;');
   return `<span title="${tooltip}" style="background:${s.bg};color:${s.fg};border:1px solid ${s.border};padding:3px 8px;border-radius:12px;font-size:10px;font-weight:700;cursor:help;">${labelText}${scoreText}</span>`;
 }
 
@@ -3538,7 +3553,12 @@ function renderPortfolioRow(i) {
   //   3) "reviewed N days ago" indicator — turns amber/red when stale, so
   //      the manual rating can't quietly drift forever.
   const mos = i.snapshot && i.snapshot.margin_of_safety;
-  const mosPillHtml = renderMosPill(mos, i.mos_score);
+  const breakdown = (i.mos_cheapness !== null && i.mos_cheapness !== undefined)
+    || (i.mos_quality !== null && i.mos_quality !== undefined)
+    || (i.mos_capreturn !== null && i.mos_capreturn !== undefined)
+    ? { cheapness: i.mos_cheapness, quality: i.mos_quality, capreturn: i.mos_capreturn }
+    : null;
+  const mosPillHtml = renderMosPill(mos, i.mos_score, breakdown);
   const reviewedAt = i.snapshot && i.snapshot.mos_reviewed_at;
   const reviewedHtml = reviewedAt ? renderReviewedIndicator(reviewedAt) : '';
 

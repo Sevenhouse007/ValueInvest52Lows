@@ -118,6 +118,17 @@ def init_db():
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_score INTEGER")
             conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_updated_at TEXT")
 
+        # Migration: store the 3 subscores so the UI can show the breakdown
+        # (Cheapness / Quality / Capital-Return) when the user wants to see
+        # WHY the composite is what it is. All three are 0-N integers; their
+        # max sums to 100.
+        try:
+            conn.execute("SELECT mos_cheapness FROM symbol_latest_price LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_cheapness INTEGER")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_quality INTEGER")
+            conn.execute("ALTER TABLE symbol_latest_price ADD COLUMN mos_capreturn INTEGER")
+
         # Migration: add market_sector_averages_json if not present
         try:
             conn.execute("SELECT market_sector_averages_json FROM scans LIMIT 1")
@@ -504,42 +515,58 @@ def upsert_latest_price(
             """, (symbol, price, updated_at))
 
 
-def upsert_mos_score(symbol: str, mos_score: Optional[int]) -> None:
-    """Persist the daily-recomputed Margin of Safety subscore for a symbol.
+def upsert_mos_score(
+    symbol: str,
+    mos_score: Optional[int],
+    cheapness: Optional[int] = None,
+    quality: Optional[int] = None,
+    capreturn: Optional[int] = None,
+) -> None:
+    """Persist the daily-recomputed Margin of Safety composite + 3 subscores.
 
-    The categorical MoS rating (high/medium/low/speculative) is a manual
-    judgment override stored on snapshot.margin_of_safety per
-    portfolio/watchlist row. This subscore is the auto-refreshed numeric
-    counterpart, computed from fundamentals (forward P/E, FCF yield, balance
-    sheet) once per day. UI surfaces both so the user can spot drift between
-    the manual rating and the numeric reality.
+    Categorical MoS rating (high/medium/low/speculative) is a manual judgment
+    override stored on snapshot.margin_of_safety per portfolio/watchlist row.
+    The composite + subscores here are the deterministic auto-refreshed
+    counterpart, computed from sector-relative cheapness + quality + capital
+    return. UI surfaces both so the user can spot drift between the manual
+    rating and the numeric reality, and click to see the breakdown.
     """
     if not symbol:
         return
     updated_at = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
-        # Upsert pattern: insert a stub row with placeholder price=0 if missing
-        # (price will be repopulated by the next price fetch), or update in
-        # place. Using a price-skip subquery to avoid clobbering existing price.
         conn.execute("""
-            INSERT INTO symbol_latest_price (symbol, price, updated_at, mos_score, mos_updated_at)
-            VALUES (?, 0, ?, ?, ?)
+            INSERT INTO symbol_latest_price (
+                symbol, price, updated_at, mos_score, mos_updated_at,
+                mos_cheapness, mos_quality, mos_capreturn
+            )
+            VALUES (?, 0, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol) DO UPDATE SET
                 mos_score = excluded.mos_score,
-                mos_updated_at = excluded.mos_updated_at
-        """, (symbol, updated_at, mos_score, updated_at))
+                mos_updated_at = excluded.mos_updated_at,
+                mos_cheapness = excluded.mos_cheapness,
+                mos_quality = excluded.mos_quality,
+                mos_capreturn = excluded.mos_capreturn
+        """, (symbol, updated_at, mos_score, updated_at, cheapness, quality, capreturn))
 
 
 def get_mos_score(symbol: str) -> Optional[dict]:
-    """Read the stored MoS subscore + timestamp for a single symbol."""
+    """Read the stored MoS composite + 3 subscores for a single symbol."""
     with get_db() as conn:
         r = conn.execute(
-            "SELECT mos_score, mos_updated_at FROM symbol_latest_price WHERE symbol = ?",
+            "SELECT mos_score, mos_updated_at, mos_cheapness, mos_quality, mos_capreturn "
+            "FROM symbol_latest_price WHERE symbol = ?",
             (symbol,),
         ).fetchone()
         if not r:
             return None
-        return {"mos_score": r["mos_score"], "mos_updated_at": r["mos_updated_at"]}
+        return {
+            "mos_score": r["mos_score"],
+            "mos_updated_at": r["mos_updated_at"],
+            "mos_cheapness": r["mos_cheapness"],
+            "mos_quality": r["mos_quality"],
+            "mos_capreturn": r["mos_capreturn"],
+        }
 
 
 def get_recent_tracked_symbols(lookback_days: int = 365) -> list[str]:
