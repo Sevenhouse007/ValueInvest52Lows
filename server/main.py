@@ -307,11 +307,22 @@ async def recompute_mos_scores():
     if _yahoo_client is None:
         _yahoo_client = YahooClient()
 
-    # Union of portfolio + watchlist symbols, dropping CASH (no fundamentals).
+    # Universe = portfolio + watchlist + latest scan's stocks. Including
+    # scan results means every Deep Value / Quality on Sale candidate
+    # gets an MoS reading automatically — when the user considers a new
+    # name from the scanner they can compare its MoS against existing
+    # positions without a manual fetch.
     pf_syms = {it["symbol"] for it in list_portfolio() if it["symbol"] != "CASH"}
     wl_syms = {it["symbol"] for it in list_watchlist()}
-    symbols = sorted(pf_syms | wl_syms)
-    logger.info(f"MoS recompute starting for {len(symbols)} symbols")
+    latest = get_latest_scan()
+    scan_syms: set[str] = set()
+    if latest and latest.stocks:
+        scan_syms = {s.symbol for s in latest.stocks}
+    symbols = sorted(pf_syms | wl_syms | scan_syms)
+    logger.info(
+        f"MoS recompute starting for {len(symbols)} symbols "
+        f"(portfolio={len(pf_syms)}, watchlist={len(wl_syms)}, scan={len(scan_syms)})"
+    )
 
     async def _one(sym: str) -> tuple[str, Optional[dict], Optional[str]]:
         try:
@@ -2228,21 +2239,45 @@ def _attach_mos_score(item: dict) -> dict:
     return item
 
 
+# Module-level guard to coalesce concurrent manual MoS recomputes.
+# Without this, two POST /api/recompute-mos in quick succession would
+# duplicate ~100 yfinance calls. Single-flight semantics — if a job is
+# already running, the second caller just returns "already_running".
+_mos_recompute_lock = asyncio.Lock()
+_mos_recompute_running = False
+
+
+async def _recompute_mos_in_background():
+    global _mos_recompute_running
+    async with _mos_recompute_lock:
+        if _mos_recompute_running:
+            return
+        _mos_recompute_running = True
+    try:
+        await recompute_mos_scores()
+    finally:
+        _mos_recompute_running = False
+
+
 @app.post("/api/recompute-mos")
-async def recompute_mos_endpoint():
-    """Manual trigger for the MoS recompute job (otherwise runs daily at
-    5 PM ET). Returns the count of symbols scored. Useful right after
-    seeding new positions so the pills aren't blank until the next cron."""
-    await recompute_mos_scores()
-    return {"status": "ok"}
+async def recompute_mos_endpoint(background_tasks: BackgroundTasks):
+    """Manual trigger for the MoS recompute job. Now covers portfolio +
+    watchlist + the full latest-scan universe (~100 symbols), which can
+    take 1–2 minutes. Runs in the background so the HTTP request returns
+    immediately rather than tripping Render's 30s proxy timeout."""
+    if _mos_recompute_running:
+        return {"status": "already_running"}
+    background_tasks.add_task(_recompute_mos_in_background)
+    return {"status": "started"}
 
 
 @app.post("/api/fill-mos-returns")
-async def fill_mos_returns_endpoint():
+async def fill_mos_returns_endpoint(background_tasks: BackgroundTasks):
     """Manual trigger for the MoS forward-return fill (otherwise runs
-    daily at 1 AM ET). Pairs each matured snapshot with today's price."""
-    await fill_mos_forward_returns()
-    return {"status": "ok"}
+    daily at 1 AM ET). Pairs each matured snapshot with today's price.
+    Backgrounded for the same reason as recompute-mos."""
+    background_tasks.add_task(fill_mos_forward_returns)
+    return {"status": "started"}
 
 
 @app.get("/api/catalysts")
