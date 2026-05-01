@@ -573,15 +573,21 @@ def get_backtest_summary() -> dict:
 
 
 def get_backtest_details() -> list[dict]:
-    """Get all performance tracking rows with returns for the detail table."""
+    """Get all performance tracking rows with returns for the detail table.
+    Joins symbol_latest_price to surface the current Klarman MoS score
+    next to the scan-time value/quality scores. MoS is only computed for
+    portfolio + watchlist symbols, so most rows show NULL — that's
+    expected and rendered as "—" in the UI."""
     with get_db() as conn:
         rows = conn.execute("""
-            SELECT symbol, scan_date, price_at_scan,
-                   price_15d, price_30d, price_90d, price_180d, price_365d,
-                   return_15d, return_30d, return_90d, return_180d, return_365d,
-                   value_score, quality_score
-            FROM scan_performance
-            ORDER BY scan_date DESC, value_score DESC
+            SELECT sp.symbol, sp.scan_date, sp.price_at_scan,
+                   sp.price_15d, sp.price_30d, sp.price_90d, sp.price_180d, sp.price_365d,
+                   sp.return_15d, sp.return_30d, sp.return_90d, sp.return_180d, sp.return_365d,
+                   sp.value_score, sp.quality_score,
+                   slp.mos_score, slp.mos_business
+            FROM scan_performance sp
+            LEFT JOIN symbol_latest_price slp ON slp.symbol = sp.symbol
+            ORDER BY sp.scan_date DESC, sp.value_score DESC
         """).fetchall()
         return [dict(r) for r in rows]
 

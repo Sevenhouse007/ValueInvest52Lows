@@ -75,6 +75,7 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; }
 /* Color cells */
 .c-green { color:var(--green); }
 .c-red { color:var(--red); }
+.c-amber { color:var(--amber); }
 .c-bold-green { color:var(--green); font-weight:700; }
 
 /* Sector comparison cells */
@@ -3363,6 +3364,7 @@ function renderTrackingTable(details) {
   html += `<th style="text-align:right;padding:6px;">Price</th>`;
   html += `<th style="text-align:right;padding:6px;">V</th>`;
   html += `<th style="text-align:right;padding:6px;">Q</th>`;
+  html += `<th style="text-align:right;padding:6px;">MoS</th>`;
   html += `<th style="text-align:right;padding:6px;">15D</th>`;
   html += `<th style="text-align:right;padding:6px;">30D</th>`;
   html += `<th style="text-align:right;padding:6px;">90D</th>`;
@@ -3386,6 +3388,17 @@ function renderTrackingTable(details) {
     html += `<td style="text-align:right;padding:4px 6px;">$${d.price_at_scan ? d.price_at_scan.toFixed(2) : '—'}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;" class="${vCls}">${d.value_score || '—'}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">${d.quality_score || '—'}</td>`;
+    // MoS column — only populated for portfolio + watchlist symbols (the
+    // recompute job only scores those). Tracked stocks not in either
+    // bucket render '—'. Color matches the pill: ≥30 green / 10–30 neutral
+    // / <0 red.
+    let mosCell = '<span style="color:var(--text2)">—</span>';
+    if (d.mos_score !== null && d.mos_score !== undefined) {
+      const m = d.mos_score;
+      const cls = m >= 30 ? 'c-green' : m >= 10 ? '' : m >= 0 ? 'c-amber' : 'c-red';
+      mosCell = `<span class="${cls}" title="${escapeHtml(d.mos_business || 'standard')} bucket">${m > 0 ? '+' : ''}${m}%</span>`;
+    }
+    html += `<td style="text-align:right;padding:4px 6px;">${mosCell}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_15d)}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_30d)}</td>`;
     html += `<td style="text-align:right;padding:4px 6px;">${fmtRet(d.return_90d)}</td>`;
