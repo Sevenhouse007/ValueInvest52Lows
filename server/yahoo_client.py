@@ -171,10 +171,17 @@ def _fetch_yf_financials(symbol: str) -> Optional[dict]:
                     # `Text` is the descriptive field ("Purchase at price...",
                     # "Sale at price...", "Stock Award..."). `Transaction` is
                     # often empty in this endpoint.
+                    # Capture `Position` and `Insider` so the classifier can
+                    # filter out issuer (company) buybacks and compensation
+                    # events. Without these, a company running an active NCIB
+                    # gets dozens of "buybacks" mis-counted as insider buys
+                    # (e.g. GIB showed 72 phantom buys; true count was 1).
                     rows.append({
                         "text": str(row.get("Text") or row.get("Transaction") or "").lower(),
                         "shares": int(row.get("Shares") or 0),
                         "ts": ts,
+                        "position": str(row.get("Position") or "").strip().lower(),
+                        "insider": str(row.get("Insider") or "").strip().lower(),
                     })
                 result["insider_yf"] = rows
         except Exception as e:

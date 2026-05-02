@@ -469,10 +469,59 @@ def _parse_insider_transactions(data: dict) -> tuple[int, int, Optional[int]]:
       2. yfinance `ticker.insider_transactions` (different Yahoo endpoint)
       3. SEC EDGAR Form 4 filings (populated by yahoo_client when both above are empty)
 
+    Two classes of rows are explicitly EXCLUDED so this signal stays clean:
+      • Issuer (company) buybacks — already accounted for in `buyback_yield`,
+        and counting them here would double-count. Detected via
+        position == "issuer" or insider name == company name. Without this
+        filter, a stock running an active NCIB (e.g. GIB) shows dozens of
+        phantom "insider buys".
+      • Compensation events — option/rights exercises, RSU vests, awards,
+        gifts. These are scheduled comp, not the insider choosing to buy
+        with their own cash. Only open-market purchases convey conviction.
+
     Returns (buy_count, sell_count, net_shares).
     """
     import time
     six_months_ago = time.time() - (180 * 86400)
+    company_name = (data.get("shortName") or data.get("longName") or "").strip().lower()
+
+    def _is_issuer_row(position: str, insider: str) -> bool:
+        if position == "issuer":
+            return True
+        # Some feeds put the company name in the Insider field with no
+        # position label — match on substring (Yahoo uses both "CGI Inc."
+        # and "CGI Inc" depending on the row, hence substring rather than
+        # equality).
+        if company_name and insider and (
+            company_name in insider or insider in company_name
+        ):
+            return True
+        return False
+
+    # Compensation/non-purchase event keywords — option/rights exercise,
+    # vesting, awards, gifts. Used as a positive-list test against the row
+    # text so we only count rows whose text actually says "purchase" or
+    # "sale" without these confounders.
+    _COMP_KEYWORDS = (
+        "exercise", "option", "rights", "award", "grant", "vest",
+        "gift", "redemption", "retraction", "cancelation", "cancellation",
+        "repurchase", "conversion", "stock award",
+        # Pre-arranged / employee plans — scheduled buys, not conviction.
+        # "ownership plan" / "purchase plan" catches ESPP-style payroll
+        # deductions; "10b5" catches Rule 10b5-1 trading plans.
+        "ownership plan", "purchase plan", "savings plan", "espp", "10b5",
+    )
+
+    def _classify(text: str) -> str:
+        """Returns 'buy', 'sell', or '' (skip)."""
+        t = text.lower()
+        if any(k in t for k in _COMP_KEYWORDS):
+            return ""
+        if "purchase" in t or ("buy" in t and "buyback" not in t):
+            return "buy"
+        if "sale" in t or "sold" in t or "sell" in t:
+            return "sell"
+        return ""
 
     # ── Source 1: Yahoo quoteSummary module ──
     txns = data.get("insiderTransactions", {}).get("transactions", [])
@@ -484,14 +533,21 @@ def _parse_insider_transactions(data: dict) -> tuple[int, int, Optional[int]]:
             ts = start.get("raw", 0) if isinstance(start, dict) else 0
             if ts < six_months_ago:
                 continue
-            text = (tx.get("transactionText") or "").lower()
-            shares = _safe_raw(tx, "shares") or 0
-            if "purchase" in text or "buy" in text:
+            position = (tx.get("ownership") or "").strip().lower()  # 'D' / 'I' here, but harmless
+            insider = (tx.get("filerName") or "").strip().lower()
+            if _is_issuer_row(position, insider):
+                continue
+            text = tx.get("transactionText") or ""
+            verdict = _classify(text)
+            if not verdict:
+                continue
+            shares = int(_safe_raw(tx, "shares") or 0)
+            if verdict == "buy":
                 buy_count += 1
-                net_shares += int(shares)
-            elif "sale" in text or "sell" in text:
+                net_shares += shares
+            else:
                 sell_count += 1
-                net_shares -= int(shares)
+                net_shares -= shares
         if buy_count + sell_count > 0:
             return buy_count, sell_count, net_shares
 
@@ -503,12 +559,16 @@ def _parse_insider_transactions(data: dict) -> tuple[int, int, Optional[int]]:
         for row in yf_rows:
             if row.get("ts", 0) and row["ts"] < six_months_ago:
                 continue
-            text = row.get("text", "")
+            if _is_issuer_row(row.get("position", ""), row.get("insider", "")):
+                continue
+            verdict = _classify(row.get("text", ""))
+            if not verdict:
+                continue
             shares = int(row.get("shares") or 0)
-            if "purchase" in text or "buy" in text:
+            if verdict == "buy":
                 buy_count += 1
                 net_shares += shares
-            elif "sale" in text or "sell" in text:
+            else:
                 sell_count += 1
                 net_shares -= shares
         if buy_count + sell_count > 0:
