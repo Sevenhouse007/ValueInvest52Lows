@@ -314,6 +314,7 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
         <th data-key="sector">Sector <span class="arrow"></span></th>
         <th data-key="sector_type" id="thModel">Model <span class="arrow"></span></th>
         <th data-key="value_score" id="thScore">Score <span class="arrow"></span></th>
+        <th data-key="mos_score" class="num" title="Klarman Margin of Safety — % discount to estimated intrinsic value">MoS <span class="arrow"></span></th>
         <th data-key="_score_delta" class="num" id="thDelta">Δ <span class="arrow"></span></th>
         <th data-key="price" class="num">Price <span class="arrow"></span></th>
         <th data-key="change_percent" class="num">1Y % <span class="arrow"></span></th>
@@ -729,6 +730,7 @@ function renderTable() {
       <td>${escapeHtml(s.sector||'—')}</td>
       <td>${isQ ? fmtFScore(s.piotroski_f_score) : '<span class=\"model-tag\">'+fmtModel(s.sector_type)+'</span>'}</td>
       <td>${scorePill(score, tier)}</td>
+      <td class="num">${fmtMosCell(s.mos_score, s.mos_business, s.mos_method, s.mos_intrinsic)}</td>
       <td class="num" ${isQ?'style="display:none"':''}>${fmtDelta(delta, s.days_in_scan)}</td>
       <td class="num">$${fmt(s.price,2)}</td>
       <td class="num ${s.change_percent>=0?'c-green':'c-red'}">${fmt(s.change_percent,1)}%</td>
@@ -746,7 +748,7 @@ function renderTable() {
       <td class="num">${fmtInsider(s.insider_buy_count, s.insider_sell_count)}</td>
     </tr>`;
     if (expandedSymbol === s.symbol) {
-      html += `<tr class="detail-row"><td colspan="21">${detailPanel(s)}</td></tr>`;
+      html += `<tr class="detail-row"><td colspan="22">${detailPanel(s)}</td></tr>`;
     }
   });
   tbody.innerHTML = html;
@@ -2083,6 +2085,22 @@ function fmtInsider(buys, sells) {
 function scorePillSmall(score, tier) {
   const cls = score >= 65 ? 'pill-blue' : score >= 45 ? 'pill-amber' : 'pill-gray';
   return `<span class="pill ${cls}" style="font-size:10px;padding:1px 6px;">${score}</span>`;
+}
+
+// Klarman MoS cell — colored % discount to intrinsic value with hover
+// tooltip showing the framework / intrinsic / breakdown. Empty when MoS
+// couldn't be computed (e.g. ETF or insufficient data).
+function fmtMosCell(score, business, method, intrinsic) {
+  if (score === null || score === undefined) {
+    return '<span style="color:var(--text2)">—</span>';
+  }
+  const cls = score >= 30 ? 'c-green'
+            : score >= 10 ? ''
+            : score >= 0  ? 'c-amber'
+            : 'c-red';
+  const sign = score > 0 ? '+' : '';
+  const tip = `${method || 'standard'} (${business || '—'})\nIntrinsic: ${intrinsic ? '$' + Number(intrinsic).toFixed(2) : '—'}`;
+  return `<span class="${cls}" title="${tip.replace(/"/g, '&quot;')}">${sign}${score}%</span>`;
 }
 
 function fmtDelta(d, daysInScan) {

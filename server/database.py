@@ -762,6 +762,35 @@ def upsert_earnings_date(symbol: str, earnings_date: Optional[str]) -> None:
         """, (symbol, datetime.now(timezone.utc).isoformat(), earnings_date))
 
 
+def get_mos_scores_batch(symbols: list[str]) -> dict[str, dict]:
+    """Bulk-fetch MoS composite + key fields for many symbols at once.
+    Used by /api/scan to attach MoS to every row without N+1 queries.
+    Returns {symbol: {mos_score, mos_business, mos_method, ...}}.
+    Symbols missing from symbol_latest_price are absent from the result."""
+    if not symbols:
+        return {}
+    placeholders = ",".join("?" * len(symbols))
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT symbol, mos_score, mos_business, mos_method, mos_intrinsic, "
+            f"mos_quality_flag, mos_peer_discount, mos_dcf_discount "
+            f"FROM symbol_latest_price WHERE symbol IN ({placeholders})",
+            symbols,
+        ).fetchall()
+        return {
+            r["symbol"]: {
+                "mos_score": r["mos_score"],
+                "mos_business": r["mos_business"],
+                "mos_method": r["mos_method"],
+                "mos_intrinsic": r["mos_intrinsic"],
+                "mos_quality_flag": r["mos_quality_flag"],
+                "mos_peer_discount": r["mos_peer_discount"],
+                "mos_dcf_discount": r["mos_dcf_discount"],
+            }
+            for r in rows
+        }
+
+
 def get_earnings_date(symbol: str) -> Optional[str]:
     with get_db() as conn:
         r = conn.execute(

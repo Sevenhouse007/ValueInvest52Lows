@@ -27,7 +27,7 @@ from server.database import (
     get_backtest_summary, get_bounce_back_candidates, get_earnings_date,
     get_latest_good_scan, get_latest_scan, get_latest_scan_averages,
     get_mos_backtest_summary, get_mos_history_needing_fill, get_mos_score,
-    get_performance_rows_needing_update, get_portfolio_by_symbol,
+    get_mos_scores_batch, get_performance_rows_needing_update, get_portfolio_by_symbol,
     get_portfolio_item, get_recent_tracked_symbols, get_scan_by_date,
     get_scan_history, get_stock_history, get_upcoming_earnings,
     get_watchlist_by_symbol, get_watchlist_item, init_db, insert_mos_snapshot,
@@ -1009,7 +1009,12 @@ def _build_response(result: ScanResult) -> dict:
     )
     # Compute rolling averages and days_in_scan (single batch query)
     from server.database import get_rolling_scores_batch
-    rolling = get_rolling_scores_batch([s.symbol for s in stocks])
+    syms = [s.symbol for s in stocks]
+    rolling = get_rolling_scores_batch(syms)
+    # Batch-fetch Klarman MoS so the table can show a column without
+    # N+1 queries. MoS is computed for all scanned stocks by the daily
+    # recompute job, so most rows will have a value.
+    mos_batch = get_mos_scores_batch(syms)
     stock_dicts = []
     for s in stocks:
         d = s.model_dump()
@@ -1022,6 +1027,9 @@ def _build_response(result: ScanResult) -> dict:
             d["rolling_value_score"] = s.value_score
             d["rolling_quality_score"] = s.quality_score
             d["days_in_scan"] = 1
+        m = mos_batch.get(s.symbol)
+        if m:
+            d.update(m)
         stock_dicts.append(d)
 
     return {
