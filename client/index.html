@@ -2945,12 +2945,44 @@ function renderLookupResult(s) {
   html += `<button class="btn btn-outline" onclick="addToWatchlistFrom(window._stockBySym['${lkSym}'])" style="margin-top:8px;font-size:11px;padding:5px 12px;">+ Watchlist</button>`;
   html += `</div></div>`;
 
-  // Score cards
-  html += `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">`;
+  // Score cards — 5 columns now: Value, Quality, F-Score, FCF Yield, MoS.
+  // MoS gets the most-actionable card slot (rightmost) since it's the
+  // Klarman framework's headline number. Color matches the pill ramp
+  // used on Portfolio + Watchlist for consistency.
+  const mos = s.mos || null;
+  let mosCardHtml = '';
+  if (mos && mos.score !== null && mos.score !== undefined) {
+    const ms = mos.score;
+    const sign = ms > 0 ? '+' : '';
+    const color = ms >= 30 ? 'var(--green)'
+               : ms >= 10 ? 'var(--text)'
+               : ms >= 0  ? 'var(--amber)'
+               : 'var(--red)';
+    const label = ms >= 30 ? 'Klarman zone'
+               : ms >= 10 ? 'Modest cushion'
+               : ms >= 0  ? 'Fair value'
+               : ms >= -30 ? 'Slight premium'
+               : 'Heavy premium';
+    const methodLabel = mos.method ? mos.method.replace(/\s*\(.*\)/, '').trim() : '';
+    mosCardHtml = `<div style="background:var(--bg);border-radius:6px;padding:12px;text-align:center;cursor:help;" title="Method: ${escapeHtml(mos.method || 'standard')}\nIntrinsic: $${mos.intrinsic ? mos.intrinsic.toFixed(2) : '—'}\nPeer: ${mos.peer_discount !== null && mos.peer_discount !== undefined ? (mos.peer_discount > 0 ? '+' : '') + mos.peer_discount + '%' : '—'}\nDCF: ${mos.dcf_discount !== null && mos.dcf_discount !== undefined ? (mos.dcf_discount > 0 ? '+' : '') + mos.dcf_discount + '%' : '—'}">
+      <div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Klarman MoS</div>
+      <div style="font-size:22px;font-weight:700;margin-top:4px;color:${color};">${sign}${ms}%</div>
+      <div style="color:var(--text2);font-size:11px;margin-top:2px;">${label}</div>
+    </div>`;
+  } else {
+    mosCardHtml = `<div style="background:var(--bg);border-radius:6px;padding:12px;text-align:center;">
+      <div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Klarman MoS</div>
+      <div style="font-size:22px;font-weight:700;margin-top:4px;color:var(--text2);">—</div>
+      <div style="color:var(--text2);font-size:11px;margin-top:2px;">insufficient data</div>
+    </div>`;
+  }
+
+  html += `<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:20px;">`;
   html += `<div style="background:var(--bg);border-radius:6px;padding:12px;text-align:center;"><div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Value Score</div><div style="font-size:22px;font-weight:700;margin-top:4px;">${scorePill(s.value_score, s.score_tier)}</div><div style="color:var(--text2);font-size:11px;margin-top:2px;">${s.score_tier}</div></div>`;
   html += `<div style="background:var(--bg);border-radius:6px;padding:12px;text-align:center;"><div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Quality Score</div><div style="font-size:22px;font-weight:700;margin-top:4px;">${scorePillSmall(s.quality_score, s.quality_tier)}</div><div style="color:var(--text2);font-size:11px;margin-top:2px;">${s.quality_tier}</div></div>`;
   html += `<div style="background:var(--bg);border-radius:6px;padding:12px;text-align:center;"><div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Piotroski F-Score</div><div style="font-size:22px;font-weight:700;margin-top:4px;">${fmtFScore(fs)}</div></div>`;
   html += `<div style="background:var(--bg);border-radius:6px;padding:12px;text-align:center;"><div style="color:var(--text2);font-size:11px;text-transform:uppercase;">FCF Yield</div><div style="font-size:22px;font-weight:700;margin-top:4px;color:${parseFloat(fcfY)>5?'var(--green)':parseFloat(fcfY)<0?'var(--red)':'var(--text)'}">${fcfY}%</div></div>`;
+  html += mosCardHtml;
   html += `</div>`;
 
   // Charts row — sits directly under the KPI cards so the radar lands

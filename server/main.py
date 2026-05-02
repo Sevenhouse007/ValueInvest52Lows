@@ -973,7 +973,16 @@ async def lookup_stock(symbol: str = Path(..., max_length=15)):
     stock.quality_tier = q.tier
     stock.quality_reasons = q.reasons
 
-    response = {"stock": stock.model_dump()}
+    # 6. Compute Klarman MoS so the lookup card can surface the same pill
+    # the Portfolio + Watchlist surfaces use. This is the same compute_
+    # mos_subscore() call the daily recompute job runs — sector dispatched,
+    # adjusted, and scenario-bracketed. Adds ~1ms; well worth it.
+    stock_dict = stock.model_dump()
+    mos = compute_mos_subscore(stock)
+    if mos:
+        stock_dict["mos"] = mos
+
+    response = {"stock": stock_dict}
     _lookup_cache_put(symbol, response)
     return response
 
