@@ -860,13 +860,21 @@ async def lookup_stock(symbol: str = Path(..., max_length=15)):
     if _yahoo_client is None:
         _yahoo_client = YahooClient()
 
-    # 1. Fetch quoteSummary
-    raw = await _yahoo_client.fetch_quote_summary(symbol)
+    # 1. Fire quoteSummary + yfinance financials in PARALLEL — they're
+    # independent calls and each takes ~500-800ms. Sequential cost was
+    # ~1.5s total; parallel is ~800ms (whichever is slower). Cuts
+    # perceived lookup latency roughly in half.
+    loop = asyncio.get_event_loop()
+    raw, fin_data = await asyncio.gather(
+        _yahoo_client.fetch_quote_summary(symbol),
+        loop.run_in_executor(_executor, _fetch_yf_financials, symbol),
+    )
 
     # Yahoo uses "BRK-B" for class shares but the standard ticker is "BRK.B".
     # If the dotted form returned only summaryDetail (no fundamentals), retry
     # with hyphens. Skip for foreign exchange suffixes like ".L"/".PA"/".T"
-    # which legitimately use a dot.
+    # which legitimately use a dot. Rare enough (only class-share tickers
+    # with dots) that we don't speculatively prefetch the hyphen variant.
     _EXCHANGE_SUFFIXES = (".L", ".PA", ".T", ".HK", ".TO", ".AX", ".DE", ".SW", ".AS", ".MI", ".MX")
     if (
         "." in symbol
@@ -874,19 +882,21 @@ async def lookup_stock(symbol: str = Path(..., max_length=15)):
         and (not raw or "assetProfile" not in raw)
     ):
         retry = symbol.replace(".", "-")
-        retry_raw = await _yahoo_client.fetch_quote_summary(retry)
+        retry_raw, retry_fin = await asyncio.gather(
+            _yahoo_client.fetch_quote_summary(retry),
+            loop.run_in_executor(_executor, _fetch_yf_financials, retry),
+        )
         if retry_raw and "assetProfile" in retry_raw:
             symbol = retry
             raw = retry_raw
+            fin_data = retry_fin
     if not raw:
         raise HTTPException(404, f"No data found for {symbol}")
 
-    # 1b. Enrich with yfinance financials so balance-sheet driven metrics
+    # 1b. Attach yfinance financials so balance-sheet driven metrics
     # (NOPAT-based ROIC, accruals, F-Score, asset growth, etc.) match what
     # the scanner produces. Without this, lookup falls back to OCF/EV ROIC
     # while the scan shows NOPAT ROIC — a confusing inconsistency.
-    loop = asyncio.get_event_loop()
-    fin_data = await loop.run_in_executor(_executor, _fetch_yf_financials, symbol)
     if fin_data:
         raw["_yf_financials"] = fin_data
 
