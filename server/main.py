@@ -13,6 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Path, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
@@ -610,6 +611,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="52W Low Value Scanner", lifespan=lifespan)
 
+# Gzip ALL responses larger than 500 bytes — the biggest single perf
+# win we can apply. Cuts the 211KB index.html, 245KB /api/scan, and
+# 152KB /api/backtest/details payloads by ~70-80% on the wire. Modern
+# browsers all support gzip, so there's no compatibility cost.
+app.add_middleware(GZipMiddleware, minimum_size=500)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
@@ -627,7 +634,13 @@ app.mount("/static", StaticFiles(directory=str(CLIENT_DIR)), name="static")
 
 @app.get("/")
 async def index():
-    return FileResponse(str(CLIENT_DIR / "index.html"))
+    # Cache the index for 60 seconds — the HTML changes only on
+    # deploys, not on every request. Repeat tab-switches and refreshes
+    # within a minute hit the browser cache instead of round-tripping.
+    return FileResponse(
+        str(CLIENT_DIR / "index.html"),
+        headers={"Cache-Control": "public, max-age=60, must-revalidate"},
+    )
 
 
 @app.get("/api/scan")
