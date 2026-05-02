@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -852,10 +853,44 @@ async def stock_history(symbol: str = Path(..., max_length=15)):
     return history
 
 
+# In-memory TTL cache for /api/lookup responses. Same-symbol re-lookups
+# within the TTL skip the ~800ms Yahoo+yfinance roundtrip and return
+# instantly from memory. A user typing in the search box, switching
+# tabs and coming back, or comparing two names side-by-side all benefit.
+# Cache is dropped on process restart (Render redeploy) which is fine —
+# the source of truth is always Yahoo.
+_LOOKUP_CACHE: dict[str, tuple[float, dict]] = {}  # symbol -> (expires_at, response)
+_LOOKUP_TTL_SECONDS = 300  # 5 minutes
+_LOOKUP_CACHE_MAX = 500    # evict oldest when full
+
+
+def _lookup_cache_get(symbol: str) -> Optional[dict]:
+    entry = _LOOKUP_CACHE.get(symbol)
+    if entry and time.time() < entry[0]:
+        return entry[1]
+    if entry:
+        # Expired — drop it
+        _LOOKUP_CACHE.pop(symbol, None)
+    return None
+
+
+def _lookup_cache_put(symbol: str, response: dict) -> None:
+    # Bound cache size — evict the oldest entry by expiry time when full.
+    if len(_LOOKUP_CACHE) >= _LOOKUP_CACHE_MAX:
+        oldest = min(_LOOKUP_CACHE.items(), key=lambda kv: kv[1][0])
+        _LOOKUP_CACHE.pop(oldest[0], None)
+    _LOOKUP_CACHE[symbol] = (time.time() + _LOOKUP_TTL_SECONDS, response)
+
+
 @app.get("/api/lookup/{symbol}")
 async def lookup_stock(symbol: str = Path(..., max_length=15)):
     """Fetch, score, and return a single stock by symbol."""
     symbol = validate_symbol(symbol)
+    # Cache hit short-circuits the entire pipeline. Same response shape
+    # as the live path, just delivered in ~5ms instead of ~800ms.
+    cached = _lookup_cache_get(symbol)
+    if cached is not None:
+        return cached
     global _yahoo_client
     if _yahoo_client is None:
         _yahoo_client = YahooClient()
@@ -938,7 +973,9 @@ async def lookup_stock(symbol: str = Path(..., max_length=15)):
     stock.quality_tier = q.tier
     stock.quality_reasons = q.reasons
 
-    return {"stock": stock.model_dump()}
+    response = {"stock": stock.model_dump()}
+    _lookup_cache_put(symbol, response)
+    return response
 
 
 def _build_response(result: ScanResult) -> dict:
