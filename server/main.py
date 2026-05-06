@@ -36,7 +36,7 @@ from server.database import (
     upsert_earnings_date, upsert_latest_price, upsert_mos_score,
 )
 from server.models import ScanResult, ScanSummary
-from server.pipeline import merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
+from server.pipeline import _safe_raw, merge_quote_and_fundamentals, parse_fundamentals, parse_quote_from_summary, run_pipeline
 from server.scorer import compute_quality_score, compute_score
 from server.yahoo_client import YahooClient, _executor, _fetch_yf_financials
 
@@ -675,21 +675,76 @@ async def scan_history():
     return get_scan_history()
 
 
+async def refresh_portfolio_prices() -> int:
+    """Fetch current prices for portfolio + watchlist via YahooClient
+    (quoteSummary endpoint) and upsert to symbol_latest_price.
+
+    Why a separate path from fill_forward_returns: that job uses
+    `yfinance.Ticker(sym).info` which Yahoo rate-limits hard from Render's
+    egress (we see "YfData failed to obtain a valid crumb" cascades). The
+    YahooClient path used by /api/lookup hits a different endpoint that
+    survives Render's rate-limit profile, so portfolio prices stay fresh
+    even when the nightly forward-fill job is being throttled.
+    """
+    global _yahoo_client
+    if _yahoo_client is None:
+        _yahoo_client = YahooClient()
+    symbols = (
+        {it["symbol"] for it in list_portfolio() if it["symbol"] != "CASH"}
+        | {it["symbol"] for it in list_watchlist()}
+    )
+    if not symbols:
+        return 0
+    logger.info(f"Refreshing prices for {len(symbols)} portfolio+watchlist symbols via quoteSummary")
+    updated = 0
+    for sym in symbols:
+        try:
+            data = await _yahoo_client.fetch_quote_summary(sym)
+            if not data:
+                continue
+            fd = data.get("financialData") or {}
+            sd = data.get("summaryDetail") or {}
+            price = (
+                _safe_raw(fd, "currentPrice")
+                or _safe_raw(sd, "regularMarketPrice")
+                or _safe_raw(fd, "regularMarketPrice")
+            )
+            prev = _safe_raw(sd, "regularMarketPreviousClose") or _safe_raw(sd, "previousClose")
+            if price is not None:
+                from server.database import upsert_latest_price
+                upsert_latest_price(sym, float(price), prev_close=float(prev) if prev else None)
+                updated += 1
+        except Exception as e:
+            logger.warning(f"Portfolio price refresh failed for {sym}: {e}")
+    logger.info(f"Portfolio price refresh complete: {updated}/{len(symbols)} updated")
+    return updated
+
+
 @app.post("/api/scan/refresh")
 async def trigger_refresh(background_tasks: BackgroundTasks):
     """Trigger a manual full refresh.
 
-    Runs both the 52W-low scan AND the price-fill job for portfolio +
-    watchlist symbols. Without the second part, the user's "Refresh
-    Data" button updates scanner data but leaves their portfolio prices
-    stale (those symbols aren't in the scan universe — they're refreshed
-    only by the nightly fill_forward_returns job).
+    Runs the 52W-low scan AND a portfolio/watchlist price refresh. The
+    portfolio path uses quoteSummary (not yfinance) so it survives Yahoo
+    rate-limiting on Render's egress — the symptom that left portfolio
+    prices stale for days when the nightly forward-fill was throttled.
     """
     if _is_refreshing:
         return {"status": "already_running", "message": "A refresh is already in progress."}
     background_tasks.add_task(_do_refresh)
-    background_tasks.add_task(fill_forward_returns)
+    background_tasks.add_task(refresh_portfolio_prices)
     return {"status": "started", "message": "Refresh started in background (scan + portfolio prices)."}
+
+
+@app.post("/api/portfolio/refresh-prices")
+async def trigger_portfolio_price_refresh(background_tasks: BackgroundTasks):
+    """Refresh portfolio + watchlist prices only — skip the 52W scan.
+
+    Useful when the user wants fresh portfolio numbers without paying
+    the 30-60s cost of the full scan refresh.
+    """
+    background_tasks.add_task(refresh_portfolio_prices)
+    return {"status": "started", "message": "Portfolio price refresh started."}
 
 
 @app.delete("/api/scan/{scan_date}")
