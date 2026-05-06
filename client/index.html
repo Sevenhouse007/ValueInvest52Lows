@@ -448,7 +448,7 @@ tbody tr.dual-signal { border-left:3px solid #a78bfa; }
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <button class="btn" onclick="openPortfolioAddForm()" style="padding:8px 16px;font-size:13px;">+ Add Position</button>
-      <button onclick="loadPortfolio()" title="Refresh prices" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;">↻ Refresh</button>
+      <button onclick="refreshPortfolioPrices(this)" title="Re-fetch live prices from Yahoo (~10s)" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;">↻ Refresh</button>
     </div>
   </div>
   <div id="portfolioCatalysts"></div>
@@ -3587,6 +3587,26 @@ function renderEarningsBadge(daysToEarnings, earningsDate) {
 // brokerage-style header (NAV, Total P&L, Day Change-equivalent, Cash).
 
 let _portfolioState = { items: [], totals: null };
+
+// Trigger a server-side price refresh, then reload the portfolio. The
+// kick-off endpoint returns immediately (background task), so we poll
+// for ~12s — long enough that ~26 quoteSummary fetches at ~300ms each
+// have time to land in the DB before we re-render. Disables the button
+// while running so double-clicks don't pile up requests.
+async function refreshPortfolioPrices(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '↻ Refreshing…'; }
+  try {
+    await fetch('/api/portfolio/refresh-prices', {method: 'POST'});
+    // Brief wait for background task to populate the DB; then reload.
+    await new Promise(r => setTimeout(r, 12000));
+    await loadPortfolio();
+  } catch (e) {
+    console.error('refresh failed', e);
+    await loadPortfolio();  // fall back to whatever's in cache
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
+  }
+}
 
 async function loadPortfolio() {
   const c = document.getElementById('portfolioContent');
