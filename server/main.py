@@ -241,7 +241,14 @@ async def fill_forward_returns():
 
         # All symbols still tracked (whether or not they have rows needing update)
         recent_symbols = set(get_recent_tracked_symbols(365))
-        all_symbols = recent_symbols | set(rows_by_symbol.keys())
+        # Portfolio + watchlist names that aren't in the scan universe (e.g.
+        # ULTA, IWM, BAC) won't appear in `recent_symbols`. Without these
+        # explicitly added, portfolio prices go stale because no other job
+        # writes to symbol_latest_price for them. Skip the synthetic CASH
+        # row — it's not a real ticker.
+        portfolio_symbols = {it["symbol"] for it in list_portfolio() if it["symbol"] != "CASH"}
+        watchlist_symbols = {it["symbol"] for it in list_watchlist()}
+        all_symbols = recent_symbols | set(rows_by_symbol.keys()) | portfolio_symbols | watchlist_symbols
 
         if not all_symbols:
             logger.info("No symbols to refresh")
@@ -670,11 +677,19 @@ async def scan_history():
 
 @app.post("/api/scan/refresh")
 async def trigger_refresh(background_tasks: BackgroundTasks):
-    """Trigger a manual full refresh."""
+    """Trigger a manual full refresh.
+
+    Runs both the 52W-low scan AND the price-fill job for portfolio +
+    watchlist symbols. Without the second part, the user's "Refresh
+    Data" button updates scanner data but leaves their portfolio prices
+    stale (those symbols aren't in the scan universe — they're refreshed
+    only by the nightly fill_forward_returns job).
+    """
     if _is_refreshing:
         return {"status": "already_running", "message": "A refresh is already in progress."}
     background_tasks.add_task(_do_refresh)
-    return {"status": "started", "message": "Refresh started in background."}
+    background_tasks.add_task(fill_forward_returns)
+    return {"status": "started", "message": "Refresh started in background (scan + portfolio prices)."}
 
 
 @app.delete("/api/scan/{scan_date}")
